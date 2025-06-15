@@ -1,10 +1,7 @@
 "use client";
 
 import SubmitButton from "@/components/shared/SubmitButton";
-import { Input } from "@/components/ui/Input";
-import { Label } from "@/components/ui/Label";
 import { signIn } from "@/lib/auth";
-import Link from "next/link";
 import { useActionState } from "react";
 
 const SignInForm = () => {

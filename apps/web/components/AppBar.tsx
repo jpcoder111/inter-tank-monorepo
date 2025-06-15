@@ -1,5 +1,5 @@
 import { getSession } from "@/lib/session";
-import SignOutButton from "./SignOutButton";
+import SignOutButton from "@/components/SignOutButton";
 import InterTankLogo from "@/public/intertank.jpeg";
 import Image from "next/image";
 

@@ -3,7 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { IoHomeOutline } from "react-icons/io5";
 import { GrDocumentVerified } from "react-icons/gr";
-import Section from "./navbar/Section";
+import Section from "@/components/navbar/Section";
 
 export default function Navbar() {
   const pathname = usePathname();

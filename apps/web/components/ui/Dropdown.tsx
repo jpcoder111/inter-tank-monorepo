@@ -1,4 +1,4 @@
-import { Label } from "./Label";
+import { Label } from "@/components/ui/Label";
 
 export interface DropdownOption {
   value: string | number;

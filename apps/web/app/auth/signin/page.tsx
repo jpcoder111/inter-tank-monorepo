@@ -1,4 +1,4 @@
-import SignInForm from "./signinForm";
+import SignInForm from "@/app/auth/signin/signinForm";
 import Image from "next/image";
 import InterTankLogo from "@/public/intertank.jpeg";
 

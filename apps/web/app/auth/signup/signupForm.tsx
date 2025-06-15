@@ -1,19 +1,23 @@
-"use client"
-import  SubmitButton from "@/components/ui/submitButton";
-import { Input, Label } from "@/components/ui";
+"use client";
+import SubmitButton from "@/components/shared/SubmitButton";
+import { Input } from "@/components/ui/Input";
+import { Label } from "@/components/ui/Label";
 import { signUp } from "@/lib/auth";
 import { useActionState } from "react";
 
 const SignUpForm = () => {
-
   const [state, action] = useActionState(signUp, undefined);
 
   return (
-    <form action={action}
-    className="flex flex-col gap-4">
+    <form action={action} className="flex flex-col gap-4">
       <div>
         <Label htmlFor="firstName">First Name</Label>
-        <Input type="text" id="firstName" name="firstName" autoComplete="given-name" />
+        <Input
+          type="text"
+          id="firstName"
+          name="firstName"
+          autoComplete="given-name"
+        />
         {state?.error?.name && (
           <div className="text-red-500 text-sm mt-1">
             {state.error.name.map((err, idx) => (
@@ -24,7 +28,12 @@ const SignUpForm = () => {
       </div>
       <div>
         <Label htmlFor="lastName">Last Name</Label>
-        <Input type="text" id="lastName" name="lastName" autoComplete="family-name" />
+        <Input
+          type="text"
+          id="lastName"
+          name="lastName"
+          autoComplete="family-name"
+        />
         {/* No error for lastName in FormState, but you can add if needed */}
       </div>
       <div>
@@ -40,7 +49,12 @@ const SignUpForm = () => {
       </div>
       <div>
         <Label htmlFor="password">Password</Label>
-        <Input type="password" id="password" name="password" autoComplete="new-password" />
+        <Input
+          type="password"
+          id="password"
+          name="password"
+          autoComplete="new-password"
+        />
         {state?.error?.password && (
           <div className="text-red-500 text-sm mt-1">
             {state.error.password.map((err, idx) => (
@@ -54,7 +68,7 @@ const SignUpForm = () => {
       )}
       <SubmitButton>Sign Up</SubmitButton>
     </form>
-  )
+  );
 };
 
 export default SignUpForm;

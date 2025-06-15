@@ -50,8 +50,14 @@ export class AuthController {
     );
   }
 
+  @Public()
   @Post('signout')
   signOut(@Request() req) {
-    return this.authService.signOut(req.user.id);
+    if (req.user) {
+      return this.authService.signOut(req.user.id);
+    }
+    return {
+      message: 'User not found',
+    };
   }
 }

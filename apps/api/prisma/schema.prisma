@@ -33,3 +33,38 @@ enum Role {
   EDITOR
   USER
 }
+
+enum FileProvider {
+  LOCAL
+  R2
+}
+
+model File {
+  id        Int          @id @default(autoincrement())
+  mimeType  String
+  size      Int
+  provider  FileProvider @default(LOCAL)
+  key       String
+  publicUrl String?
+
+  inputConfirmations  Confirmation[] @relation("InputFileConfirmation")
+  outputConfirmations Confirmation[] @relation("OutputFileConfirmation")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Confirmation {
+  id          Int  @id @default(autoincrement())
+  inputFile   File @relation("InputFileConfirmation", fields: [inputFileId], references: [id])
+  inputFileId Int
+
+  outputFile   File? @relation("OutputFileConfirmation", fields: [outputFileId], references: [id])
+  outputFileId Int?
+
+  shipper  String
+  importer String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

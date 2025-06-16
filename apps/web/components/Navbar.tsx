@@ -30,7 +30,7 @@ export default function Navbar() {
   return selectedSection === "auth" ? (
     <></>
   ) : (
-    <div className="flex flex-col flex-1 p-4 bg-blue-600 max-w-60 gap-2">
+    <div className="flex flex-col flex-1 p-4 bg-blue-700 max-w-60 gap-2">
       <Section
         icon={<IoHomeOutline />}
         text="Inicio"

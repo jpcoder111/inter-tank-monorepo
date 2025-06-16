@@ -7,7 +7,7 @@ export default async function Home() {
   return (
     <main className="flex flex-1 justify-center items-center">
       <h1 className="text-2xl font-bold">
-        Bienvenido a Inter Tank, {session?.user?.firstName}
+        Bienvenid@ a Inter Tank, {session?.user?.firstName}
       </h1>
     </main>
   );

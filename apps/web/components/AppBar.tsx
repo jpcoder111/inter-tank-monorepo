@@ -15,7 +15,7 @@ export async function AppBar() {
             <p className="text-lg font-bold">INTER TANK</p>
           </div>
           <div className="flex gap-4 items-center">
-            <p className="text-md ">Bienvenido, {session.user.firstName}</p>
+            <p className="text-md ">Bienvenid@, {session.user.firstName}</p>
             <SignOutButton />
           </div>
         </div>

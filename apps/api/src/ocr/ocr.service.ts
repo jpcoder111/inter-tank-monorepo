@@ -31,7 +31,6 @@ export class OcrService {
       // Create temporary file for pdf2pic processing
       const tempDir = path.join(process.cwd(), 'temp');
 
-      console.log(tempDir);
       if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
       }
@@ -41,7 +40,6 @@ export class OcrService {
         `${Date.now()}-${file.originalname}`,
       );
 
-      console.log(tempFilePath);
       fs.writeFileSync(tempFilePath, file.buffer);
 
       try {
@@ -75,8 +73,6 @@ export class OcrService {
         this.cleanupTempFiles([tempFilePath, result.path]);
 
         const cleanedText = text.trim();
-
-        console.log(cleanedText);
 
         this.logger.log(
           `OCR completed. Extracted ${cleanedText.length} characters`,

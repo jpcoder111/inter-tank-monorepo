@@ -129,13 +129,10 @@ export class ConfirmationService {
         doc.on('end', () => resolve(Buffer.concat(buffers)));
         doc.on('error', reject);
 
-        // Add header with logo and title
         this.addHeader(doc);
 
-        // Add main content
         this.addMainContent(doc, data, createConfirmationDto);
 
-        // Add important notes page
         this.addImportantNotesPage(doc);
 
         doc.end();
@@ -146,19 +143,6 @@ export class ConfirmationService {
   }
 
   private addHeader(doc: PDFKit.PDFDocument) {
-    const logoPath = path.join(__dirname, '../../assets/intertank.jpeg');
-
-    // Add logo at top right
-    if (fs.existsSync(logoPath)) {
-      doc.image(
-        logoPath,
-        doc.page.width - doc.page.margins.right - 99.21,
-        42.52,
-        { width: 99.21 },
-      ); // 35mm width
-    }
-
-    // Add "generated at" text
     const now = new Date();
     const generatedStr = now
       .toLocaleDateString('en-GB', {
@@ -174,21 +158,29 @@ export class ConfirmationService {
       .font('Helvetica-Oblique')
       .text(
         `Generated at ${generatedStr}`,
-        doc.page.width - doc.page.margins.right - 100,
+        doc.page.width - doc.page.margins.right - 120,
         22.68,
-        { align: 'right' },
+        { align: 'right', width: 120 },
       );
 
-    // Add main title
+    const logoPath = path.join(__dirname, '../../assets/intertank.jpeg');
+    if (fs.existsSync(logoPath)) {
+      doc.image(
+        logoPath,
+        doc.page.width - doc.page.margins.right - 99.21,
+        42.52,
+        { width: 99.21 },
+      );
+    }
+
     doc
       .fontSize(16)
       .fillColor('#000080')
       .font('Helvetica-Bold')
       .text('INTER-TANK BOOKING CONFIRMATION', 42.52, 28.35);
 
-    // Reset color and move cursor
     doc.fillColor('black');
-    doc.y = 70.87; // 25mm from top
+    doc.y = 70.87;
   }
 
   private addMainContent(
@@ -196,31 +188,20 @@ export class ConfirmationService {
     data: any,
     createConfirmationDto: CreateConfirmationDto,
   ) {
-    // Add separator line
-    doc
-      .strokeColor('#C8C8C8')
-      .lineWidth(0.5)
-      .moveTo(42.52, doc.y)
-      .lineTo(doc.page.width - 42.52, doc.y)
-      .stroke();
+    doc.y += 30;
 
-    doc.y += 14.17; // 5mm space
-
-    // Helper function to add sections
     const addSection = (
       title: string,
       fields: Array<[string, string, boolean]>,
     ) => {
-      // Section title
       doc
         .fontSize(12)
         .fillColor('#000080')
         .font('Helvetica-Bold')
         .text(title, 42.52, doc.y);
 
-      doc.y += 8;
+      doc.y += 10;
 
-      // Add separator line
       doc
         .strokeColor('#E6E6E6')
         .lineWidth(0.5)
@@ -228,24 +209,34 @@ export class ConfirmationService {
         .lineTo(doc.page.width - 42.52, doc.y)
         .stroke();
 
-      doc.y += 5.67; // 2mm space
+      doc.y += 12;
 
       fields.forEach(([label, value, highlight]) => {
+        const currentY = doc.y;
+        const labelX = 42.52;
+        const labelWidth = 150;
+        const valueX = labelX + labelWidth + 15;
+
         doc
           .fontSize(10)
           .fillColor('black')
           .font('Helvetica-Bold')
-          .text(`${label}:`, 42.52, doc.y, { width: 170.08 }); // 60mm width
+          .text(`${label}:`, labelX, currentY, {
+            width: labelWidth,
+            align: 'left',
+          });
 
         doc
           .fillColor(highlight ? 'red' : 'black')
           .font(highlight ? 'Helvetica-Bold' : 'Helvetica')
-          .text(value || '-', 212.6, doc.y); // Start after label
+          .text(value || '-', valueX, currentY, {
+            width: doc.page.width - valueX - 42.52,
+          });
 
-        doc.y += 19.84; // 7mm space
+        doc.y = currentY + 19.84;
       });
 
-      doc.y += 8.5; // 3mm extra space between sections
+      doc.y += 8.5;
     };
 
     const customerName = createConfirmationDto.customerName;
@@ -285,7 +276,6 @@ export class ConfirmationService {
       ['Incoterm', incoterm, false],
     ]);
 
-    // Add insulated container notice if needed
     if (insulated) {
       doc
         .fontSize(11)
@@ -298,7 +288,7 @@ export class ConfirmationService {
           align: 'center',
         });
 
-      doc.y += 34.02; // Space after
+      doc.y += 34.02;
     }
 
     addSection('DEPOT & TERMINAL', [
@@ -311,8 +301,7 @@ export class ConfirmationService {
       ['Stacking', 'POR CONFIRMAR', false],
     ]);
 
-    // Add footer line
-    doc.y += 28.35; // 10mm space
+    doc.y += 28.35;
     doc
       .strokeColor('#C8C8C8')
       .lineWidth(0.5)
@@ -324,7 +313,6 @@ export class ConfirmationService {
   private addImportantNotesPage(doc: PDFKit.PDFDocument) {
     doc.addPage();
 
-    // Add logo at top right
     const logoPath = path.join(__dirname, '../../assets/intertank.jpeg');
     if (fs.existsSync(logoPath)) {
       doc.image(
@@ -335,18 +323,16 @@ export class ConfirmationService {
       );
     }
 
-    doc.y = 70.87; // Start below logo
+    doc.y = 70.87;
 
-    // Section title
     doc
       .fontSize(11)
       .fillColor('black')
       .font('Helvetica-Bold')
       .text('NOTAS IMPORTANTES', 42.52, doc.y);
 
-    doc.y += 22.68; // 8mm space
+    doc.y += 30;
 
-    // Add separator line
     doc
       .strokeColor('#C8C8C8')
       .lineWidth(0.5)
@@ -354,9 +340,8 @@ export class ConfirmationService {
       .lineTo(doc.page.width - 42.52, doc.y)
       .stroke();
 
-    doc.y += 5.67; // 2mm space
+    doc.y += 5.67;
 
-    // Notes content
     const notes = [
       '- Por favor enviar datos completos de Shipper, Consignee y Notify, según detalle:',
       'Nombre de compañía, Contacto telefónico, RUT, RUC, NIT según corresponda, Email y Dirección.',

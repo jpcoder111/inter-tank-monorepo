@@ -102,7 +102,6 @@ export default function NewConfirmationPage() {
   const onSubmit = async (data: ConfirmationFormData) => {
     setIsSubmitting(true);
     try {
-      // Find the selected client
       const selectedClient = hardcodedClients.find(
         (client) => client.id === data.client
       );
@@ -111,7 +110,6 @@ export default function NewConfirmationPage() {
         throw new Error("Cliente no encontrado");
       }
 
-      // Prepare form data
       const formData = new FormData();
       formData.append("customerName", selectedClient.name);
       formData.append("customerPhone", selectedClient.phone);
@@ -121,7 +119,6 @@ export default function NewConfirmationPage() {
       formData.append("incoterm", data.incoterm);
       formData.append("isInsulated", data.isInsulated.toString());
 
-      // Add file if selected
       if (data.file && data.file.length > 0) {
         const file = data.file[0];
         if (file) {
@@ -129,10 +126,10 @@ export default function NewConfirmationPage() {
         }
       }
 
-      // Submit using server action
       const result = await submitConfirmation(formData);
 
       if (!result.success) {
+        console.log(result);
         throw new Error(result.error);
       }
 
@@ -258,7 +255,7 @@ export default function NewConfirmationPage() {
               id="file"
               accept="application/pdf"
               {...register("file", { required: "Archivo es requerido" })}
-              className="border border-gray-200 rounded-md p-2"
+              className="border border-gray-200 rounded-md p-2 w-full"
             />
             <label htmlFor="file" className="block text-sm font-medium mb-2">
               Subir archivo (PDF)

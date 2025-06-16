@@ -1,4 +1,5 @@
-import { IsBooleanString, IsNotEmpty, IsString } from 'class-validator';
+import { IsBoolean, IsNotEmpty, IsString } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export class CreateConfirmationDto {
   @IsNotEmpty()
@@ -26,6 +27,7 @@ export class CreateConfirmationDto {
   incoterm: string;
 
   @IsNotEmpty()
-  @IsBooleanString()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true')
   isInsulated: boolean;
 }

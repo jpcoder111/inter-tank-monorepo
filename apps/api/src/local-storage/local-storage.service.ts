@@ -19,9 +19,9 @@ export class LocalStorageService {
     }
   }
 
-  async uploadFile(file: Express.Multer.File) {
+  async uploadFile(file: Express.Multer.File, prefix: string = '') {
     const fileExtension = file.originalname.split('.').pop();
-    const filename = `${uuidv4()}.${fileExtension}`;
+    const filename = `${prefix}-${uuidv4()}.${fileExtension}`;
     const key = `${filename}`;
 
     const folderPath = join(this.uploadsDir);

@@ -11,6 +11,7 @@ import {
 import { Public } from '../auth/decorators/plublic.decorator';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ConfirmationService } from './confirmation.service';
+import { CreateConfirmationDto } from './dto';
 
 @Controller('confirmation')
 export class ConfirmationController {
@@ -20,6 +21,7 @@ export class ConfirmationController {
   @Post()
   @UseInterceptors(FileInterceptor('file'))
   createConfirmation(
+    @Body() createConfirmationDto: CreateConfirmationDto,
     @UploadedFile(
       new ParseFilePipe({
         validators: [
@@ -30,6 +32,9 @@ export class ConfirmationController {
     )
     file: Express.Multer.File,
   ) {
-    return this.confirmationService.createConfirmation(file);
+    return this.confirmationService.createConfirmation(
+      createConfirmationDto,
+      file,
+    );
   }
 }

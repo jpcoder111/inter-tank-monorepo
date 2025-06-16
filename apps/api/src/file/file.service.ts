@@ -20,11 +20,10 @@ export class FileService {
         : this.r2Service;
   }
 
-  async uploadFile(file: Express.Multer.File) {
-    const ocrResult = await this.ocrService.extractTextFromPdf(file);
-    const { key, url } = await this.fileStorageService.uploadFile(file);
+  async uploadFile(file: Express.Multer.File, prefix: string = '') {
+    const { key, url } = await this.fileStorageService.uploadFile(file, prefix);
 
-    const createdFile = await this.prisma.file.create({
+    const fileRecord = await this.prisma.file.create({
       data: {
         mimeType: file.mimetype,
         size: file.size,
@@ -34,13 +33,12 @@ export class FileService {
     });
 
     return {
-      createdFile,
-      ocrResult,
+      fileRecord,
     };
   }
 
-  async createFile(file: Express.Multer.File) {
-    const { key, url } = await this.fileStorageService.uploadFile(file);
+  async createFile(file: Express.Multer.File, prefix: string = '') {
+    const { key, url } = await this.fileStorageService.uploadFile(file, prefix);
 
     const createdFile = await this.prisma.file.create({
       data: {

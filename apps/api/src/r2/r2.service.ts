@@ -26,10 +26,14 @@ export class R2Service {
     this.bucketName = process.env.CLOUDFLARE_R2_BUCKET_NAME!;
   }
 
-  async uploadFile(file: Express.Multer.File, folder: string = 'uploads') {
+  async uploadFile(
+    file: Express.Multer.File,
+    prefix: string = '',
+    folder: string = 'uploads',
+  ) {
     const fileExtension = file.originalname.split('.').pop();
 
-    const key = `${folder}/${uuidv4()}.${fileExtension}`;
+    const key = `${folder}/${prefix}-${uuidv4()}.${fileExtension}`;
 
     const command = new PutObjectCommand({
       Bucket: this.bucketName,

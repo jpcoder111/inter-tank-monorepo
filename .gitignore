@@ -39,4 +39,5 @@ yarn-error.log*
 
 test_inputs
 
-uploads/*
+apps/api/uploads/*
+!apps/api/uploads/.gitkeep

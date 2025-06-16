@@ -28,7 +28,7 @@ export class FileService {
       data: {
         mimeType: file.mimetype,
         size: file.size,
-        r2Key: key,
+        key,
         publicUrl: url,
       },
     });
@@ -46,7 +46,7 @@ export class FileService {
       data: {
         mimeType: file.mimetype,
         size: file.size,
-        r2Key: key,
+        key,
         publicUrl: url,
       },
     });

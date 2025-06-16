@@ -7,6 +7,7 @@ import { AuthModule } from './auth/auth.module';
 import { UserModule } from './user/user.module';
 import { ConfigModule } from '@nestjs/config';
 import { UploaderModule } from './uploader/uploader.module';
+import { ConfirmationModule } from './confirmation/confirmation.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { UploaderModule } from './uploader/uploader.module';
       isGlobal: true,
     }),
     UploaderModule,
+    ConfirmationModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService],

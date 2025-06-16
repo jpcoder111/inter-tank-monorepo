@@ -19,12 +19,12 @@ export class LocalStorageService {
     }
   }
 
-  async uploadFile(file: Express.Multer.File, folder: string = 'uploads') {
+  async uploadFile(file: Express.Multer.File) {
     const fileExtension = file.originalname.split('.').pop();
     const filename = `${uuidv4()}.${fileExtension}`;
-    const key = `${folder}/${filename}`;
+    const key = `${filename}`;
 
-    const folderPath = join(this.uploadsDir, folder);
+    const folderPath = join(this.uploadsDir);
     if (!existsSync(folderPath)) {
       mkdirSync(folderPath, { recursive: true });
     }

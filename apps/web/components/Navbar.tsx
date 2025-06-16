@@ -41,7 +41,7 @@ export default function Navbar() {
         icon={<GrDocumentVerified />}
         text="Confirmaciones"
         selected={selectedSection === "confirmaciones"}
-        onClick={() => router.push("/confirmations")}
+        onClick={() => router.push("/confirmations/new")}
       />
     </div>
   );

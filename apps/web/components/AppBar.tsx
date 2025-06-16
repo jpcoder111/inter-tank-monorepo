@@ -10,8 +10,14 @@ export async function AppBar() {
     <>
       {session && session.user ? (
         <div className="flex items-center justify-between px-4 py-2 bg-white h-16 shadow-lg">
-          <Image src={InterTankLogo} alt="Intertank" width={60} height={60} />
-          <SignOutButton />
+          <div className="flex items-center gap-2">
+            <Image src={InterTankLogo} alt="Intertank" width={60} height={60} />
+            <p className="text-lg font-bold">INTER TANK</p>
+          </div>
+          <div className="flex gap-4 items-center">
+            <p className="text-md ">Bienvenido, {session.user.firstName}</p>
+            <SignOutButton />
+          </div>
         </div>
       ) : (
         <></>

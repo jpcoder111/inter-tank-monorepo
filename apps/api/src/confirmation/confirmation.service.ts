@@ -63,7 +63,11 @@ export class ConfirmationService {
         importer: createConfirmationDto.importer,
       },
     });
-    return confirmationPdf;
+    return {
+      file: confirmationPdf,
+      filename: `confirmation_${confirmationHash.booking_number}.pdf`,
+      contentType: 'application/pdf',
+    };
   }
 
   async createConfirmationPdf(

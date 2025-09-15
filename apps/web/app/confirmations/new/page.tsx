@@ -19,18 +19,18 @@ export default function NewConfirmationPage() {
     },
     {
       id: 2,
-      name: "Trinidad Cofré",
-      phone: "+56 9 643 589 13",
+      name: "Trinidad Cofre",
+      phone: "+56 9 6435 8913",
     },
     {
       id: 3,
       name: "Cesar Varela",
-      phone: "+56 932077575",
+      phone: "+56 9 3207 7575",
     },
     {
       id: 4,
       name: "Omar Mendez",
-      phone: "+56 97430 8360",
+      phone: "+56 9 7430 8360",
     },
     {
       id: 5,
@@ -50,7 +50,37 @@ export default function NewConfirmationPage() {
     {
       id: 8,
       name: "Paulina Villalobos",
-      phone: "NA",
+      phone: "+56 9 3107 5475",
+    },
+    {
+      id: 9,
+      name: "Catalina Aguilera",
+      phone: "+56 9 4951 7225",
+    },
+    {
+      id: 10,
+      name: "Cristian Fernández",
+      phone: "+56 9 8210 9151",
+    },
+    {
+      id: 11,
+      name: "Javiera Vergara",
+      phone: "+56 9 2225 3122",
+    },
+    {
+      id: 12,
+      name: "Valentina Leon",
+      phone: "+56 9 3276 6499",
+    },
+    {
+      id: 13,
+      name: "Barbara Godoy",
+      phone: "+56 9 9868 3984",
+    },
+    {
+      id: 14,
+      name: "Jossefa Cabanas",
+      phone: "+56 9 8898 9425",
     },
   ];
 

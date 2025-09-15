@@ -41,3 +41,5 @@ test_inputs
 
 apps/api/uploads/*
 !apps/api/uploads/.gitkeep
+
+scripts

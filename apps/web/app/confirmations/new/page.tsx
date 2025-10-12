@@ -91,6 +91,8 @@ export default function NewConfirmationPage() {
     value: client.id,
   }));
 
+  console.log("Force redeploy");
+
   const {
     control,
     handleSubmit,

@@ -1,0 +1,11 @@
+-- AlterEnum
+ALTER TYPE "Role" RENAME TO "Role_old";
+CREATE TYPE "Role" AS ENUM ('ADMIN', 'USER');
+ALTER TABLE "User" ALTER COLUMN "role" DROP DEFAULT;
+ALTER TABLE "User" ALTER COLUMN "role" TYPE "Role" USING ("role"::text::"Role");
+ALTER TABLE "User" ALTER COLUMN "role" SET DEFAULT 'USER';
+DROP TYPE "Role_old";
+
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN "isClient" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "phone" TEXT;

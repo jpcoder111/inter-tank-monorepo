@@ -25,7 +25,9 @@ export const CONFIRMATION_SYSTEM_PROMPT = `
     - El container_type es el nombre del tipo, que debe ser un de los siguientes 20'GP, 20'TK, 40'GP, 40'HQ, 40'RF
     - Si el booking tiene el formato "SCL500170600" la naviera es PIL
     - Si la naviera es PIL el terminal viene escrito bajo "Full Return CY"
+    - Para los puertos, retorna únicamente el nombre del puerto, sin su dirección.
     - Si el depot es "SERVICIOS INTEGRADOS DE TRANSPORTES LTDA.", devuelve "SITRANS"
+    - Si tienes la dirección completa del depot, considerala también dentro de la respuesta.
 `;
 
 export const CONFIRMATION_SCHEMA = z.object({

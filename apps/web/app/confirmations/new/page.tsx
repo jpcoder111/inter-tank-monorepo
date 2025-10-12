@@ -84,14 +84,11 @@ export default function NewConfirmationPage() {
     },
   ];
 
-  // Transform clients data to dropdown options format
   const clientOptions: DropdownOption[] = hardcodedClients.map((client) => ({
     id: client.id,
     label: client.name,
     value: client.id,
   }));
-
-  console.log("Force redeploy");
 
   const {
     control,
@@ -106,6 +103,7 @@ export default function NewConfirmationPage() {
       ref: "",
       incoterm: "",
       isInsulated: false,
+      isFlexitank: false,
     },
   });
 
@@ -145,11 +143,12 @@ export default function NewConfirmationPage() {
       const formData = new FormData();
       formData.append("customerName", selectedClient.name);
       formData.append("customerPhone", selectedClient.phone);
-      formData.append("shipper", data.shipper);
-      formData.append("importer", data.importer);
-      formData.append("ref", data.ref);
-      formData.append("incoterm", data.incoterm);
+      formData.append("shipper", data.shipper || "");
+      formData.append("importer", data.importer || "");
+      formData.append("ref", data.ref || "");
+      formData.append("incoterm", data.incoterm || "");
       formData.append("isInsulated", data.isInsulated.toString());
+      formData.append("isFlexitank", data.isFlexitank.toString());
 
       if (data.file && data.file.length > 0) {
         const file = data.file[0];
@@ -160,15 +159,8 @@ export default function NewConfirmationPage() {
 
       const result = await submitConfirmation(formData);
 
-      if (!result.success) {
-        console.log(result);
-        throw new Error(result.error);
-      }
-
-      // Download the response file
       downloadFile(result.fileData!, result.filename!, result.contentType!);
 
-      // Show success message
       alert("Confirmación enviada exitosamente. El archivo se ha descargado.");
     } catch (error) {
       console.error("Error submitting form:", error);
@@ -184,7 +176,7 @@ export default function NewConfirmationPage() {
     <div className="h-full flex items-center justify-center">
       <form
         onSubmit={handleSubmit(onSubmit)}
-        className="bg-white border border-gray-200 rounded-xl p-6 w-140 flex flex-col gap-12"
+        className="bg-white border border-gray-200 rounded-xl p-6 w-140 flex flex-col gap-4"
       >
         <h1 className="text-2xl font-bold text-center">Nueva Confirmación</h1>
         <div className="flex flex-col gap-4">
@@ -217,13 +209,8 @@ export default function NewConfirmationPage() {
               type="text"
               id="shipper"
               label="Shipper"
-              {...register("shipper", { required: "Shipper es requerido" })}
+              {...register("shipper")}
             />
-            {errors.shipper && (
-              <p className="text-red-500 text-sm mt-1">
-                {errors.shipper.message}
-              </p>
-            )}
           </div>
 
           <div>
@@ -231,25 +218,12 @@ export default function NewConfirmationPage() {
               type="text"
               id="importer"
               label="Importer"
-              {...register("importer", { required: "Importer es requerido" })}
+              {...register("importer")}
             />
-            {errors.importer && (
-              <p className="text-red-500 text-sm mt-1">
-                {errors.importer.message}
-              </p>
-            )}
           </div>
 
           <div>
-            <Input
-              type="text"
-              id="ref"
-              label="REF"
-              {...register("ref", { required: "REF es requerido" })}
-            />
-            {errors.ref && (
-              <p className="text-red-500 text-sm mt-1">{errors.ref.message}</p>
-            )}
+            <Input type="text" id="ref" label="REF" {...register("ref")} />
           </div>
 
           <div>
@@ -257,13 +231,8 @@ export default function NewConfirmationPage() {
               type="text"
               id="incoterm"
               label="Incoterm"
-              {...register("incoterm", { required: "Incoterm es requerido" })}
+              {...register("incoterm")}
             />
-            {errors.incoterm && (
-              <p className="text-red-500 text-sm mt-1">
-                {errors.incoterm.message}
-              </p>
-            )}
           </div>
 
           <div>
@@ -274,6 +243,21 @@ export default function NewConfirmationPage() {
                 <Checkbox
                   label="Insulado"
                   id="insulated"
+                  checked={field.value}
+                  onChange={field.onChange}
+                />
+              )}
+            />
+          </div>
+
+          <div>
+            <Controller
+              name="isFlexitank"
+              control={control}
+              render={({ field }) => (
+                <Checkbox
+                  label="Flexitank"
+                  id="flexitank"
                   checked={field.value}
                   onChange={field.onChange}
                 />
@@ -298,7 +282,11 @@ export default function NewConfirmationPage() {
           </div>
         </div>
 
-        <Button type="submit" disabled={isSubmitting} className="w-full">
+        <Button
+          type="submit"
+          disabled={isSubmitting}
+          className="w-full cursor-pointer"
+        >
           {isSubmitting ? "Enviando..." : "Solicitar confirmación"}
         </Button>
       </form>

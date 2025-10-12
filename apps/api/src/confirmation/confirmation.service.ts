@@ -32,11 +32,33 @@ export class ConfirmationService {
     );
 
     const ocrResult = await this.ocrService.extractTextFromPdf(file);
+
+    // await this.saveOcrResultToJson(file.originalname, ocrResult);
+
     const confirmationHash = await this.aiService.createMessage(
       ocrResult.text,
       CONFIRMATION_SYSTEM_PROMPT,
       CONFIRMATION_SCHEMA,
     );
+
+    if (
+      confirmationHash.container_commodity.toLowerCase() ===
+        'wine, fr grape nesoi & gr musk w alc, nov 2 liters' ||
+      confirmationHash.container_commodity.toLowerCase() ===
+        'wine; still, in containers holding 2 litres or less clase b'
+    ) {
+      confirmationHash.container_commodity = 'Wine';
+    }
+
+    if (confirmationHash.shipping_line.toLowerCase() === 'hmm') {
+      confirmationHash.shipping_line = 'HMM (HYUNDAI)';
+    }
+    if (confirmationHash.shipping_line.toLowerCase() === 'evergreen line') {
+      confirmationHash.eta = null;
+      confirmationHash.etd = null;
+    }
+
+    // await this.saveConfirmationHashToJson(file.originalname, confirmationHash);
 
     const confirmationPdf = await this.createConfirmationPdf(
       confirmationHash,
@@ -47,7 +69,7 @@ export class ConfirmationService {
       'confirmation-output',
     );
 
-    const confirmationRecord = await this.prisma.confirmation.create({
+    await this.prisma.confirmation.create({
       data: {
         inputFile: {
           connect: {
@@ -59,8 +81,8 @@ export class ConfirmationService {
             id: outputFileRecord.id,
           },
         },
-        shipper: createConfirmationDto.shipper,
-        importer: createConfirmationDto.importer,
+        shipper: createConfirmationDto.shipper || '',
+        importer: createConfirmationDto.importer || '',
       },
     });
     return {
@@ -122,7 +144,7 @@ export class ConfirmationService {
   ): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       try {
-        const doc = new PDFDocument({ margin: 42.52 }); // 15mm margins
+        const doc = new PDFDocument({ margin: 42.52 });
         const buffers: Buffer[] = [];
 
         doc.on('data', (buffer) => buffers.push(buffer));
@@ -152,6 +174,16 @@ export class ConfirmationService {
       })
       .replace(/\s/g, '-');
 
+    const logoPath = path.join(__dirname, '../../assets/intertank.jpeg');
+    if (fs.existsSync(logoPath)) {
+      doc.image(
+        logoPath,
+        doc.page.width - doc.page.margins.right - 99.21,
+        22.52,
+        { width: 99.21 },
+      );
+    }
+
     doc
       .fontSize(9)
       .fillColor('#B4B4B4')
@@ -162,16 +194,6 @@ export class ConfirmationService {
         22.68,
         { align: 'right', width: 120 },
       );
-
-    const logoPath = path.join(__dirname, '../../assets/intertank.jpeg');
-    if (fs.existsSync(logoPath)) {
-      doc.image(
-        logoPath,
-        doc.page.width - doc.page.margins.right - 99.21,
-        42.52,
-        { width: 99.21 },
-      );
-    }
 
     doc
       .fontSize(16)
@@ -188,7 +210,7 @@ export class ConfirmationService {
     data: any,
     createConfirmationDto: CreateConfirmationDto,
   ) {
-    doc.y += 30;
+    doc.y += 10;
 
     const addSection = (
       title: string,
@@ -200,7 +222,7 @@ export class ConfirmationService {
         .font('Helvetica-Bold')
         .text(title, 42.52, doc.y);
 
-      doc.y += 10;
+      doc.y += 5;
 
       doc
         .strokeColor('#E6E6E6')
@@ -209,7 +231,7 @@ export class ConfirmationService {
         .lineTo(doc.page.width - 42.52, doc.y)
         .stroke();
 
-      doc.y += 12;
+      doc.y += 8;
 
       fields.forEach(([label, value, highlight]) => {
         const currentY = doc.y;
@@ -234,6 +256,11 @@ export class ConfirmationService {
           });
 
         doc.y = currentY + 19.84;
+
+        // Add extra gap after Depot field
+        if (label === 'Depot') {
+          doc.y += 10;
+        }
       });
 
       doc.y += 8.5;
@@ -246,6 +273,7 @@ export class ConfirmationService {
     const ref = createConfirmationDto.ref;
     const incoterm = createConfirmationDto.incoterm;
     const insulated = createConfirmationDto.isInsulated;
+    const flexitank = createConfirmationDto.isFlexitank;
 
     addSection('CONTACT', [
       ['Customer', customerName, false],
@@ -288,7 +316,22 @@ export class ConfirmationService {
           align: 'center',
         });
 
-      doc.y += 34.02;
+      doc.y += 10;
+    }
+
+    if (flexitank) {
+      doc
+        .fontSize(11)
+        .fillColor('black')
+        .font('Helvetica-Bold')
+        .rect(42.52, doc.y, doc.page.width - 85.04, 28.35)
+        .fillAndStroke('#FFD4B4', '#FFD4B4')
+        .fillColor('black')
+        .text('FLEXITANK', 42.52, doc.y + 9, {
+          align: 'center',
+        });
+
+      doc.y += 10;
     }
 
     addSection('DEPOT & TERMINAL', [
@@ -318,7 +361,7 @@ export class ConfirmationService {
       doc.image(
         logoPath,
         doc.page.width - doc.page.margins.right - 99.21,
-        42.52,
+        22.52,
         { width: 99.21 },
       );
     }
@@ -331,7 +374,7 @@ export class ConfirmationService {
       .font('Helvetica-Bold')
       .text('NOTAS IMPORTANTES', 42.52, doc.y);
 
-    doc.y += 30;
+    doc.y += 10;
 
     doc
       .strokeColor('#C8C8C8')
@@ -431,6 +474,62 @@ export class ConfirmationService {
       }
     } catch (error) {
       return dateStr;
+    }
+  }
+
+  private async saveOcrResultToJson(
+    originalFilename: string,
+    ocrResult: any,
+  ): Promise<void> {
+    try {
+      const outputsDir = path.join(__dirname, '../../../../outputs');
+      if (!fs.existsSync(outputsDir)) {
+        fs.mkdirSync(outputsDir, { recursive: true });
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+      const filenameWithoutExt = path.parse(originalFilename).name;
+
+      const txtFilename = `OCR_${filenameWithoutExt}_${timestamp}.txt`;
+      const txtFilePath = path.join(outputsDir, txtFilename);
+
+      const textContent = ocrResult.text || JSON.stringify(ocrResult, null, 2);
+
+      fs.writeFileSync(txtFilePath, textContent, 'utf-8');
+
+      console.log(`OCR result saved to: ${txtFilePath}`);
+    } catch (error) {
+      console.error('Error saving OCR result to text file:', error);
+    }
+  }
+
+  private async saveConfirmationHashToJson(
+    originalFilename: string,
+    confirmationHash: z.infer<typeof CONFIRMATION_SCHEMA>,
+  ): Promise<void> {
+    try {
+      const outputsDir = path.join(__dirname, '../../../../outputs');
+      if (!fs.existsSync(outputsDir)) {
+        fs.mkdirSync(outputsDir, { recursive: true });
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+      const filenameWithoutExt = path.parse(originalFilename).name;
+
+      const jsonFilename = `${filenameWithoutExt}_${timestamp}.json`;
+      const jsonFilePath = path.join(outputsDir, jsonFilename);
+
+      fs.writeFileSync(
+        jsonFilePath,
+        JSON.stringify(confirmationHash, null, 2),
+        'utf-8',
+      );
+
+      console.log(`Confirmation hash saved to: ${jsonFilePath}`);
+    } catch (error) {
+      console.error('Error saving confirmation hash to JSON:', error);
     }
   }
 }

@@ -4,17 +4,17 @@ import { BACKEND_URL } from "@/lib/constants";
 
 export interface ConfirmationFormData {
   client: string | number;
-  shipper: string;
-  importer: string;
-  ref: string;
-  incoterm: string;
+  shipper?: string;
+  importer?: string;
+  ref?: string;
+  incoterm?: string;
   isInsulated: boolean;
+  isFlexitank: boolean;
   file: FileList;
 }
 
 export async function submitConfirmation(formData: FormData) {
   try {
-    // Submit to API
     const response = await fetch(`${BACKEND_URL!}/confirmation`, {
       method: "POST",
       body: formData,
@@ -24,7 +24,6 @@ export async function submitConfirmation(formData: FormData) {
       throw new Error(`Error: ${response.status} ${response.statusText}`);
     }
 
-    // Get the response blob and filename
     const blob = await response.blob();
     const contentDisposition = response.headers.get("content-disposition");
     let filename = "confirmation-response.pdf";
@@ -36,7 +35,6 @@ export async function submitConfirmation(formData: FormData) {
       }
     }
 
-    // Convert blob to base64 for client-side handling
     const arrayBuffer = await blob.arrayBuffer();
     const base64 = Buffer.from(arrayBuffer).toString("base64");
 

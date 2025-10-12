@@ -2,7 +2,6 @@
 
 import { cookies } from "next/headers";
 import { jwtVerify, SignJWT } from "jose";
-import { redirect } from "next/navigation";
 
 export type Session = {
   user: {
@@ -51,7 +50,7 @@ export async function getSession() {
     return payload as Session;
   } catch (error) {
     console.error(error);
-    redirect("/auth/signin");
+    return null;
   }
 }
 

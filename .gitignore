@@ -43,3 +43,7 @@ apps/api/uploads/*
 !apps/api/uploads/.gitkeep
 
 scripts
+
+outputs
+
+apps/api/temp

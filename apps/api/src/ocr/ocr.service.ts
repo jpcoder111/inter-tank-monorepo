@@ -11,7 +11,6 @@ export class OcrService {
 
   async extractTextFromPdf(file: Express.Multer.File): Promise<OcrResponseDto> {
     try {
-      // Validate file
       if (!file || !file.buffer) {
         return {
           success: false,
@@ -28,7 +27,6 @@ export class OcrService {
 
       this.logger.log(`Processing PDF file: ${file.originalname}`);
 
-      // Create temporary file for pdf2pic processing
       const tempDir = path.join(process.cwd(), 'temp');
 
       if (!fs.existsSync(tempDir)) {
@@ -53,29 +51,54 @@ export class OcrService {
           height: 2048,
         });
 
-        // Convert first page (you can modify this to convert all pages)
-        const result = await convert(1, { responseType: 'image' });
+        // Convert all pages
+        const imagePaths: string[] = [];
+        let pageNum = 1;
+        let hasMorePages = true;
 
-        if (!result || !result.path) {
-          throw new Error('Failed to convert PDF to image');
+        // Convert each page until we run out of pages
+        while (hasMorePages) {
+          try {
+            const result = await convert(pageNum, { responseType: 'image' });
+            if (result && result.path) {
+              imagePaths.push(result.path);
+              this.logger.log(`Converted page ${pageNum}`);
+              pageNum++;
+            } else {
+              hasMorePages = false;
+            }
+          } catch (error) {
+            // No more pages to convert
+            hasMorePages = false;
+          }
         }
 
-        // Perform OCR on the converted image
-        const worker = await createWorker('eng');
+        if (imagePaths.length === 0) {
+          throw new Error('Failed to convert PDF to images');
+        }
 
-        this.logger.log('Performing OCR on converted image...');
-        const {
-          data: { text },
-        } = await worker.recognize(result.path);
+        this.logger.log(`Converted ${imagePaths.length} pages`);
+
+        // Perform OCR on all converted images
+        const worker = await createWorker('eng');
+        const allText: string[] = [];
+
+        for (let i = 0; i < imagePaths.length; i++) {
+          this.logger.log(`Performing OCR on page ${i + 1}...`);
+          const {
+            data: { text },
+          } = await worker.recognize(imagePaths[i]);
+          allText.push(text.trim());
+        }
 
         await worker.terminate();
 
-        this.cleanupTempFiles([tempFilePath, result.path]);
+        this.cleanupTempFiles([tempFilePath, ...imagePaths]);
 
-        const cleanedText = text.trim();
+        const cleanedText = allText.join('\n\n--- Page Break ---\n\n');
 
         this.logger.log(
-          `OCR completed. Extracted ${cleanedText.length} characters`,
+          `OCR completed. Extracted ${cleanedText.length} characters from ${imagePaths.length} pages`,
         );
 
         return {

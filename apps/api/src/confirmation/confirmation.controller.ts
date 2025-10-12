@@ -41,13 +41,11 @@ export class ConfirmationController {
       file,
     );
 
-    // Set response headers for file download
     res.set({
       'Content-Type': result.contentType,
       'Content-Disposition': `attachment; filename="${result.filename}"`,
     });
 
-    // Return the file buffer as a streamable file
     return new StreamableFile(result.file.buffer);
   }
 }

@@ -1,4 +1,4 @@
-import { IsBoolean, IsNotEmpty, IsString } from 'class-validator';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 export class CreateConfirmationDto {
@@ -10,24 +10,29 @@ export class CreateConfirmationDto {
   @IsString()
   customerPhone: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  shipper: string;
+  shipper?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  importer: string;
+  importer?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  ref: string;
+  ref?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  incoterm: string;
+  incoterm?: string;
 
   @IsNotEmpty()
   @IsBoolean()
   @Transform(({ value }) => value === 'true')
   isInsulated: boolean;
+
+  @IsNotEmpty()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true')
+  isFlexitank: boolean;
 }

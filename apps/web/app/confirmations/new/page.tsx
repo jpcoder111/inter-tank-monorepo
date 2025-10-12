@@ -104,6 +104,7 @@ export default function NewConfirmationPage() {
       incoterm: "",
       isInsulated: false,
       isFlexitank: false,
+      isTermografos: false,
     },
   });
 
@@ -149,6 +150,7 @@ export default function NewConfirmationPage() {
       formData.append("incoterm", data.incoterm || "");
       formData.append("isInsulated", data.isInsulated.toString());
       formData.append("isFlexitank", data.isFlexitank.toString());
+      formData.append("isTermografos", data.isTermografos.toString());
 
       if (data.file && data.file.length > 0) {
         const file = data.file[0];
@@ -258,6 +260,21 @@ export default function NewConfirmationPage() {
                 <Checkbox
                   label="Flexitank"
                   id="flexitank"
+                  checked={field.value}
+                  onChange={field.onChange}
+                />
+              )}
+            />
+          </div>
+
+          <div>
+            <Controller
+              name="isTermografos"
+              control={control}
+              render={({ field }) => (
+                <Checkbox
+                  label="Termógrafos"
+                  id="termografos"
                   checked={field.value}
                   onChange={field.onChange}
                 />

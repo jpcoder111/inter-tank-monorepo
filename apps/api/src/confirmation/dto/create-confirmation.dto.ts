@@ -35,4 +35,9 @@ export class CreateConfirmationDto {
   @IsBoolean()
   @Transform(({ value }) => value === 'true')
   isFlexitank: boolean;
+
+  @IsNotEmpty()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true')
+  isTermografos: boolean;
 }

@@ -10,6 +10,7 @@ export interface ConfirmationFormData {
   incoterm?: string;
   isInsulated: boolean;
   isFlexitank: boolean;
+  isTermografos: boolean;
   file: FileList;
 }
 

@@ -274,6 +274,7 @@ export class ConfirmationService {
     const incoterm = createConfirmationDto.incoterm;
     const insulated = createConfirmationDto.isInsulated;
     const flexitank = createConfirmationDto.isFlexitank;
+    const termografos = createConfirmationDto.isTermografos;
 
     addSection('CONTACT', [
       ['Customer', customerName, false],
@@ -309,14 +310,14 @@ export class ConfirmationService {
         .fontSize(11)
         .fillColor('black')
         .font('Helvetica-Bold')
-        .rect(42.52, doc.y, doc.page.width - 85.04, 28.35)
+        .rect(42.52, doc.y, doc.page.width - 85.04, 22)
         .fillAndStroke('#FFFFB4', '#FFFFB4')
         .fillColor('black')
-        .text('CONTENEDOR(ES) INSULADO(S)', 42.52, doc.y + 9, {
+        .text('CONTENEDOR(ES) INSULADO(S)', 42.52, doc.y + 6, {
           align: 'center',
         });
 
-      doc.y += 10;
+      doc.y += 8;
     }
 
     if (flexitank) {
@@ -324,14 +325,29 @@ export class ConfirmationService {
         .fontSize(11)
         .fillColor('black')
         .font('Helvetica-Bold')
-        .rect(42.52, doc.y, doc.page.width - 85.04, 28.35)
+        .rect(42.52, doc.y, doc.page.width - 85.04, 22)
         .fillAndStroke('#FFD4B4', '#FFD4B4')
         .fillColor('black')
-        .text('FLEXITANK', 42.52, doc.y + 9, {
+        .text('FLEXITANK', 42.52, doc.y + 6, {
           align: 'center',
         });
 
-      doc.y += 10;
+      doc.y += 8;
+    }
+
+    if (termografos) {
+      doc
+        .fontSize(11)
+        .fillColor('black')
+        .font('Helvetica-Bold')
+        .rect(42.52, doc.y, doc.page.width - 85.04, 22)
+        .fillAndStroke('#B4FFB4', '#B4FFB4')
+        .fillColor('black')
+        .text('TERMÓGRAFOS', 42.52, doc.y + 6, {
+          align: 'center',
+        });
+
+      doc.y += 8;
     }
 
     addSection('DEPOT & TERMINAL', [

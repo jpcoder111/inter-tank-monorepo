@@ -42,18 +42,25 @@ export class ConfirmationService {
     );
 
     if (
-      confirmationHash.container_commodity.toLowerCase() ===
+      typeof confirmationHash.container_commodity === 'string' &&
+      (confirmationHash.container_commodity.toLowerCase() ===
         'wine, fr grape nesoi & gr musk w alc, nov 2 liters' ||
-      confirmationHash.container_commodity.toLowerCase() ===
-        'wine; still, in containers holding 2 litres or less clase b'
+        confirmationHash.container_commodity.toLowerCase() ===
+          'wine; still, in containers holding 2 litres or less clase b')
     ) {
       confirmationHash.container_commodity = 'Wine';
     }
 
-    if (confirmationHash.shipping_line.toLowerCase() === 'hmm') {
+    if (
+      typeof confirmationHash.shipping_line === 'string' &&
+      confirmationHash.shipping_line.toLowerCase() === 'hmm'
+    ) {
       confirmationHash.shipping_line = 'HMM (HYUNDAI)';
     }
-    if (confirmationHash.shipping_line.toLowerCase() === 'evergreen line') {
+    if (
+      typeof confirmationHash.shipping_line === 'string' &&
+      confirmationHash.shipping_line.toLowerCase() === 'evergreen line'
+    ) {
       confirmationHash.eta = null;
       confirmationHash.etd = null;
     }
@@ -449,6 +456,9 @@ export class ConfirmationService {
   }
 
   private customerEmail(customerName: string): string {
+    if (typeof customerName !== 'string') {
+      return '@inter-tank.com';
+    }
     return customerName.toLowerCase().split(' ').join('.') + '@inter-tank.com';
   }
 

@@ -2,7 +2,6 @@
 
 import { authFetch } from "./authFetch";
 import { BACKEND_URL } from "./constants";
-import { getSession } from "./session";
 
 export const getProfile = async () => {
   const response = await authFetch(`${BACKEND_URL}/auth/protected`);

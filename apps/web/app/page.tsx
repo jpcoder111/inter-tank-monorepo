@@ -1,5 +1,4 @@
 import { getSession } from "@/lib/session";
-import ProfilePage from "./profile/page";
 
 export default async function Home() {
   const session = await getSession();

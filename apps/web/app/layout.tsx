@@ -1,5 +1,3 @@
-import type { Metadata } from "next";
-import localFont from "next/font/local";
 import "./globals.css";
 import { AppBar } from "@/components/AppBar";
 import Navbar from "@/components/Navbar";

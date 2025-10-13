@@ -30,13 +30,12 @@ export default function NewConfirmationPage() {
     fetchUsers();
   }, []);
 
-  const clientOptions: DropdownOption[] = users
-    .filter((user) => user.firstName && user.lastName && user.phone)
-    .map((user) => ({
-      id: user.id,
-      label: `${user.firstName} ${user.lastName}`,
-      value: user.id,
-    }));
+  const clientOptions: DropdownOption[] = users.map((user) => ({
+    id: user.id,
+    label:
+      `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email,
+    value: user.id,
+  }));
 
   const {
     control,

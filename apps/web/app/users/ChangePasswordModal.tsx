@@ -69,8 +69,8 @@ export default function ChangePasswordModal({
                 {...register("newPassword", {
                   required: "Nueva contraseña es requerida",
                   minLength: {
-                    value: 6,
-                    message: "La contraseña debe tener al menos 6 caracteres",
+                    value: 8,
+                    message: "La contraseña debe tener al menos 8 caracteres",
                   },
                 })}
               />

@@ -1,10 +1,12 @@
-import { getSession } from "@/lib/session";
+"use client";
+
 import SignOutButton from "@/components/SignOutButton";
 import InterTankLogo from "@/public/intertank.jpeg";
 import Image from "next/image";
+import { useSession } from "@/providers/SessionProvider";
 
-export async function AppBar() {
-  const session = await getSession();
+export function AppBar() {
+  const { session } = useSession();
 
   return (
     <>

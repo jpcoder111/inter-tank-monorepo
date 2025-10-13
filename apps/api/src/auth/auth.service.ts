@@ -44,9 +44,19 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    return { id: user.id, firstName: user.firstName, lastName: user.lastName };
+    return {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+    };
   }
-  async login(userId: number, firstName?: string, lastName?: string) {
+  async login(
+    userId: number,
+    firstName?: string,
+    lastName?: string,
+    role?: string,
+  ) {
     const { accessToken, refreshToken } = await this.generateTokens(userId);
     const hashedRefreshToken = await hash(refreshToken);
     await this.userService.updateHashRefreshToken(userId, hashedRefreshToken);
@@ -55,6 +65,7 @@ export class AuthService {
       id: userId,
       firstName,
       lastName,
+      role,
       accessToken,
       refreshToken,
     };
@@ -96,17 +107,27 @@ export class AuthService {
     if (!isRefreshTokenMatches)
       throw new UnauthorizedException('Invalid refresh token');
 
-    const currentUser = { id: user.id };
+    const currentUser = {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+    };
 
     return currentUser;
   }
 
-  async refreshToken(userId: number, firstName?: string, lastName?: string) {
+  async refreshToken(
+    userId: number,
+    firstName?: string,
+    lastName?: string,
+    role?: string,
+  ) {
     const { accessToken, refreshToken } = await this.generateTokens(userId);
     const hashedRefreshToken = await hash(refreshToken);
     await this.userService.updateHashRefreshToken(userId, hashedRefreshToken);
 
-    return { id: userId, firstName, lastName, accessToken, refreshToken };
+    return { id: userId, firstName, lastName, role, accessToken, refreshToken };
   }
 
   async signOut(userId: number) {

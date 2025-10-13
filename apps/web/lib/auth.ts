@@ -64,6 +64,13 @@ export async function signIn(
   });
 
   if (response.ok) {
+    const contentType = response.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      return {
+        message: "Invalid response format - expected JSON",
+      };
+    }
+
     const result = await response.json();
 
     await createSession({
@@ -71,11 +78,14 @@ export async function signIn(
         id: result.id,
         firstName: result.firstName,
         lastName: result.lastName,
+        role: result.role,
       },
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
     });
-    redirect("/");
+
+    // Redirect with a cache busting parameter to force session refresh
+    redirect("/?refresh=" + Date.now());
   } else {
     return {
       message: "Sign in failed",
@@ -96,6 +106,11 @@ export const refreshToken = async (oldRefreshToken: string) => {
     if (!response.ok) {
       console.log(response);
       throw new Error("Failed to refresh token");
+    }
+
+    const contentType = response.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      throw new Error("Invalid response format - expected JSON");
     }
 
     const { accessToken, refreshToken } = await response.json();

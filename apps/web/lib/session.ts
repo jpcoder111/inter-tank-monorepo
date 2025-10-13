@@ -8,6 +8,7 @@ export type Session = {
     id: string;
     firstName: string;
     lastName: string;
+    role?: string;
   };
   accessToken: string;
   refreshToken: string;

@@ -30,6 +30,7 @@ export class AuthController {
       req.user.id,
       req.user.firstName,
       req.user.lastName,
+      req.user.role,
     );
   }
 
@@ -47,6 +48,7 @@ export class AuthController {
       req.user.id,
       req.user.firstName,
       req.user.lastName,
+      req.user.role,
     );
   }
 

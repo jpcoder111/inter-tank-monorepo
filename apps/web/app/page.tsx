@@ -1,7 +1,21 @@
-import { getSession } from "@/lib/session";
+"use client";
 
-export default async function Home() {
-  const session = await getSession();
+import { useSession } from "@/providers/SessionProvider";
+import { useEffect } from "react";
+import { useSearchParams } from "next/navigation";
+
+export default function Home() {
+  const { session, refreshSession } = useSession();
+  const searchParams = useSearchParams();
+
+  // Refresh session if coming from login redirect
+  useEffect(() => {
+    if (searchParams.get("refresh")) {
+      refreshSession();
+      // Clean up URL
+      window.history.replaceState({}, "", "/");
+    }
+  }, [searchParams, refreshSession]);
 
   return (
     <main className="flex flex-1 justify-center items-center">

@@ -2,93 +2,41 @@
 
 import { Input } from "@/components/ui/Input";
 import { Dropdown, DropdownOption } from "@/components/ui/Dropdown";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { useForm, Controller } from "react-hook-form";
 import { Button } from "@/components/ui/Button";
 import { submitConfirmation, ConfirmationFormData } from "@/lib/confirmations";
+import { getUsers, User } from "@/lib/users";
 
 export default function NewConfirmationPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [users, setUsers] = useState<User[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const hardcodedClients = [
-    {
-      id: 1,
-      name: "Alan Quezada",
-      phone: "+569 7516 4214",
-    },
-    {
-      id: 2,
-      name: "Trinidad Cofre",
-      phone: "+56 9 6435 8913",
-    },
-    {
-      id: 3,
-      name: "Cesar Varela",
-      phone: "+56 9 3207 7575",
-    },
-    {
-      id: 4,
-      name: "Omar Mendez",
-      phone: "+56 9 7430 8360",
-    },
-    {
-      id: 5,
-      name: "Constanza Toro",
-      phone: "+56 9 7922 6733",
-    },
-    {
-      id: 6,
-      name: "Michael Campos",
-      phone: "+56 9 22071357",
-    },
-    {
-      id: 7,
-      name: "Solange Almendra",
-      phone: "+56 9 3524 6735",
-    },
-    {
-      id: 8,
-      name: "Paulina Villalobos",
-      phone: "+56 9 3107 5475",
-    },
-    {
-      id: 9,
-      name: "Catalina Aguilera",
-      phone: "+56 9 4951 7225",
-    },
-    {
-      id: 10,
-      name: "Cristian Fernández",
-      phone: "+56 9 8210 9151",
-    },
-    {
-      id: 11,
-      name: "Javiera Vergara",
-      phone: "+56 9 2225 3122",
-    },
-    {
-      id: 12,
-      name: "Valentina Leon",
-      phone: "+56 9 3276 6499",
-    },
-    {
-      id: 13,
-      name: "Barbara Godoy",
-      phone: "+56 9 9868 3984",
-    },
-    {
-      id: 14,
-      name: "Jossefa Cabanas",
-      phone: "+56 9 8898 9425",
-    },
-  ];
+  useEffect(() => {
+    const fetchUsers = async () => {
+      try {
+        const fetchedUsers = await getUsers();
+        setUsers(fetchedUsers);
+      } catch (error) {
+        console.error("Error loading users:", error);
+        alert("Error al cargar los usuarios");
+      } finally {
+        setIsLoading(false);
+      }
+    };
 
-  const clientOptions: DropdownOption[] = hardcodedClients.map((client) => ({
-    id: client.id,
-    label: client.name,
-    value: client.id,
-  }));
+    fetchUsers();
+  }, []);
+
+  const clientOptions: DropdownOption[] = users
+    .filter((user) => user.firstName && user.lastName && user.phone)
+    .map((user) => ({
+      id: user.id,
+      label: `${user.firstName} ${user.lastName}`,
+      value: user.id,
+    }));
 
   const {
     control,
@@ -133,17 +81,18 @@ export default function NewConfirmationPage() {
   const onSubmit = async (data: ConfirmationFormData) => {
     setIsSubmitting(true);
     try {
-      const selectedClient = hardcodedClients.find(
-        (client) => client.id === data.client
-      );
+      const selectedUser = users.find((user) => user.id === data.client);
 
-      if (!selectedClient) {
+      if (!selectedUser) {
         throw new Error("Cliente no encontrado");
       }
 
+      const customerName = `${selectedUser.firstName} ${selectedUser.lastName}`;
+      const customerPhone = selectedUser.phone || "";
+
       const formData = new FormData();
-      formData.append("customerName", selectedClient.name);
-      formData.append("customerPhone", selectedClient.phone);
+      formData.append("customerName", customerName);
+      formData.append("customerPhone", customerPhone);
       formData.append("shipper", data.shipper || "");
       formData.append("importer", data.importer || "");
       formData.append("ref", data.ref || "");
@@ -173,6 +122,14 @@ export default function NewConfirmationPage() {
       setIsSubmitting(false);
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <p>Cargando usuarios...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex items-center justify-center">

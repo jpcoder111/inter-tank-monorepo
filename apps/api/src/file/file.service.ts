@@ -14,13 +14,16 @@ export class FileService {
     private readonly prisma: PrismaService,
     private readonly ocrService: OcrService,
   ) {
-    this.fileStorageService =
-      process.env.NODE_ENV === 'development'
-        ? this.localStorageService
-        : this.r2Service;
+    // this.fileStorageService =
+    //   process.env.NODE_ENV === 'development'
+    //     ? this.localStorageService
+    //     : this.r2Service;
+
+    this.fileStorageService = this.r2Service;
   }
 
   async uploadFile(file: Express.Multer.File, prefix: string = '') {
+    console.log('uploadFile', file, prefix);
     const { key, url } = await this.fileStorageService.uploadFile(file, prefix);
 
     const fileRecord = await this.prisma.file.create({

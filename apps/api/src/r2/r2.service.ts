@@ -44,6 +44,8 @@ export class R2Service {
       },
     });
 
+    console.log('command', command);
+
     await this.s3Client.send(command);
 
     const getCommand = new GetObjectCommand({

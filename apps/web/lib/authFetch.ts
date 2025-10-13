@@ -1,6 +1,5 @@
 import { refreshToken } from "./auth";
-import { getSession, deleteSession } from "./session";
-import { redirect } from "next/navigation";
+import { getSession } from "./session";
 
 export interface FetchOptions extends RequestInit {
   headers?: Record<string, string>;
@@ -23,42 +22,34 @@ export const authFetch = async (
 
   // Only handle 401 Unauthorized (authentication failures)
   if (response.status === 401) {
-    // Try to refresh the token
-    if (!session?.refreshToken) {
-      // No refresh token - this is a genuine auth failure
-      await deleteSession();
-      redirect("/auth/signin");
-    }
-
-    try {
+    // Try to refresh the token if we have a refresh token
+    if (session?.refreshToken) {
+      console.log("Attempting to refresh token...");
       const newAccessToken = await refreshToken(session.refreshToken);
 
-      if (!newAccessToken) {
-        // Failed to refresh - genuine auth failure
-        await deleteSession();
-        redirect("/auth/signin");
+      if (newAccessToken) {
+        console.log("Token refreshed successfully, retrying request...");
+        options.headers = {
+          ...options.headers,
+          Authorization: `Bearer ${newAccessToken}`,
+        };
+
+        response = await fetch(url, options);
+      } else {
+        // Token refresh failed, redirect to login
+        console.log("Token refresh failed, redirecting to login...");
+        if (typeof window !== "undefined") {
+          window.location.href = "/auth/signin";
+        }
       }
-
-      options.headers = {
-        ...options.headers,
-        Authorization: `Bearer ${newAccessToken}`,
-      };
-
-      response = await fetch(url, options);
-
-      // If still 401 after refresh, it's a genuine auth failure
-      if (response.status === 401) {
-        await deleteSession();
-        redirect("/auth/signin");
+    } else {
+      // No refresh token available, redirect to login
+      console.log("No refresh token available, redirecting to login...");
+      if (typeof window !== "undefined") {
+        window.location.href = "/auth/signin";
       }
-    } catch (error) {
-      // Token refresh failed - genuine auth failure
-      await deleteSession();
-      redirect("/auth/signin");
     }
   }
 
-  // For all other errors (CORS, network, 404, 500, etc.), just return the response
-  // The calling code can handle these errors without logging out the user
   return response;
 };

@@ -1,6 +1,9 @@
 "use server";
 
 import { BACKEND_URL } from "@/lib/constants";
+import { getSession } from "@/lib/session";
+import { refreshToken } from "@/lib/auth";
+import { redirect } from "next/navigation";
 
 export interface ConfirmationFormData {
   client: string | number;
@@ -16,10 +19,40 @@ export interface ConfirmationFormData {
 
 export async function submitConfirmation(formData: FormData) {
   try {
-    const response = await fetch(`${BACKEND_URL!}/confirmation`, {
+    const session = await getSession();
+    if (!session) {
+      redirect("/auth/signin");
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${session.accessToken}`,
+    };
+
+    let response = await fetch(`${BACKEND_URL!}/confirmation`, {
       method: "POST",
+      headers,
       body: formData,
     });
+
+    // Handle 401 by attempting token refresh
+    if (response.status === 401 && session.refreshToken) {
+      console.log("Attempting to refresh token...");
+      const newAccessToken = await refreshToken(session.refreshToken);
+
+      if (newAccessToken) {
+        console.log("Token refreshed successfully, retrying request...");
+        headers.Authorization = `Bearer ${newAccessToken}`;
+
+        response = await fetch(`${BACKEND_URL!}/confirmation`, {
+          method: "POST",
+          headers,
+          body: formData,
+        });
+      } else {
+        console.log("Token refresh failed, redirecting to login...");
+        redirect("/auth/signin");
+      }
+    }
 
     if (!response.ok) {
       throw new Error(`Error: ${response.status} ${response.statusText}`);

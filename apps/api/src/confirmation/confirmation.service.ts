@@ -32,6 +32,7 @@ export class ConfirmationService {
     );
 
     const ocrResult = await this.ocrService.extractTextFromPdf(file);
+    console.log('ocrResult', ocrResult);
 
     // await this.saveOcrResultToJson(file.originalname, ocrResult);
 
@@ -40,6 +41,8 @@ export class ConfirmationService {
       CONFIRMATION_SYSTEM_PROMPT,
       CONFIRMATION_SCHEMA,
     );
+
+    console.log('confirmationHash', confirmationHash);
 
     if (
       typeof confirmationHash.container_commodity === 'string' &&

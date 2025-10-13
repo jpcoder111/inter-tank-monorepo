@@ -41,6 +41,8 @@ export class ConfirmationController {
       file,
     );
 
+    console.log('result', result);
+
     res.set({
       'Content-Type': result.contentType,
       'Content-Disposition': `attachment; filename="${result.filename}"`,

@@ -26,8 +26,6 @@ export class UserController {
   }
 
   @Get()
-  @UseGuards(RolesGuard)
-  @Roles(Role.ADMIN)
   async findAll() {
     const users = await this.userService.findAll();
     return users.filter((user) => user.role !== Role.ADMIN);

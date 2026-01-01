@@ -1,20 +1,20 @@
 import {
-  Controller,
-  Post,
   Body,
-  Get,
+  Controller,
   Delete,
+  Get,
   Param,
-  UseGuards,
   Patch,
+  Post,
+  UseGuards,
 } from '@nestjs/common';
-import { UserService } from './user.service';
+import { Roles } from 'src/auth/decorators/roles.decorator';
+import { RolesGuard } from 'src/auth/guards/roles/roles.guard';
+import { Role } from '../../generated/prisma';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
-import { ChangePasswordDto } from './dto/change-password.dto';
-import { RolesGuard } from 'src/auth/guards/roles/roles.guard';
-import { Roles } from 'src/auth/decorators/roles.decorator';
-import { Role } from '../../generated/prisma';
+import { UserService } from './user.service';
 
 @Controller('user')
 export class UserController {

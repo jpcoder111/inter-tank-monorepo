@@ -1,5 +1,4 @@
-import { BACKEND_URL } from "@/lib/constants";
-import { authFetch } from "@/lib/authFetch";
+import { api } from "@/lib/api";
 
 export interface User {
   id: number;
@@ -14,47 +13,12 @@ export interface User {
 }
 
 export async function getUsers(): Promise<User[]> {
-  try {
-    const response = await authFetch(`${BACKEND_URL!}/user`, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Error: ${response.status} ${response.statusText}`);
-    }
-
-    const contentType = response.headers.get("content-type");
-    if (!contentType || !contentType.includes("application/json")) {
-      throw new Error("Invalid response format - expected JSON");
-    }
-
-    const users = await response.json();
-    return users;
-  } catch (error) {
-    console.error("Error fetching users:", error);
-    throw error;
-  }
+  const response = await api.get<User[]>("/user");
+  return response.data;
 }
 
 export async function deleteUser(id: number): Promise<void> {
-  try {
-    const response = await authFetch(`${BACKEND_URL}/user/${id}`, {
-      method: "DELETE",
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Error: ${response.status} ${response.statusText}`);
-    }
-  } catch (error) {
-    console.error("Error deleting user:", error);
-    throw error;
-  }
+  await api.delete(`/user/${id}`);
 }
 
 export interface CreateUserData {
@@ -76,100 +40,27 @@ export interface ChangePasswordData {
 }
 
 export async function createUser(data: CreateUserData): Promise<User> {
-  try {
-    const response = await authFetch(`${BACKEND_URL}/user`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(data),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Error: ${response.status} ${response.statusText}`);
-    }
-
-    const user = await response.json();
-    return user;
-  } catch (error) {
-    console.error("Error creating user:", error);
-    throw error;
-  }
+  const response = await api.post<User>("/user", data);
+  return response.data;
 }
 
 export async function updateUser(
   id: number,
   data: UpdateUserData
 ): Promise<User> {
-  try {
-    const response = await authFetch(`${BACKEND_URL}/user/${id}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(data),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Error: ${response.status} ${response.statusText}`);
-    }
-
-    const user = await response.json();
-    return user;
-  } catch (error) {
-    console.error("Error updating user:", error);
-    throw error;
-  }
+  const response = await api.patch<User>(`/user/${id}`, data);
+  return response.data;
 }
 
 export async function getUserById(id: number): Promise<User> {
-  try {
-    const response = await authFetch(`${BACKEND_URL}/user/${id}`, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Error: ${response.status} ${response.statusText}`);
-    }
-
-    const user = await response.json();
-    return user;
-  } catch (error) {
-    console.error("Error fetching user:", error);
-    throw error;
-  }
+  const response = await api.get<User>(`/user/${id}`);
+  return response.data;
 }
 
 export async function changePassword(
   id: number,
   data: ChangePasswordData
 ): Promise<User> {
-  try {
-    const response = await authFetch(
-      `${BACKEND_URL}/user/${id}/change-password`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(data),
-      }
-    );
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(
-        errorData.message || `Error: ${response.status} ${response.statusText}`
-      );
-    }
-
-    const user = await response.json();
-    return user;
-  } catch (error) {
-    console.error("Error changing password:", error);
-    throw error;
-  }
+  const response = await api.patch<User>(`/user/${id}/change-password`, data);
+  return response.data;
 }

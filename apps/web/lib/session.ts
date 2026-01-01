@@ -1,7 +1,7 @@
 "use server";
 
-import { cookies } from "next/headers";
 import { jwtVerify, SignJWT } from "jose";
+import { cookies } from "next/headers";
 
 export type Session = {
   user: {
@@ -23,7 +23,7 @@ export async function createSession(payload: Session) {
   const session = await new SignJWT(payload)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("7d")
+    .setExpirationTime("30d")
     .sign(encodedKey);
 
   const cookieStore = await cookies();

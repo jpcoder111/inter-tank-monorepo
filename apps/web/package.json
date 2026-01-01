@@ -16,6 +16,7 @@
     "@repo/ui": "*",
     "@tailwindcss/postcss": "^4.1.10",
     "@tanstack/react-query": "^5.90.2",
+    "axios": "^1.13.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.514.0",

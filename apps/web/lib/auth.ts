@@ -2,8 +2,8 @@
 
 import { redirect } from "next/navigation";
 import { BACKEND_URL } from "./constants";
-import { FormState, SigninFormSchema, SignupFormSchema } from "./type";
 import { createSession } from "./session";
+import { FormState, SigninFormSchema, SignupFormSchema } from "./type";
 
 export async function signUp(
   state: FormState,
@@ -115,16 +115,13 @@ export const refreshToken = async (oldRefreshToken: string) => {
 
     const { accessToken, refreshToken } = await response.json();
 
-    const updateResponse = await fetch(
-      `http://localhost:3000/api/auth/update`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ accessToken, refreshToken }),
-      }
-    );
+    const updateResponse = await fetch(`/api/auth/update`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ accessToken, refreshToken }),
+    });
     if (!updateResponse.ok) {
       throw new Error("Failed to update the tokens");
     }

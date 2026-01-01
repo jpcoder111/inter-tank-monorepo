@@ -1,8 +1,7 @@
 "use server";
 
 import { BACKEND_URL } from "@/lib/constants";
-import { getSession } from "@/lib/session";
-import { refreshToken } from "@/lib/auth";
+import { getSession, updateTokens } from "@/lib/session";
 import { redirect } from "next/navigation";
 
 export interface ConfirmationFormData {
@@ -17,6 +16,41 @@ export interface ConfirmationFormData {
   file: FileList;
 }
 
+async function refreshAccessToken(
+  refreshToken: string
+): Promise<string | null> {
+  try {
+    const response = await fetch(`${BACKEND_URL}/auth/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ refresh: refreshToken }),
+    });
+
+    if (!response.ok) {
+      console.error("Failed to refresh token:", response.status);
+      return null;
+    }
+
+    const contentType = response.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      console.error("Invalid response format - expected JSON");
+      return null;
+    }
+
+    const { accessToken, refreshToken: newRefreshToken } = await response.json();
+
+    // Update the session with new tokens
+    await updateTokens({ accessToken, refreshToken: newRefreshToken });
+
+    return accessToken;
+  } catch (error) {
+    console.error("Error refreshing token:", error);
+    return null;
+  }
+}
+
 export async function submitConfirmation(formData: FormData) {
   try {
     const session = await getSession();
@@ -28,7 +62,7 @@ export async function submitConfirmation(formData: FormData) {
       Authorization: `Bearer ${session.accessToken}`,
     };
 
-    let response = await fetch(`${BACKEND_URL!}/confirmation`, {
+    let response = await fetch(`${BACKEND_URL}/confirmation`, {
       method: "POST",
       headers,
       body: formData,
@@ -37,13 +71,13 @@ export async function submitConfirmation(formData: FormData) {
     // Handle 401 by attempting token refresh
     if (response.status === 401 && session.refreshToken) {
       console.log("Attempting to refresh token...");
-      const newAccessToken = await refreshToken(session.refreshToken);
+      const newAccessToken = await refreshAccessToken(session.refreshToken);
 
       if (newAccessToken) {
         console.log("Token refreshed successfully, retrying request...");
         headers.Authorization = `Bearer ${newAccessToken}`;
 
-        response = await fetch(`${BACKEND_URL!}/confirmation`, {
+        response = await fetch(`${BACKEND_URL}/confirmation`, {
           method: "POST",
           headers,
           body: formData,

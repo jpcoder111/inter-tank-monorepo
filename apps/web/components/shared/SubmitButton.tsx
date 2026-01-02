@@ -4,11 +4,16 @@ import { PropsWithChildren } from "react";
 import { Button } from "@/components/ui/Button";
 import { useFormStatus } from "react-dom";
 
-const SubmitButton = ({ children }: PropsWithChildren) => {
+interface SubmitButtonProps extends PropsWithChildren {
+  disabled?: boolean;
+}
+
+const SubmitButton = ({ children, disabled }: SubmitButtonProps) => {
   const { pending } = useFormStatus();
+  const isDisabled = disabled || pending;
 
   return (
-    <Button type="submit" aria-disabled={pending} className="w-full">
+    <Button type="submit" disabled={isDisabled} className="w-full">
       {pending ? "Ingresando..." : children}
     </Button>
   );

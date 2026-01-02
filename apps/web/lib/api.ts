@@ -22,7 +22,6 @@ export function setAuthProvider(provider: AuthProvider) {
   authProviderRef = provider;
 }
 
-// Request queue for handling concurrent 401s
 let isRefreshing = false;
 let refreshSubscribers: Array<(newToken: string) => void> = [];
 
@@ -41,12 +40,11 @@ function onRefreshFailed() {
 
 async function refreshAuthToken(): Promise<string> {
   if (isRefreshing) {
-    // If already refreshing, wait for the refresh to complete
     return new Promise<string>((resolve, reject) => {
       subscribeTokenRefresh((newToken: string) => {
         resolve(newToken);
       });
-      // Add a timeout to prevent hanging
+
       setTimeout(() => reject(new Error("Token refresh timeout")), 10000);
     });
   }
@@ -72,12 +70,10 @@ async function refreshAuthToken(): Promise<string> {
   }
 }
 
-// Create the axios instance
 const apiInstance = axios.create({
   baseURL: BACKEND_URL,
 });
 
-// Request interceptor - attach token to every request
 apiInstance.interceptors.request.use(
   async (requestConfig) => {
     try {
@@ -98,7 +94,6 @@ apiInstance.interceptors.request.use(
   }
 );
 
-// Response interceptor - handle 401 and refresh token
 apiInstance.interceptors.response.use(
   (response) => {
     return response;
@@ -110,12 +105,10 @@ apiInstance.interceptors.response.use(
       return Promise.reject(error);
     }
 
-    // Already retried, don't retry again
     if (originalRequest._retry) {
       return Promise.reject(error);
     }
 
-    // Handle 401 Unauthorized
     if (error.response?.status === 401 && authProviderRef) {
       try {
         originalRequest._retry = true;

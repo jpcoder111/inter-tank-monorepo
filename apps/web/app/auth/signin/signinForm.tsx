@@ -1,15 +1,50 @@
 "use client";
 
 import SubmitButton from "@/components/shared/SubmitButton";
+import { SigninFormSchema } from "@/lib/type";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useState, useTransition } from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
 import { signIn } from "@/lib/auth";
-import { useActionState } from "react";
+
+type SignInFormValues = z.infer<typeof SigninFormSchema>;
 
 const SignInForm = () => {
-  const [state, action] = useActionState(signIn, undefined);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<SignInFormValues>({
+    resolver: zodResolver(SigninFormSchema),
+    defaultValues: {
+      email: "",
+      password: "",
+    },
+  });
+
+  const onSubmit = (data: SignInFormValues) => {
+    setServerError(null);
+
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.append("email", data.email);
+      formData.append("password", data.password);
+
+      const result = await signIn(undefined, formData);
+
+      if (result?.message) {
+        setServerError(result.message);
+      }
+    });
+  };
 
   return (
     <>
-      <form action={action} className="flex flex-col gap-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
         <div className="flex flex-col gap-8">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
@@ -17,15 +52,14 @@ const SignInForm = () => {
                 Email
               </label>
               <input
+                {...register("email")}
                 className="w-120 border rounded-sm p-2 text-sm bg-white selection:bg-white"
                 type="email"
-                name="email"
+                id="email"
               />
-              {state?.error?.email && (
+              {errors.email && (
                 <div className="text-red-500 text-sm mt-1">
-                  {state.error.email.map((err, idx) => (
-                    <div key={idx}>{err}</div>
-                  ))}
+                  {errors.email.message}
                 </div>
               )}
             </div>
@@ -34,23 +68,24 @@ const SignInForm = () => {
                 Password
               </label>
               <input
+                {...register("password")}
                 className="w-120 border rounded-sm p-2 text-sm bg-white selection:bg-white"
                 type="password"
-                name="password"
+                id="password"
               />
-              {state?.error?.password && (
+              {errors.password && (
                 <div className="text-red-500 text-sm mt-1">
-                  {state.error.password.map((err, idx) => (
-                    <div key={idx}>{err}</div>
-                  ))}
+                  {errors.password.message}
                 </div>
               )}
             </div>
-            {state?.message && (
-              <div className="text-red-500 text-sm mb-2">{state.message}</div>
+            {serverError && (
+              <div className="text-red-500 text-sm mb-2">{serverError}</div>
             )}
           </div>
-          <SubmitButton>Sign In</SubmitButton>
+          <SubmitButton disabled={isPending}>
+            {isPending ? "Signing in..." : "Sign In"}
+          </SubmitButton>
         </div>
       </form>
     </>

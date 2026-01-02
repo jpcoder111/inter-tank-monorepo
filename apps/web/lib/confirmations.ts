@@ -41,7 +41,6 @@ async function refreshAccessToken(
 
     const { accessToken, refreshToken: newRefreshToken } = await response.json();
 
-    // Update the session with new tokens
     await updateTokens({ accessToken, refreshToken: newRefreshToken });
 
     return accessToken;
@@ -68,7 +67,6 @@ export async function submitConfirmation(formData: FormData) {
       body: formData,
     });
 
-    // Handle 401 by attempting token refresh
     if (response.status === 401 && session.refreshToken) {
       console.log("Attempting to refresh token...");
       const newAccessToken = await refreshAccessToken(session.refreshToken);

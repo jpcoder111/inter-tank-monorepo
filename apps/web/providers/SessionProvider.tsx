@@ -8,6 +8,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -49,9 +50,22 @@ export function SessionProvider({
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
-  // Keep track of the latest session in a ref for async access
+  // Keep track of the latest session in a ref for async access.
+  // Use initialSession as fallback so API calls during the first render
+  // cycle (before the sync effect below fires) already have a token.
   const sessionRef = useRef<Session>(session);
-  sessionRef.current = session;
+  sessionRef.current = session ?? initialSession;
+
+  // Sync server-provided session to client state on login redirect.
+  // After login, the server action sets the cookie and redirects. The layout
+  // re-renders server-side with the new cookie, but useState's initial value
+  // is stale (null from the pre-login render). This syncs the new tokens.
+  useLayoutEffect(() => {
+    if (initialSession?.accessToken && !session?.accessToken) {
+      setSession(initialSession);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSession?.accessToken]);
 
   // Refresh the session from server
   const refreshSession = useCallback(async () => {
@@ -72,13 +86,14 @@ export function SessionProvider({
           setSession(data);
         } else {
           console.error("Invalid response format - expected JSON");
-          setSession(null);
+          // Keep existing session on invalid response format
         }
       } else if (response.status === 401) {
         setSession(null);
         router.push("/auth/signin");
       } else {
-        setSession(null);
+        // Keep existing session on server errors (e.g., 500 during dev hot-reload)
+        console.error("Session fetch failed with status:", response.status);
       }
     } catch (error) {
       console.error("Error fetching session:", error);
@@ -186,22 +201,25 @@ export function SessionProvider({
     router.push("/auth/signin");
   }, [router]);
 
-  // Register auth provider with API client
-  useEffect(() => {
+  // Register auth provider with API client.
+  // useLayoutEffect ensures this runs BEFORE any child useEffect (like API calls),
+  // preventing requests from firing without an auth token.
+  useLayoutEffect(() => {
     setAuthProvider({
       getAccessToken,
       onAuthError: () => {
-        logout();
+        // Don't auto-logout on auth errors — keep the session alive.
+        // The user can manually sign out if needed.
+        console.error("Auth error: token refresh failed");
       },
     });
-  }, [getAccessToken, logout]);
+  }, [getAccessToken]);
 
   // Proactive token refresh interval
   useEffect(() => {
     if (!session) return;
 
     const interval = setInterval(() => {
-      console.log("Proactive token refresh...");
       refreshTokens().catch(console.error);
     }, TOKEN_REFRESH_INTERVAL);
 
@@ -218,11 +236,14 @@ export function SessionProvider({
           credentials: "include",
         });
 
-        if (!response.ok || response.status === 401) {
+        // Only log out on explicit 401 (session expired/invalid)
+        // Ignore server errors (500, etc.) to stay logged in during dev hot-reloads
+        if (response.status === 401) {
           setSession(null);
           router.push("/auth/signin");
         }
       } catch (error) {
+        // Network error — keep session alive
         console.error("Error checking auth status:", error);
       }
     };

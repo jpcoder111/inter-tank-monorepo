@@ -12,14 +12,16 @@ export class FileService {
     private readonly localStorageService: LocalStorageService,
     private readonly prisma: PrismaService,
   ) {
-    this.fileStorageService =
-      process.env.NODE_ENV === 'development'
-        ? this.localStorageService
-        : this.r2Service;
+    const hasR2Config =
+      process.env.CLOUDFLARE_R2_BUCKET_NAME &&
+      process.env.CLOUDFLARE_R2_ENDPOINT;
+
+    this.fileStorageService = hasR2Config
+      ? this.r2Service
+      : this.localStorageService;
   }
 
   async uploadFile(file: Express.Multer.File, prefix: string = '') {
-    console.log('uploadFile', file, prefix);
     const { key, url } = await this.fileStorageService.uploadFile(file, prefix);
 
     const fileRecord = await this.prisma.file.create({

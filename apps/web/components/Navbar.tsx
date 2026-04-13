@@ -1,9 +1,9 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { IoHomeOutline } from "react-icons/io5";
+import { IoSettingsOutline } from "react-icons/io5";
 import { GrDocumentVerified } from "react-icons/gr";
-import { HiUsers } from "react-icons/hi";
+import { HiUsers, HiLightBulb } from "react-icons/hi";
 import Section from "@/components/navbar/Section";
 import { useSession } from "@/providers/SessionProvider";
 
@@ -28,12 +28,20 @@ export default function Navbar() {
     if (/^\/users/.test(path)) {
       return "usuarios";
     }
-    // If path is "/" or empty, select home
-    if (path === "/" || path === "") {
-      return "inicio";
+    // If path matches ai-config
+    if (/^\/ai-config/.test(path)) {
+      return "ai-config";
     }
-    // Default to home for any other path
-    return "inicio";
+    // If path matches feature-requests
+    if (/^\/feature-requests/.test(path)) {
+      return "feature-requests";
+    }
+    // If path matches settings
+    if (/^\/settings/.test(path)) {
+      return "settings";
+    }
+    // Default to confirmaciones for any other path
+    return "confirmaciones";
   };
 
   const selectedSection = getSelectedSection(pathname);
@@ -43,12 +51,6 @@ export default function Navbar() {
   ) : (
     <div className="flex flex-col flex-1 p-4 bg-blue-700 max-w-60 gap-2">
       <Section
-        icon={<IoHomeOutline />}
-        text="Inicio"
-        selected={selectedSection === "inicio"}
-        onClick={() => router.push("/")}
-      />
-      <Section
         icon={<GrDocumentVerified />}
         text="Confirmaciones"
         selected={selectedSection === "confirmaciones"}
@@ -56,12 +58,32 @@ export default function Navbar() {
       />
       {/* Show skeleton or nothing while loading */}
       {!isLoading && isAdmin && (
-        <Section
-          icon={<HiUsers />}
-          text="Usuarios"
-          selected={selectedSection === "usuarios"}
-          onClick={() => router.push("/users")}
-        />
+        <>
+          <Section
+            icon={<HiUsers />}
+            text="Usuarios"
+            selected={selectedSection === "usuarios"}
+            onClick={() => router.push("/users")}
+          />
+          <Section
+            icon={<IoSettingsOutline />}
+            text="Configuración IA"
+            selected={selectedSection === "ai-config"}
+            onClick={() => router.push("/ai-config")}
+          />
+          <Section
+            icon={<HiLightBulb />}
+            text="Feature Requests"
+            selected={selectedSection === "feature-requests"}
+            onClick={() => router.push("/feature-requests")}
+          />
+          <Section
+            icon={<IoSettingsOutline />}
+            text="Configuración"
+            selected={selectedSection === "settings"}
+            onClick={() => router.push("/settings")}
+          />
+        </>
       )}
     </div>
   );

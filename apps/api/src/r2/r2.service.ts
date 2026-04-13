@@ -15,14 +15,16 @@ export class R2Service {
   private publicUrl: string;
 
   constructor() {
-    this.s3Client = new S3Client({
-      region: 'auto',
-      endpoint: process.env.CLOUDFLARE_R2_ENDPOINT!,
-      credentials: {
-        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY!,
-      },
-    });
+    if (process.env.CLOUDFLARE_R2_ENDPOINT) {
+      this.s3Client = new S3Client({
+        region: 'auto',
+        endpoint: process.env.CLOUDFLARE_R2_ENDPOINT,
+        credentials: {
+          accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID!,
+          secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY!,
+        },
+      });
+    }
     this.bucketName = process.env.CLOUDFLARE_R2_BUCKET_NAME!;
   }
 
@@ -43,8 +45,6 @@ export class R2Service {
         uploadDate: new Date().toISOString(),
       },
     });
-
-    console.log('command', command);
 
     await this.s3Client.send(command);
 

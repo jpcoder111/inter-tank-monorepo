@@ -16,7 +16,7 @@ export default async function middleware(req: NextRequest) {
   if (!isLoggedIn) {
     const redirectUrl = req.nextUrl.clone();
     redirectUrl.pathname = "/auth/signin";
-    if (pathname !== "/") {
+    if (pathname !== "/" && pathname !== "/confirmations/new") {
       redirectUrl.searchParams.set("redirectTo", pathname);
     }
 

@@ -85,7 +85,7 @@ export async function signIn(
     });
 
     // Redirect with a cache busting parameter to force session refresh
-    redirect("/?refresh=" + Date.now());
+    redirect("/confirmations/new?refresh=" + Date.now());
   } else {
     return {
       message: "Sign in failed",

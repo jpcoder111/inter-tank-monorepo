@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { OcrService } from 'src/ocr/ocr.service';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { AiConfigService } from 'src/ai-config/ai-config.service';
 import { CreateConfirmationDto } from './dto';
 import { z } from 'zod';
 
@@ -20,6 +21,7 @@ export class ConfirmationService {
     private readonly aiService: AiService,
     private readonly fileService: FileService,
     private readonly ocrService: OcrService,
+    private readonly aiConfigService: AiConfigService,
   ) {}
 
   async createConfirmation(
@@ -32,17 +34,19 @@ export class ConfirmationService {
     );
 
     const ocrResult = await this.ocrService.extractTextFromPdf(file);
-    console.log('ocrResult', ocrResult);
 
     // await this.saveOcrResultToJson(file.originalname, ocrResult);
 
+    const activeConfig = await this.aiConfigService.getActiveConfig();
+    const prompt = activeConfig?.prompt ?? CONFIRMATION_SYSTEM_PROMPT;
+    const model = activeConfig?.model ?? 'claude-sonnet-4-5-20250929';
+
     const confirmationHash = await this.aiService.createMessage(
       ocrResult.text,
-      CONFIRMATION_SYSTEM_PROMPT,
+      prompt,
       CONFIRMATION_SCHEMA,
+      model,
     );
-
-    console.log('confirmationHash', confirmationHash);
 
     if (
       typeof confirmationHash.container_commodity === 'string' &&
@@ -220,19 +224,19 @@ export class ConfirmationService {
     data: any,
     createConfirmationDto: CreateConfirmationDto,
   ) {
-    doc.y += 10;
+    doc.y += 6;
 
     const addSection = (
       title: string,
       fields: Array<[string, string, boolean]>,
     ) => {
       doc
-        .fontSize(12)
+        .fontSize(11)
         .fillColor('#000080')
         .font('Helvetica-Bold')
         .text(title, 42.52, doc.y);
 
-      doc.y += 5;
+      doc.y += 3;
 
       doc
         .strokeColor('#E6E6E6')
@@ -241,7 +245,7 @@ export class ConfirmationService {
         .lineTo(doc.page.width - 42.52, doc.y)
         .stroke();
 
-      doc.y += 8;
+      doc.y += 5;
 
       fields.forEach(([label, value, highlight]) => {
         const currentY = doc.y;
@@ -250,7 +254,7 @@ export class ConfirmationService {
         const valueX = labelX + labelWidth + 15;
 
         doc
-          .fontSize(10)
+          .fontSize(9)
           .fillColor('black')
           .font('Helvetica-Bold')
           .text(`${label}:`, labelX, currentY, {
@@ -265,15 +269,15 @@ export class ConfirmationService {
             width: doc.page.width - valueX - 42.52,
           });
 
-        doc.y = currentY + 19.84;
+        doc.y = currentY + 15;
 
         // Add extra gap after Depot field
         if (label === 'Depot') {
-          doc.y += 10;
+          doc.y += 6;
         }
       });
 
-      doc.y += 8.5;
+      doc.y += 5;
     };
 
     const customerName = createConfirmationDto.customerName;
@@ -284,7 +288,12 @@ export class ConfirmationService {
     const incoterm = createConfirmationDto.incoterm;
     const insulated = createConfirmationDto.isInsulated;
     const flexitank = createConfirmationDto.isFlexitank;
+    const isotank = createConfirmationDto.isIsotank;
     const termografos = createConfirmationDto.isTermografos;
+    const gateOutLiberado = createConfirmationDto.isGateOutLiberado;
+    const temperature = createConfirmationDto.temperature;
+    const stacking = createConfirmationDto.stacking;
+    const cutoff = createConfirmationDto.cutoff;
 
     addSection('CONTACT', [
       ['Customer', customerName, false],
@@ -305,72 +314,47 @@ export class ConfirmationService {
       ['Port of Discharge', data.pod, false],
     ]);
 
+    const containerStr = `${data.container_quantity || '-'} x ${data.container_type || '-'}${temperature ? ` ${temperature}` : ''}`;
+
     addSection('CARGO', [
-      [
-        'Quantity / Container Type',
-        `${data.container_quantity || '-'} x ${data.container_type || '-'}`,
-        false,
-      ],
+      ['Quantity / Container Type', containerStr, false],
       ['Commodity', data.container_commodity, false],
       ['Incoterm', incoterm, false],
     ]);
 
-    if (insulated) {
+    const addBanner = (text: string, bgColor: string) => {
       doc
-        .fontSize(11)
+        .fontSize(10)
         .fillColor('black')
         .font('Helvetica-Bold')
-        .rect(42.52, doc.y, doc.page.width - 85.04, 22)
-        .fillAndStroke('#FFFFB4', '#FFFFB4')
+        .rect(42.52, doc.y, doc.page.width - 85.04, 18)
+        .fillAndStroke(bgColor, bgColor)
         .fillColor('black')
-        .text('CONTENEDOR(ES) INSULADO(S)', 42.52, doc.y + 6, {
+        .text(text, 42.52, doc.y + 4, {
           align: 'center',
         });
 
-      doc.y += 8;
-    }
+      doc.y += 4;
+    };
 
-    if (flexitank) {
-      doc
-        .fontSize(11)
-        .fillColor('black')
-        .font('Helvetica-Bold')
-        .rect(42.52, doc.y, doc.page.width - 85.04, 22)
-        .fillAndStroke('#FFD4B4', '#FFD4B4')
-        .fillColor('black')
-        .text('FLEXITANK', 42.52, doc.y + 6, {
-          align: 'center',
-        });
-
-      doc.y += 8;
-    }
-
-    if (termografos) {
-      doc
-        .fontSize(11)
-        .fillColor('black')
-        .font('Helvetica-Bold')
-        .rect(42.52, doc.y, doc.page.width - 85.04, 22)
-        .fillAndStroke('#B4FFB4', '#B4FFB4')
-        .fillColor('black')
-        .text('TERMÓGRAFOS', 42.52, doc.y + 6, {
-          align: 'center',
-        });
-
-      doc.y += 8;
-    }
+    if (insulated) addBanner('CONTENEDOR(ES) INSULADO(S)', '#FFFFB4');
+    if (flexitank) addBanner('FLEXITANK', '#FFD4B4');
+    if (isotank) addBanner('ISOTANK', '#B4D4FF');
+    if (termografos) addBanner('TERMÓGRAFOS', '#B4FFB4');
 
     addSection('DEPOT & TERMINAL', [
       ['Depot', data.depot || 'POR CONFIRMAR', false],
       ['Terminal', data.terminal, false],
     ]);
 
+    if (gateOutLiberado) addBanner('GATE OUT LIBERADO', '#FFFFB4');
+
     addSection('DEADLINES', [
-      ['SI Cut-Off', 'POR CONFIRMAR', false],
-      ['Stacking', 'POR CONFIRMAR', false],
+      ['SI Cut-Off', cutoff || 'POR CONFIRMAR', false],
+      ['Stacking', stacking || 'POR CONFIRMAR', false],
     ]);
 
-    doc.y += 28.35;
+    doc.y += 14;
     doc
       .strokeColor('#C8C8C8')
       .lineWidth(0.5)
@@ -527,7 +511,6 @@ export class ConfirmationService {
 
       fs.writeFileSync(txtFilePath, textContent, 'utf-8');
 
-      console.log(`OCR result saved to: ${txtFilePath}`);
     } catch (error) {
       console.error('Error saving OCR result to text file:', error);
     }
@@ -556,7 +539,6 @@ export class ConfirmationService {
         'utf-8',
       );
 
-      console.log(`Confirmation hash saved to: ${jsonFilePath}`);
     } catch (error) {
       console.error('Error saving confirmation hash to JSON:', error);
     }

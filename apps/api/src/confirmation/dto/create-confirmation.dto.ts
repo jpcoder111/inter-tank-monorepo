@@ -36,8 +36,30 @@ export class CreateConfirmationDto {
   @Transform(({ value }) => value === 'true')
   isFlexitank: boolean;
 
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true')
+  isIsotank?: boolean;
+
   @IsNotEmpty()
   @IsBoolean()
   @Transform(({ value }) => value === 'true')
   isTermografos: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true')
+  isGateOutLiberado?: boolean;
+
+  @IsOptional()
+  @IsString()
+  temperature?: string;
+
+  @IsOptional()
+  @IsString()
+  stacking?: string;
+
+  @IsOptional()
+  @IsString()
+  cutoff?: string;
 }

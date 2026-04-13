@@ -47,3 +47,10 @@ scripts
 outputs
 
 apps/api/temp
+
+# Obsidian (keep app.json for shared settings)
+docs/.obsidian/workspace.json
+docs/.obsidian/workspace-mobile.json
+
+# Private / dev-only Claude skills (contain prod credentials)
+.claude/skills/pg_prod/

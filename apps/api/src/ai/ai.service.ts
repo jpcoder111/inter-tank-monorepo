@@ -16,9 +16,10 @@ export class AiService {
     documentText: string,
     systemPrompt: string,
     schema: ZodSchema,
+    modelId: string = 'claude-sonnet-4-5-20250929',
   ): Promise<any> {
     const { object } = await generateObject({
-      model: anthropic('claude-sonnet-4-5-20250929'),
+      model: anthropic(modelId),
       system: systemPrompt,
       prompt: documentText,
       maxTokens: 1000,

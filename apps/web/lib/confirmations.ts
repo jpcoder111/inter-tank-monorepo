@@ -12,7 +12,12 @@ export interface ConfirmationFormData {
   incoterm?: string;
   isInsulated: boolean;
   isFlexitank: boolean;
+  isIsotank: boolean;
   isTermografos: boolean;
+  isGateOutLiberado: boolean;
+  temperature?: string;
+  stacking?: string;
+  cutoff?: string;
   file: FileList;
 }
 

@@ -2,8 +2,9 @@ import { deleteSession, getSession } from "@/lib/session";
 import { BACKEND_URL } from "@/lib/constants";
 import { redirect, RedirectType } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { NextResponse } from "next/server";
 
-export async function GET() {
+async function performSignout() {
   const session = await getSession();
 
   // Call backend signout if we have a session
@@ -27,6 +28,14 @@ export async function GET() {
   revalidatePath("/auth/signin");
   revalidatePath("/dashboard");
   revalidatePath("/profile");
+}
 
+export async function GET() {
+  await performSignout();
   redirect("/", RedirectType.replace);
+}
+
+export async function POST() {
+  await performSignout();
+  return NextResponse.json({ message: "Signed out" });
 }

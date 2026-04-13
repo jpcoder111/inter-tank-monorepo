@@ -34,6 +34,7 @@ export default function NewFeatureRequestPage() {
       >
         <div className="flex flex-col gap-1">
           <Input
+            id="title"
             label="Titulo"
             {...register("title", { required: "El titulo es requerido" })}
           />

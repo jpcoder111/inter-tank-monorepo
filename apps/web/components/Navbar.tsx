@@ -12,35 +12,16 @@ export default function Navbar() {
   const router = useRouter();
   const { session, isLoading } = useSession();
 
-  // Check if user is admin
   const isAdmin = session?.user?.role === "ADMIN";
 
-  // Determine selected section based on current path
   const getSelectedSection = (path: string): string => {
-    if (/^\/auth(\/.*)?$/.test(path)) {
-      return "auth";
-    }
-    // If path matches confirmations* (starts with confirmations)
-    if (/^\/confirmations/.test(path)) {
-      return "confirmaciones";
-    }
-    // If path matches users* (starts with users)
-    if (/^\/users/.test(path)) {
-      return "usuarios";
-    }
-    // If path matches ai-config
-    if (/^\/billing/.test(path)) {
-  return "billing";  
-    }
-    // If path matches feature-requests
-    if (/^\/feature-requests/.test(path)) {
-      return "feature-requests";
-    }
-    // If path matches settings
-    if (/^\/settings/.test(path)) {
-      return "settings";
-    }
-    // Default to confirmaciones for any other path
+    if (/^\/auth(\/.*)?$/.test(path)) return "auth";
+    if (/^\/confirmations/.test(path)) return "confirmaciones";
+    if (/^\/billing/.test(path)) return "billing";
+    if (/^\/users/.test(path)) return "usuarios";
+    if (/^\/ai-config/.test(path)) return "ai-config";
+    if (/^\/feature-requests/.test(path)) return "feature-requests";
+    if (/^\/settings/.test(path)) return "settings";
     return "confirmaciones";
   };
 
@@ -56,7 +37,12 @@ export default function Navbar() {
         selected={selectedSection === "confirmaciones"}
         onClick={() => router.push("/confirmations/new")}
       />
-      {/* Show skeleton or nothing while loading */}
+      <Section
+        icon={<HiCalculator />}
+        text="Facturación"
+        selected={selectedSection === "billing"}
+        onClick={() => router.push("/billing")}
+      />
       {!isLoading && isAdmin && (
         <>
           <Section
@@ -65,12 +51,6 @@ export default function Navbar() {
             selected={selectedSection === "usuarios"}
             onClick={() => router.push("/users")}
           />
-          <Section
-  icon={<HiCalculator />}
-  text="Facturación"
-  selected={selectedSection === "billing"}
-  onClick={() => router.push("/billing")}
-/>
           <Section
             icon={<IoSettingsOutline />}
             text="Configuración IA"

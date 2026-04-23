@@ -3,7 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { IoSettingsOutline } from "react-icons/io5";
 import { GrDocumentVerified } from "react-icons/gr";
-import { HiUsers, HiLightBulb } from "react-icons/hi";
+import { HiUsers, HiLightBulb, HiCalculator } from "react-icons/hi";
 import Section from "@/components/navbar/Section";
 import { useSession } from "@/providers/SessionProvider";
 
@@ -29,8 +29,8 @@ export default function Navbar() {
       return "usuarios";
     }
     // If path matches ai-config
-    if (/^\/ai-config/.test(path)) {
-      return "ai-config";
+    if (/^\/billing/.test(path)) {
+  return "billing";  
     }
     // If path matches feature-requests
     if (/^\/feature-requests/.test(path)) {
@@ -65,6 +65,12 @@ export default function Navbar() {
             selected={selectedSection === "usuarios"}
             onClick={() => router.push("/users")}
           />
+          <Section
+  icon={<HiCalculator />}
+  text="Facturación"
+  selected={selectedSection === "billing"}
+  onClick={() => router.push("/billing")}
+/>
           <Section
             icon={<IoSettingsOutline />}
             text="Configuración IA"

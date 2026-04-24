@@ -42,6 +42,43 @@ export const AGENT_COLORS: Record<string, string> = {
 // existing localStorage data is replaced with the new seeds on next load.
 export const RATES_STORAGE_KEY = "it_rates_v2";
 export const EBS_STORAGE_KEY = "it_ebs_v3";
+export const INVOICED_BLS_KEY = "it_invoiced_bls";
+export const INVOICE_HISTORY_PREFIX = "it_invoiced_history_";
+
+export function invoiceHistoryKey(userId: string): string {
+  return `${INVOICE_HISTORY_PREFIX}${userId}`;
+}
+
+export type InvoicedBL = {
+  bl: string;
+  invoicedAt: string;
+  userId: string;
+  userName: string;
+};
+
+export type InvoicedBLsRegistry = Record<string, InvoicedBL>;
+
+export type InvoiceHistoryRow = {
+  blNumber: string;
+  agent: string;
+  carrier: string;
+  route: string;
+  tipo: string;
+  bls: number;
+  ctrs: number;
+  total: number | string;
+};
+
+export type InvoiceHistoryEntry = {
+  id: string;
+  invoicedAt: string;
+  userId: string;
+  userName: string;
+  blCount: number;
+  bls: string[];
+  rows: InvoiceHistoryRow[];
+  filterSummary: string;
+};
 
 export type Rate = {
   id: string;

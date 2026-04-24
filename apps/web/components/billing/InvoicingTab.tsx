@@ -1,9 +1,12 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
+import toast from "react-hot-toast";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
+import { useSession } from "@/providers/SessionProvider";
 import { useLocalStore } from "./useLocalStore";
+import InvoicingHistory from "./InvoicingHistory";
 import {
   AGENT_COLORS,
   AGENT_SUGGESTIONS,
@@ -11,15 +14,24 @@ import {
   CONTAINER_TYPE_SUGGESTIONS,
   EBS_STORAGE_KEY,
   Ebs,
+  INVOICED_BLS_KEY,
+  InvoiceHistoryEntry,
+  InvoiceHistoryRow,
+  InvoicedBL,
+  InvoicedBLsRegistry,
   RATES_STORAGE_KEY,
   Rate,
   SEED_EBS,
   SEED_RATES,
+  invoiceHistoryKey,
+  uid,
 } from "./constants";
 
 type Row = Record<string, unknown>;
 
 type ProcessedRow = {
+  blNumber: string;
+  etd: string;
   agent: string;
   carrier: string;
   route: string;
@@ -33,7 +45,10 @@ type ProcessedRow = {
   total: number | string;
   notes: string;
   pending: Set<string>;
+  duplicate?: InvoicedBL;
 };
+
+type FilterMode = "all" | "rows" | "etd";
 
 const PENDING_TOKENS = new Set(["TBD", "N/A", "NA", "PENDIENTE", "?"]);
 
@@ -52,13 +67,41 @@ function normalizeWithList(value: unknown, list: readonly string[]): string {
 function pickField(row: Row, keys: string[]): unknown {
   const normalized: Record<string, unknown> = {};
   for (const k of Object.keys(row)) {
-    normalized[k.toLowerCase().replace(/[\s_-]/g, "")] = row[k];
+    normalized[k.toLowerCase().replace(/[\s_#.()-]/g, "")] = row[k];
   }
   for (const k of keys) {
-    const nk = k.toLowerCase().replace(/[\s_-]/g, "");
+    const nk = k.toLowerCase().replace(/[\s_#.()-]/g, "");
     if (nk in normalized) return normalized[nk];
   }
   return undefined;
+}
+
+function parseDate(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "number") {
+    try {
+      const d = XLSX.SSF.parse_date_code(value);
+      if (!d) return "";
+      const y = String(d.y).padStart(4, "0");
+      const m = String(d.m).padStart(2, "0");
+      const day = String(d.d).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    } catch {
+      return "";
+    }
+  }
+  const s = String(value).trim();
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    const [, y, m, d] = iso;
+    return `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}`;
+  }
+  const dmy = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (dmy) {
+    const [, d, m, y] = dmy;
+    return `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}`;
+  }
+  return "";
 }
 
 function findRate(
@@ -87,6 +130,10 @@ function teuMultiplier(tipo: string): number {
 
 function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
   return rows.map((row) => {
+    const blNumber = String(
+      pickField(row, ["blNumber", "bl", "blNro", "booking", "bookingNumber", "reference", "ref"]) ?? ""
+    ).trim();
+    const etd = parseDate(pickField(row, ["etd", "zarpe", "fechaZarpe", "etdDate", "fechaEtd"]));
     const agent = normalizeWithList(pickField(row, ["agent", "agente"]), AGENT_SUGGESTIONS);
     const carrier = normalizeWithList(
       pickField(row, ["carrier", "naviera"]),
@@ -97,11 +144,11 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
       CONTAINER_TYPE_SUGGESTIONS
     );
     const route = String(pickField(row, ["route", "ruta"]) ?? "");
-    const blsRaw = pickField(row, ["bls", "bl", "cantidadBls"]);
+    const blsRaw = pickField(row, ["bls", "cantidadBls", "qtyBls"]);
     const ctrsRaw = pickField(row, ["ctrs", "ctr", "cantidadCtrs", "contenedores"]);
     const notes = String(pickField(row, ["notes", "notas", "observaciones"]) ?? "");
 
-    const bls = Number(blsRaw) || 0;
+    const bls = Number(blsRaw) || (blNumber ? 1 : 0);
     const ctrs = Number(ctrsRaw) || 0;
 
     const pending = new Set<string>();
@@ -150,6 +197,8 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
     }
 
     return {
+      blNumber,
+      etd,
       agent,
       carrier,
       route,
@@ -170,6 +219,8 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
 function downloadExcel(processed: ProcessedRow[]) {
   const aoa = [
     [
+      "BL",
+      "ETD",
       "Agente",
       "Carrier",
       "Ruta",
@@ -184,6 +235,8 @@ function downloadExcel(processed: ProcessedRow[]) {
       "Notas",
     ],
     ...processed.map((r) => [
+      r.blNumber,
+      r.etd,
       r.agent,
       r.carrier,
       r.route,
@@ -205,7 +258,36 @@ function downloadExcel(processed: ProcessedRow[]) {
   XLSX.writeFile(wb, `facturacion-${ts}.xlsx`);
 }
 
+function loadInvoicedBls(): InvoicedBLsRegistry {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(INVOICED_BLS_KEY);
+    return raw ? (JSON.parse(raw) as InvoicedBLsRegistry) : {};
+  } catch {
+    return {};
+  }
+}
+
+function formatDuplicateDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("es-AR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
 export default function InvoicingTab() {
+  const { session } = useSession();
+  const isAdmin = session?.user?.role === "ADMIN";
+  const userId = session?.user?.id ?? "anonymous";
+  const userName =
+    session?.user
+      ? `${session.user.firstName ?? ""} ${session.user.lastName ?? ""}`.trim() ||
+        session.user.id
+      : "anónimo";
+
   const { items: rates, hydrated: ratesHydrated } = useLocalStore<Rate>(
     RATES_STORAGE_KEY,
     SEED_RATES
@@ -221,6 +303,26 @@ export default function InvoicingTab() {
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const [filterMode, setFilterMode] = useState<FilterMode>("all");
+  const [rowFrom, setRowFrom] = useState<string>("");
+  const [rowTo, setRowTo] = useState<string>("");
+  const [etdFrom, setEtdFrom] = useState<string>("");
+  const [etdTo, setEtdTo] = useState<string>("");
+
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+
+  const filterSummary = useMemo(() => {
+    if (filterMode === "rows") {
+      const from = rowFrom || "1";
+      const to = rowTo || String(rawRows.length || "");
+      return `Filas ${from}–${to}`;
+    }
+    if (filterMode === "etd") {
+      return `ETD ${etdFrom || "?"} a ${etdTo || "?"}`;
+    }
+    return "Todas las filas";
+  }, [filterMode, rowFrom, rowTo, etdFrom, etdTo, rawRows.length]);
 
   const handleFile = async (file: File) => {
     setError(null);
@@ -241,9 +343,33 @@ export default function InvoicingTab() {
       }
       const rows = XLSX.utils.sheet_to_json<Row>(ws, { defval: "" });
       setRawRows(rows);
+      setRowFrom("1");
+      setRowTo(String(rows.length));
+      setFilterMode("all");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al leer el archivo");
     }
+  };
+
+  const applyFilter = (rows: Row[]): Row[] => {
+    if (filterMode === "rows") {
+      const from = Math.max(1, Number(rowFrom) || 1);
+      const to = Math.min(rows.length, Number(rowTo) || rows.length);
+      if (from > to) return [];
+      return rows.slice(from - 1, to);
+    }
+    if (filterMode === "etd") {
+      return rows.filter((row) => {
+        const etd = parseDate(
+          pickField(row, ["etd", "zarpe", "fechaZarpe", "etdDate", "fechaEtd"])
+        );
+        if (!etd) return false;
+        if (etdFrom && etd < etdFrom) return false;
+        if (etdTo && etd > etdTo) return false;
+        return true;
+      });
+    }
+    return rows;
   };
 
   const handleProcess = () => {
@@ -251,7 +377,88 @@ export default function InvoicingTab() {
       setError("No hay filas para procesar. Subí un Excel primero.");
       return;
     }
-    setProcessed(processRows(rawRows, rates, ebs));
+    const filteredRows = applyFilter(rawRows);
+    if (!filteredRows.length) {
+      setError("El filtro no coincide con ninguna fila.");
+      setProcessed([]);
+      return;
+    }
+    setError(null);
+    const currentBls = loadInvoicedBls();
+    const rows = processRows(filteredRows, rates, ebs).map((r) => {
+      if (r.blNumber && currentBls[r.blNumber]) {
+        return { ...r, duplicate: currentBls[r.blNumber] };
+      }
+      return r;
+    });
+    setProcessed(rows);
+  };
+
+  const handleMarkInvoiced = () => {
+    if (!processed?.length) return;
+    const now = new Date().toISOString();
+    const blsInThisInvoice: string[] = [];
+    const updatedRegistry: InvoicedBLsRegistry = { ...loadInvoicedBls() };
+
+    const historyRows: InvoiceHistoryRow[] = processed.map((r) => ({
+      blNumber: r.blNumber,
+      agent: r.agent,
+      carrier: r.carrier,
+      route: r.route,
+      tipo: r.tipo,
+      bls: r.bls,
+      ctrs: r.ctrs,
+      total: r.total,
+    }));
+
+    for (const row of processed) {
+      if (!row.blNumber) continue;
+      updatedRegistry[row.blNumber] = {
+        bl: row.blNumber,
+        invoicedAt: now,
+        userId,
+        userName,
+      };
+      blsInThisInvoice.push(row.blNumber);
+    }
+
+    try {
+      window.localStorage.setItem(
+        INVOICED_BLS_KEY,
+        JSON.stringify(updatedRegistry)
+      );
+    } catch {
+      // ignore quota
+    }
+
+    const entry: InvoiceHistoryEntry = {
+      id: uid("inv"),
+      invoicedAt: now,
+      userId,
+      userName,
+      blCount: blsInThisInvoice.length,
+      bls: blsInThisInvoice,
+      rows: historyRows,
+      filterSummary,
+    };
+
+    try {
+      const key = invoiceHistoryKey(userId);
+      const existing = JSON.parse(
+        window.localStorage.getItem(key) ?? "[]"
+      ) as InvoiceHistoryEntry[];
+      existing.push(entry);
+      window.localStorage.setItem(key, JSON.stringify(existing));
+    } catch {
+      // ignore quota
+    }
+
+    setHistoryRefresh((n) => n + 1);
+    toast.success(
+      blsInThisInvoice.length
+        ? `${blsInThisInvoice.length} BL${blsInThisInvoice.length === 1 ? "" : "s"} marcado${blsInThisInvoice.length === 1 ? "" : "s"} como facturado${blsInThisInvoice.length === 1 ? "" : "s"}`
+        : "Facturación guardada en el historial"
+    );
   };
 
   const renderCell = (
@@ -277,12 +484,14 @@ export default function InvoicingTab() {
     return <div className="text-gray-500 py-8 text-center">Cargando...</div>;
   }
 
+  const duplicateCount = processed?.filter((r) => r.duplicate).length ?? 0;
+
   return (
     <div className="flex flex-col gap-4">
       <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
         <h3 className="font-semibold mb-3">Subir Excel de facturación</h3>
         <p className="text-xs text-gray-500 mb-3">
-          Columnas esperadas: agente, carrier, ruta, tipo, bls, ctrs, notas.
+          Columnas esperadas: bl, etd, agente, carrier, ruta, tipo, bls, ctrs, notas.
         </p>
 
         <div
@@ -341,6 +550,75 @@ export default function InvoicingTab() {
           className="hidden"
         />
 
+        {rawRows.length > 0 && (
+          <div className="mt-4 border border-gray-200 rounded-md p-3 bg-gray-50">
+            <div className="text-sm font-medium mb-2">Filtrar qué filas procesar</div>
+            <div className="flex flex-col gap-3 text-sm">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="filter-mode"
+                  checked={filterMode === "all"}
+                  onChange={() => setFilterMode("all")}
+                />
+                Todas las filas ({rawRows.length})
+              </label>
+              <label className="flex flex-wrap items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="filter-mode"
+                  checked={filterMode === "rows"}
+                  onChange={() => setFilterMode("rows")}
+                />
+                Por rango de filas: Desde
+                <input
+                  type="number"
+                  min={1}
+                  max={rawRows.length}
+                  value={rowFrom}
+                  onChange={(e) => setRowFrom(e.target.value)}
+                  onClick={() => setFilterMode("rows")}
+                  className="border border-gray-200 rounded-md p-1 h-8 w-20"
+                />
+                hasta
+                <input
+                  type="number"
+                  min={1}
+                  max={rawRows.length}
+                  value={rowTo}
+                  onChange={(e) => setRowTo(e.target.value)}
+                  onClick={() => setFilterMode("rows")}
+                  className="border border-gray-200 rounded-md p-1 h-8 w-20"
+                />
+              </label>
+              <label className="flex flex-wrap items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="filter-mode"
+                  checked={filterMode === "etd"}
+                  onChange={() => setFilterMode("etd")}
+                />
+                Por fecha de zarpe (ETD): Desde
+                <input
+                  type="date"
+                  value={etdFrom}
+                  onChange={(e) => setEtdFrom(e.target.value)}
+                  onClick={() => setFilterMode("etd")}
+                  className="border border-gray-200 rounded-md p-1 h-8"
+                />
+                hasta
+                <input
+                  type="date"
+                  value={etdTo}
+                  onChange={(e) => setEtdTo(e.target.value)}
+                  onClick={() => setFilterMode("etd")}
+                  className="border border-gray-200 rounded-md p-1 h-8"
+                />
+              </label>
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-3 mt-3">
           <Button onClick={handleProcess} disabled={!rawRows.length}>
             Procesar
@@ -352,9 +630,21 @@ export default function InvoicingTab() {
           >
             Descargar Excel
           </Button>
+          {processed && processed.length > 0 && (
+            <Button onClick={handleMarkInvoiced}>
+              Marcar como facturado ({processed.length})
+            </Button>
+          )}
         </div>
 
         {error && <div className="mt-3 text-sm text-red-600">{error}</div>}
+        {processed && duplicateCount > 0 && (
+          <div className="mt-3 text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2">
+            ⚠️ {duplicateCount} BL{duplicateCount === 1 ? "" : "s"} ya había
+            {duplicateCount === 1 ? "" : "n"} sido facturado
+            {duplicateCount === 1 ? "" : "s"} previamente. Revisá las filas marcadas antes de continuar.
+          </div>
+        )}
       </div>
 
       {processed && (
@@ -363,6 +653,8 @@ export default function InvoicingTab() {
             <thead className="bg-gray-50">
               <tr>
                 {[
+                  "BL",
+                  "ETD",
                   "Agente",
                   "Carrier",
                   "Ruta",
@@ -389,54 +681,75 @@ export default function InvoicingTab() {
               {processed.map((r, idx) => {
                 const agentColor = AGENT_COLORS[r.agent];
                 return (
-                  <tr
-                    key={idx}
-                    style={agentColor ? { backgroundColor: agentColor } : undefined}
-                    className="text-sm"
-                  >
-                    <td
-                      className={`px-4 py-2 font-medium whitespace-nowrap ${
-                        r.pending.has("agent") ? "bg-yellow-200" : ""
-                      }`}
+                  <Fragment key={idx}>
+                    <tr
+                      style={agentColor ? { backgroundColor: agentColor } : undefined}
+                      className="text-sm"
                     >
-                      {r.agent || "—"}
-                    </td>
-                    <td
-                      className={`px-4 py-2 whitespace-nowrap ${
-                        r.pending.has("carrier") ? "bg-yellow-200" : ""
-                      }`}
-                    >
-                      {r.carrier || "—"}
-                    </td>
-                    <td className="px-4 py-2 whitespace-nowrap">{r.route || "—"}</td>
-                    <td
-                      className={`px-4 py-2 whitespace-nowrap ${
-                        r.pending.has("tipo") ? "bg-yellow-200" : ""
-                      }`}
-                    >
-                      {r.tipo || "—"}
-                    </td>
-                    <td
-                      className={`px-4 py-2 whitespace-nowrap ${
-                        r.pending.has("bls") ? "bg-yellow-200" : ""
-                      }`}
-                    >
-                      {r.bls}
-                    </td>
-                    <td
-                      className={`px-4 py-2 whitespace-nowrap ${
-                        r.pending.has("ctrs") ? "bg-yellow-200" : ""
-                      }`}
-                    >
-                      {r.ctrs}
-                    </td>
-                    {renderCell(r.sf, "sf", r)}
-                    {renderCell(r.blFee, "blFee", r)}
-                    {renderCell(r.af, "af", r)}
-                    {renderCell(r.ebs, "ebs", r)}
-                    {renderCell(r.total, "total", r)}
-                    <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
-                  </tr>
+                      <td className="px-4 py-2 font-mono whitespace-nowrap">
+                        {r.blNumber || "—"}
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-xs">
+                        {r.etd || "—"}
+                      </td>
+                      <td
+                        className={`px-4 py-2 font-medium whitespace-nowrap ${
+                          r.pending.has("agent") ? "bg-yellow-200" : ""
+                        }`}
+                      >
+                        {r.agent || "—"}
+                      </td>
+                      <td
+                        className={`px-4 py-2 whitespace-nowrap ${
+                          r.pending.has("carrier") ? "bg-yellow-200" : ""
+                        }`}
+                      >
+                        {r.carrier || "—"}
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap">{r.route || "—"}</td>
+                      <td
+                        className={`px-4 py-2 whitespace-nowrap ${
+                          r.pending.has("tipo") ? "bg-yellow-200" : ""
+                        }`}
+                      >
+                        {r.tipo || "—"}
+                      </td>
+                      <td
+                        className={`px-4 py-2 whitespace-nowrap ${
+                          r.pending.has("bls") ? "bg-yellow-200" : ""
+                        }`}
+                      >
+                        {r.bls}
+                      </td>
+                      <td
+                        className={`px-4 py-2 whitespace-nowrap ${
+                          r.pending.has("ctrs") ? "bg-yellow-200" : ""
+                        }`}
+                      >
+                        {r.ctrs}
+                      </td>
+                      {renderCell(r.sf, "sf", r)}
+                      {renderCell(r.blFee, "blFee", r)}
+                      {renderCell(r.af, "af", r)}
+                      {renderCell(r.ebs, "ebs", r)}
+                      {renderCell(r.total, "total", r)}
+                      <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
+                    </tr>
+                    {r.duplicate && (
+                      <tr className="bg-yellow-100 text-xs">
+                        <td
+                          colSpan={14}
+                          className="px-4 py-2 text-yellow-900 border-l-4 border-yellow-500"
+                        >
+                          ⚠️ Este BL ya fue facturado el{" "}
+                          <strong>
+                            {formatDuplicateDate(r.duplicate.invoicedAt)}
+                          </strong>{" "}
+                          por <strong>{r.duplicate.userName}</strong>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -448,6 +761,13 @@ export default function InvoicingTab() {
           )}
         </div>
       )}
+
+      <InvoicingHistory
+        currentUserId={userId}
+        currentUserName={userName}
+        isAdmin={isAdmin}
+        refreshToken={historyRefresh}
+      />
     </div>
   );
 }

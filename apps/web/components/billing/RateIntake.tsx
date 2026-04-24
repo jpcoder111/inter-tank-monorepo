@@ -81,9 +81,12 @@ function readAsBase64(file: File): Promise<{ base64: string; mediaType: string }
     reader.onload = () => {
       const dataUrl = reader.result as string;
       const base64 = dataUrl.split(",")[1] ?? "";
-      resolve({ base64, mediaType: file.type || "image/png" });
+      const fallback = file.name.toLowerCase().endsWith(".pdf")
+        ? "application/pdf"
+        : "image/png";
+      resolve({ base64, mediaType: file.type || fallback });
     };
-    reader.onerror = () => reject(new Error("No se pudo leer la imagen"));
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
     reader.readAsDataURL(file);
   });
 }
@@ -187,12 +190,13 @@ export default function RateIntake({
       let content: string | ContentPayload;
       if (mode === "image") {
         if (!imageData) {
-          setError("Subí una imagen primero.");
+          setError("Subí un archivo primero.");
           return;
         }
+        const isPdf = imageData.mediaType === "application/pdf";
         content = [
           {
-            type: "image",
+            type: isPdf ? "document" : "image",
             source: {
               type: "base64",
               media_type: imageData.mediaType,
@@ -201,7 +205,9 @@ export default function RateIntake({
           },
           {
             type: "text",
-            text: "Extraé los datos de la imagen según las instrucciones del system.",
+            text: isPdf
+              ? "Extraé los datos del PDF según las instrucciones del system."
+              : "Extraé los datos de la imagen según las instrucciones del system.",
           },
         ];
       } else if (mode === "excel") {
@@ -253,8 +259,8 @@ export default function RateIntake({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <IntakeCard
             icon="📷"
-            title="Imagen o correo"
-            desc="Subí un screenshot o foto y Claude extrae los datos"
+            title="Imagen, PDF o correo"
+            desc="Subí un screenshot, foto o PDF y Claude extrae los datos"
             onClick={() => setMode("image")}
           />
           <IntakeCard
@@ -279,7 +285,7 @@ export default function RateIntake({
       <div className="flex justify-between items-center mb-3">
         <h3 className="font-semibold">
           {mode === "image"
-            ? "Subir imagen o screenshot"
+            ? "Subir imagen, PDF o screenshot"
             : mode === "excel"
               ? "Subir Excel"
               : "Pegar texto"}
@@ -299,16 +305,23 @@ export default function RateIntake({
           <button
             type="button"
             onClick={() => imageInput.current?.click()}
-            className="w-full cursor-pointer border-2 border-dashed border-gray-300 rounded-lg p-6 text-sm text-gray-600 hover:border-blue-500 hover:bg-blue-50 transition-colors"
+            className="w-full cursor-pointer border-2 border-dashed border-gray-300 rounded-lg p-6 text-sm text-gray-600 hover:border-blue-500 hover:bg-blue-50 transition-colors text-left"
           >
-            {fileName
-              ? `Imagen: ${fileName} — clic para cambiar`
-              : "Hacé clic para elegir una imagen (PNG, JPG)"}
+            {fileName ? (
+              <span>{fileName} — clic para cambiar</span>
+            ) : (
+              <>
+                <div className="font-medium">Hacé clic para elegir un archivo</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  PNG, JPG, PDF — screenshot de email, foto de pantalla, documento PDF, etc.
+                </div>
+              </>
+            )}
           </button>
           <input
             ref={imageInput}
             type="file"
-            accept="image/*"
+            accept="image/*,.pdf"
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) handleImage(file);
@@ -366,7 +379,7 @@ export default function RateIntake({
 type ContentPayload = Array<
   | { type: "text"; text: string }
   | {
-      type: "image";
+      type: "image" | "document";
       source: { type: "base64"; media_type: string; data: string };
     }
 >;

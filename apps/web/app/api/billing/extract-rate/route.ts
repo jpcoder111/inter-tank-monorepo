@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-type ImageSource =
-  | { type: "base64"; media_type: string; data: string }
-  | { type: "url"; url: string };
+type Base64Source = { type: "base64"; media_type: string; data: string };
+type UrlSource = { type: "url"; url: string };
 
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; source: ImageSource };
+  | { type: "image"; source: Base64Source | UrlSource }
+  | { type: "document"; source: Base64Source | UrlSource };
 
 type RequestBody = {
   system: string;
@@ -18,9 +18,9 @@ type RequestBody = {
 const VISION_MODEL = "claude-sonnet-4-6";
 const TEXT_MODEL = "claude-haiku-4-5-20251001";
 
-function hasImage(content: string | ContentBlock[]): boolean {
+function hasMedia(content: string | ContentBlock[]): boolean {
   if (typeof content === "string") return false;
-  return content.some((c) => c.type === "image");
+  return content.some((c) => c.type === "image" || c.type === "document");
 }
 
 export async function POST(req: NextRequest) {
@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const model = hasImage(content) ? VISION_MODEL : TEXT_MODEL;
+  const model = hasMedia(content) ? VISION_MODEL : TEXT_MODEL;
   const userContent: ContentBlock[] =
     typeof content === "string" ? [{ type: "text", text: content }] : content;
 

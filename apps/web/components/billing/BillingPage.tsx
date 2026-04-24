@@ -4,9 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useSession } from "@/providers/SessionProvider";
 import RatesTab from "./RatesTab";
 import EbsTab from "./EbsTab";
+import LocalChargesTab from "./LocalChargesTab";
 import InvoicingTab from "./InvoicingTab";
 
-type TabKey = "rates" | "ebs" | "invoicing";
+type TabKey = "rates" | "ebs" | "local" | "invoicing";
 
 export default function BillingPage() {
   const { session, isLoading } = useSession();
@@ -17,6 +18,7 @@ export default function BillingPage() {
       [
         { key: "rates" as const, label: "Tarifas Agentes", adminOnly: true },
         { key: "ebs" as const, label: "Tabla EBS", adminOnly: true },
+        { key: "local" as const, label: "Gastos Locales", adminOnly: true },
         { key: "invoicing" as const, label: "Facturación", adminOnly: false },
       ].filter((t) => (t.adminOnly ? isAdmin : true)),
     [isAdmin]
@@ -63,6 +65,7 @@ export default function BillingPage() {
       <div className="flex-1 min-h-0 overflow-auto">
         {active === "rates" && isAdmin && <RatesTab />}
         {active === "ebs" && isAdmin && <EbsTab />}
+        {active === "local" && isAdmin && <LocalChargesTab />}
         {active === "invoicing" && <InvoicingTab />}
       </div>
     </div>

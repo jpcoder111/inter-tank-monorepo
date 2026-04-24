@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
 
-type IntakeType = "rate" | "ebs";
+type IntakeType = "rate" | "ebs" | "local_std" | "local_exception";
 type Mode = "choose" | "image" | "excel" | "manual";
 
 const RATE_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input describe una tarifa (agente logístico, carrier, ruta, tipo de contenedor, costos, vigencia).
@@ -36,6 +36,43 @@ Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings fal
   "validFrom": string,     // YYYY-MM-DD
   "validTo": string,       // YYYY-MM-DD
   "notes": string          // cualquier observación (unidad original si fue /ctr, exclusiones, etc.)
+}`;
+
+const LOCAL_STD_SYSTEM = `Sos un extractor de TARIFAS ESTÁNDAR de gastos locales portuarios (OTHC, sello, AMS, BL Fee, Gate Out).
+Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
+
+{
+  "name": string,              // nombre de la tarifa (ej: "Estándar", "San Clemente")
+  "othcDry": number,           // OTHC Dry USD/unidad
+  "othcReefer": number,        // OTHC Reefer USD/unidad
+  "sello": number,             // Sello USD/unidad
+  "ams": number,               // AMS USD/BL
+  "blFee": number,             // BL Fee USD/BL
+  "gateOutDry": number,        // Gate Out Dry USD/unidad
+  "gateOutReefer": number,     // Gate Out Reefer USD/unidad
+  "gateOutConditions": string, // condiciones de aplicación de Gate Out (navieras, destinos)
+  "validFrom": string,         // YYYY-MM-DD
+  "notes": string              // cualquier observación
+}`;
+
+const LOCAL_EXCEPTION_SYSTEM = `Sos un extractor de EXCEPCIONES de gastos locales portuarios por cliente/naviera.
+Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. El tipo debe ser "Dry" o "Reefer". No incluyas comentarios, markdown ni texto adicional.
+
+{
+  "customer": string,            // cliente (ej: "Concha y Toro", "Mipster – IWS", "De Martino / Santa Teresa")
+  "carrier": string,             // naviera (ej: "OOCL", "Evergreen", "CMA CGM", "Yang Ming", "Todas las navieras")
+  "tipo": "Dry" | "Reefer",
+  "othc": number,                // USD/unidad
+  "sello": number,               // USD/unidad (puede ser 0)
+  "ams": number,                 // USD/BL (puede ser 0)
+  "blFee": number,               // USD/BL (puede ser 0)
+  "gateOut": number,             // USD/unidad (0 si no aplica)
+  "gateOutPorts": string,        // puertos donde aplica Gate Out
+  "gateOutUnitTypes": string,    // tipos de unidad donde aplica Gate Out
+  "otherCharges": number,        // cargos adicionales USD/unidad (0 si no hay)
+  "otherChargesDetail": string,  // descripción de los otros cargos (ej: "Security Surcharge 10/unit + TPO TPA 12/unit")
+  "notes": string,
+  "validFrom": string            // YYYY-MM-DD
 }`;
 
 function readAsBase64(file: File): Promise<{ base64: string; mediaType: string }> {
@@ -99,7 +136,14 @@ export default function RateIntake({
   const imageInput = useRef<HTMLInputElement>(null);
   const excelInput = useRef<HTMLInputElement>(null);
 
-  const system = type === "rate" ? RATE_SYSTEM : EBS_SYSTEM;
+  const system =
+    type === "rate"
+      ? RATE_SYSTEM
+      : type === "ebs"
+        ? EBS_SYSTEM
+        : type === "local_std"
+          ? LOCAL_STD_SYSTEM
+          : LOCAL_EXCEPTION_SYSTEM;
 
   const resetMode = () => {
     setMode("choose");

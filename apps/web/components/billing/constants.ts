@@ -42,6 +42,8 @@ export const AGENT_COLORS: Record<string, string> = {
 // existing localStorage data is replaced with the new seeds on next load.
 export const RATES_STORAGE_KEY = "it_rates_v2";
 export const EBS_STORAGE_KEY = "it_ebs_v3";
+export const LOCAL_STD_STORAGE_KEY = "it_local_std";
+export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions";
 export const INVOICED_BLS_KEY = "it_invoiced_bls";
 export const INVOICE_HISTORY_PREFIX = "it_invoiced_history_";
 
@@ -334,3 +336,221 @@ export function uniqueSuggestions(
   }
   return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
+
+// ===== Local charges (Gastos Locales) =====
+
+export type LocalStandardRate = {
+  id: string;
+  name: string;
+  othcDry: number;
+  othcReefer: number;
+  sello: number;
+  ams: number;
+  blFee: number;
+  gateOutDry: number;
+  gateOutReefer: number;
+  gateOutConditions: string;
+  validFrom: string;
+  notes: string;
+};
+
+export type LocalExceptionTipo = "Dry" | "Reefer";
+
+export type LocalException = {
+  id: string;
+  customer: string;
+  carrier: string;
+  tipo: LocalExceptionTipo;
+  othc: number;
+  sello: number;
+  ams: number;
+  blFee: number;
+  gateOut: number;
+  gateOutPorts: string;
+  gateOutUnitTypes: string;
+  otherCharges: number;
+  otherChargesDetail: string;
+  notes: string;
+  validFrom: string;
+};
+
+export const LOCAL_GATE_OUT_CONDITIONS_DEFAULT =
+  "Solo aplica para navieras CMA-CGM, PIL, OOCL y COSCO. Yang Ming: solo algunos destinos Asia.";
+
+export const CUSTOMER_SUGGESTIONS = [
+  "Concha y Toro",
+  "Mipster – IWS",
+  "De Martino / Santa Teresa",
+] as const;
+
+export const LOCAL_CARRIER_SUGGESTIONS = [
+  "OOCL",
+  "HAPAG",
+  "CMA-CGM",
+  "CMA CGM",
+  "PIL",
+  "COSCO",
+  "Evergreen",
+  "MSC",
+  "Yang Ming",
+  "Todas las navieras",
+] as const;
+
+export const CUSTOMER_COLORS: Record<string, string> = {
+  "Concha y Toro": "#d9ead3",
+  "Mipster – IWS": "#cfe2f3",
+  "De Martino / Santa Teresa": "#d9d2e9",
+};
+
+export const SEED_LOCAL_STANDARDS: LocalStandardRate[] = [
+  {
+    id: "seed-local-std-default-20260303",
+    name: "Estándar",
+    othcDry: 185,
+    othcReefer: 315,
+    sello: 35,
+    ams: 40,
+    blFee: 60,
+    gateOutDry: 185,
+    gateOutReefer: 205,
+    gateOutConditions: LOCAL_GATE_OUT_CONDITIONS_DEFAULT,
+    validFrom: "2026-03-03",
+    notes: "Informado por Bárbara",
+  },
+  {
+    id: "seed-local-std-sanclemente-20260303",
+    name: "San Clemente",
+    othcDry: 165,
+    othcReefer: 315,
+    sello: 35,
+    ams: 40,
+    blFee: 60,
+    gateOutDry: 185,
+    gateOutReefer: 205,
+    gateOutConditions: LOCAL_GATE_OUT_CONDITIONS_DEFAULT,
+    validFrom: "2026-03-03",
+    notes: "",
+  },
+];
+
+export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
+  {
+    id: "seed-exc-mipster-iws-dry",
+    customer: "Mipster – IWS",
+    carrier: "Todas las navieras",
+    tipo: "Dry",
+    othc: 135,
+    sello: 35,
+    ams: 40,
+    blFee: 60,
+    gateOut: 105,
+    gateOutPorts: "",
+    gateOutUnitTypes: "",
+    otherCharges: 0,
+    otherChargesDetail: "",
+    notes: "Gate Out solo cuando la naviera corresponda (ver condiciones estándar)",
+    validFrom: "2026-03-03",
+  },
+  {
+    id: "seed-exc-cyt-oocl-dry",
+    customer: "Concha y Toro",
+    carrier: "OOCL",
+    tipo: "Dry",
+    othc: 100,
+    sello: 0,
+    ams: 0,
+    blFee: 0,
+    gateOut: 110,
+    gateOutPorts: "",
+    gateOutUnitTypes: "",
+    otherCharges: 22,
+    otherChargesDetail: "Security Surcharge 10/unit + TPO TPA 12/unit + Doc Fee 38/BL",
+    notes: "",
+    validFrom: "2026-03-03",
+  },
+  {
+    id: "seed-exc-cyt-evergreen-dry",
+    customer: "Concha y Toro",
+    carrier: "Evergreen",
+    tipo: "Dry",
+    othc: 100,
+    sello: 0,
+    ams: 0,
+    blFee: 50,
+    gateOut: 0,
+    gateOutPorts: "",
+    gateOutUnitTypes: "",
+    otherCharges: 0,
+    otherChargesDetail: "",
+    notes: "",
+    validFrom: "2026-03-03",
+  },
+  {
+    id: "seed-exc-cyt-pil-dry",
+    customer: "Concha y Toro",
+    carrier: "PIL",
+    tipo: "Dry",
+    othc: 110,
+    sello: 0,
+    ams: 0,
+    blFee: 40,
+    gateOut: 120,
+    gateOutPorts: "",
+    gateOutUnitTypes: "",
+    otherCharges: 0,
+    otherChargesDetail: "",
+    notes: "",
+    validFrom: "2026-03-03",
+  },
+  {
+    id: "seed-exc-cyt-cma-dry",
+    customer: "Concha y Toro",
+    carrier: "CMA CGM",
+    tipo: "Dry",
+    othc: 135,
+    sello: 30,
+    ams: 0,
+    blFee: 60,
+    gateOut: 100,
+    gateOutPorts: "",
+    gateOutUnitTypes: "",
+    otherCharges: 0,
+    otherChargesDetail: "",
+    notes: "",
+    validFrom: "2026-03-03",
+  },
+  {
+    id: "seed-exc-cyt-yangming-dry",
+    customer: "Concha y Toro",
+    carrier: "Yang Ming",
+    tipo: "Dry",
+    othc: 0,
+    sello: 0,
+    ams: 0,
+    blFee: 0,
+    gateOut: 190,
+    gateOutPorts: "Configurar puertos específicos",
+    gateOutUnitTypes: "Configurar tipos de unidad",
+    otherCharges: 0,
+    otherChargesDetail: "",
+    notes: "No se cobra siempre — solo algunos puertos y tipos de unidad",
+    validFrom: "2026-03-03",
+  },
+  {
+    id: "seed-exc-demartino-reefer",
+    customer: "De Martino / Santa Teresa",
+    carrier: "Todas las navieras",
+    tipo: "Reefer",
+    othc: 200,
+    sello: 0,
+    ams: 0,
+    blFee: 60,
+    gateOut: 140,
+    gateOutPorts: "",
+    gateOutUnitTypes: "",
+    otherCharges: 0,
+    otherChargesDetail: "",
+    notes: "",
+    validFrom: "2026-03-03",
+  },
+];

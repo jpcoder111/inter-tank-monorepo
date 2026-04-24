@@ -1,7 +1,14 @@
-export const AGENTS = ["IWS", "Van Moer", "Asstra", "HCL", "Scan", "CCL", "BULLET"] as const;
-export type Agent = (typeof AGENTS)[number];
+export const AGENT_SUGGESTIONS = [
+  "IWS",
+  "Van Moer",
+  "Asstra",
+  "HCL",
+  "Scan",
+  "CCL",
+  "BULLET",
+] as const;
 
-export const CARRIERS = [
+export const CARRIER_SUGGESTIONS = [
   "OOCL",
   "HAPAG",
   "CMA-CGM",
@@ -10,19 +17,18 @@ export const CARRIERS = [
   "Evergreen",
   "MSC",
 ] as const;
-export type Carrier = (typeof CARRIERS)[number];
 
-export const CONTAINER_TYPES = [
+export const CONTAINER_TYPE_SUGGESTIONS = [
   "20'",
   "Flexi",
+  "20'-Flexi",
   "40'",
   "40'HC",
   "20'RF",
   "40'RF",
 ] as const;
-export type ContainerType = (typeof CONTAINER_TYPES)[number];
 
-export const AGENT_COLORS: Record<Agent, string> = {
+export const AGENT_COLORS: Record<string, string> = {
   IWS: "#d9ead3",
   "Van Moer": "#cfe2f3",
   Asstra: "#d9d2e9",
@@ -32,15 +38,16 @@ export const AGENT_COLORS: Record<Agent, string> = {
   BULLET: "#f5eef8",
 };
 
-export const RATES_STORAGE_KEY = "it_rates";
-export const EBS_STORAGE_KEY = "it_ebs";
+// Bumped to _v2 so users with old seed data get the new real seeds on next load.
+export const RATES_STORAGE_KEY = "it_rates_v2";
+export const EBS_STORAGE_KEY = "it_ebs_v2";
 
 export type Rate = {
   id: string;
-  agent: Agent;
-  carrier: Carrier;
+  agent: string;
+  carrier: string;
   route: string;
-  tipo: ContainerType;
+  tipo: string;
   sf: number;
   blFee: number;
   af: number;
@@ -53,9 +60,9 @@ export type Rate = {
 
 export type Ebs = {
   id: string;
-  carrier: Carrier;
+  carrier: string;
   traffic: string;
-  tipo: ContainerType;
+  tipo: string;
   amountPerTEU: number;
   validFrom: string;
   validTo: string;
@@ -64,82 +71,212 @@ export type Ebs = {
 
 export const SEED_RATES: Rate[] = [
   {
-    id: "seed-iws-1",
+    id: "seed-iws-rha-20flexi",
     agent: "IWS",
     carrier: "OOCL",
-    route: "BUE-SHA",
-    tipo: "20'",
-    sf: 1200,
-    blFee: 75,
-    af: 150,
+    route: "Rotterdam-Hamburg-Antwerp-London",
+    tipo: "20'-Flexi",
+    sf: 700,
+    blFee: 38,
+    af: 75,
     afMax: 300,
-    flexiArg: 450,
+    flexiArg: 800,
     validFrom: "2026-01-01",
     validTo: "2026-06-30",
     notes: "",
   },
   {
-    id: "seed-vanmoer-1",
-    agent: "Van Moer",
-    carrier: "HAPAG",
-    route: "BUE-HAM",
+    id: "seed-iws-rha-40",
+    agent: "IWS",
+    carrier: "OOCL",
+    route: "Rotterdam-Hamburg-Antwerp-London",
     tipo: "40'",
-    sf: 1800,
-    blFee: 90,
-    af: 200,
-    afMax: 400,
+    sf: 900,
+    blFee: 38,
+    af: 75,
+    afMax: 300,
     flexiArg: 0,
     validFrom: "2026-01-01",
-    validTo: "2026-12-31",
+    validTo: "2026-06-30",
     notes: "",
   },
   {
-    id: "seed-asstra-1",
+    id: "seed-iws-cph-20flexi",
+    agent: "IWS",
+    carrier: "OOCL",
+    route: "Copenhagen",
+    tipo: "20'-Flexi",
+    sf: 1100,
+    blFee: 38,
+    af: 75,
+    afMax: 300,
+    flexiArg: 0,
+    validFrom: "2026-01-01",
+    validTo: "2026-06-30",
+    notes: "",
+  },
+  {
+    id: "seed-iws-cph-40",
+    agent: "IWS",
+    carrier: "OOCL",
+    route: "Copenhagen",
+    tipo: "40'",
+    sf: 1200,
+    blFee: 38,
+    af: 75,
+    afMax: 300,
+    flexiArg: 0,
+    validFrom: "2026-01-01",
+    validTo: "2026-06-30",
+    notes: "",
+  },
+  {
+    id: "seed-vanmoer-rha-20flexi",
+    agent: "Van Moer",
+    carrier: "OOCL",
+    route: "Rotterdam-Hamburg-Antwerp-London",
+    tipo: "20'-Flexi",
+    sf: 580,
+    blFee: 40,
+    af: 0,
+    afMax: 0,
+    flexiArg: 0,
+    validFrom: "2026-01-01",
+    validTo: "2026-06-30",
+    notes: "",
+  },
+  {
+    id: "seed-vanmoer-rha-40",
+    agent: "Van Moer",
+    carrier: "OOCL",
+    route: "Rotterdam-Hamburg-Antwerp-London",
+    tipo: "40'",
+    sf: 695,
+    blFee: 40,
+    af: 0,
+    afMax: 0,
+    flexiArg: 800,
+    validFrom: "2026-01-01",
+    validTo: "2026-06-30",
+    notes: "",
+  },
+  {
+    id: "seed-asstra-klriga-40",
     agent: "Asstra",
-    carrier: "MSC",
-    route: "BUE-RTM",
-    tipo: "Flexi",
-    sf: 1500,
+    carrier: "OOCL",
+    route: "Klaipeda-Riga",
+    tipo: "40'",
+    sf: 1600,
+    blFee: 60,
+    af: 0,
+    afMax: 0,
+    flexiArg: 0,
+    validFrom: "2026-04-01",
+    validTo: "2026-06-30",
+    notes: "",
+  },
+  {
+    id: "seed-ccl-londongw-40",
+    agent: "CCL",
+    carrier: "OOCL",
+    route: "London Gateway",
+    tipo: "40'",
+    sf: 970,
+    blFee: 85,
+    af: 0,
+    afMax: 0,
+    flexiArg: 0,
+    validFrom: "2026-04-01",
+    validTo: "2026-06-30",
+    notes: "EBS variable por línea",
+  },
+  {
+    id: "seed-bullet-grangemouth-40",
+    agent: "BULLET",
+    carrier: "HAPAG",
+    route: "Grangemouth",
+    tipo: "40'",
+    sf: 1800,
     blFee: 80,
-    af: 180,
-    afMax: 350,
-    flexiArg: 500,
-    validFrom: "2026-02-01",
-    validTo: "2026-05-15",
-    notes: "Confirmar con Madrid",
+    af: 0,
+    afMax: 0,
+    flexiArg: 0,
+    validFrom: "2026-01-01",
+    validTo: "2026-06-30",
+    notes: "",
+  },
+  {
+    id: "seed-hcl-rotterdam-flexi",
+    agent: "HCL",
+    carrier: "CMA-CGM",
+    route: "Rotterdam",
+    tipo: "Flexi",
+    sf: 2905,
+    blFee: 0,
+    af: 0,
+    afMax: 0,
+    flexiArg: 0,
+    validFrom: "2026-04-01",
+    validTo: "2026-06-30",
+    notes: "All-in FCA: trucking + local + Flexibag + OF + EBS incluido",
+  },
+  {
+    id: "seed-scan-cph-20",
+    agent: "Scan",
+    carrier: "OOCL",
+    route: "Copenhagen",
+    tipo: "20'",
+    sf: 1300,
+    blFee: 0,
+    af: 0,
+    afMax: 0,
+    flexiArg: 0,
+    validFrom: "2025-10-01",
+    validTo: "2026-03-31",
+    notes: "BL fee pendiente — tarifa expirada",
   },
 ];
 
 export const SEED_EBS: Ebs[] = [
   {
-    id: "seed-ebs-1",
+    id: "seed-ebs-oocl-cl-neu-20flexi",
     carrier: "OOCL",
-    traffic: "ASIA",
-    tipo: "20'",
-    amountPerTEU: 120,
-    validFrom: "2026-01-01",
+    traffic: "Chile-N.Europa",
+    tipo: "20'-Flexi",
+    amountPerTEU: 126,
+    validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "",
   },
   {
-    id: "seed-ebs-2",
-    carrier: "HAPAG",
-    traffic: "EUROPA",
+    id: "seed-ebs-oocl-cl-neu-40",
+    carrier: "OOCL",
+    traffic: "Chile-N.Europa",
     tipo: "40'",
-    amountPerTEU: 180,
-    validFrom: "2026-01-01",
-    validTo: "2026-12-31",
+    amountPerTEU: 252,
+    validFrom: "2026-04-01",
+    validTo: "2026-06-30",
     notes: "",
   },
   {
-    id: "seed-ebs-3",
-    carrier: "MSC",
-    traffic: "EUROPA",
+    id: "seed-ebs-hapag-cl-grm-40",
+    carrier: "HAPAG",
+    traffic: "Chile-Grangemouth",
+    tipo: "40'",
+    amountPerTEU: 320,
+    validFrom: "2026-04-01",
+    validTo: "2026-06-30",
+    notes: "320/ctr (valor por container, no por TEU)",
+  },
+  {
+    id: "seed-ebs-cma-cl-neu-flexi",
+    carrier: "CMA-CGM",
+    traffic: "Chile-N.Europa",
     tipo: "Flexi",
-    amountPerTEU: 150,
-    validFrom: "2026-02-01",
-    validTo: "2026-05-15",
-    notes: "",
+    amountPerTEU: 160,
+    validFrom: "2026-04-01",
+    validTo: "2026-06-30",
+    notes: "Incluido en all-in HCL",
   },
 ];
 
@@ -159,4 +296,17 @@ export function getValidityStatus(validTo: string): ValidityStatus {
 
 export function uid(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function uniqueSuggestions(
+  existing: string[],
+  defaults: readonly string[] = []
+): string[] {
+  const set = new Set<string>();
+  for (const d of defaults) set.add(d);
+  for (const e of existing) {
+    const v = (e ?? "").trim();
+    if (v) set.add(v);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
 }

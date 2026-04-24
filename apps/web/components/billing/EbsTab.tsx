@@ -3,30 +3,43 @@
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
+import RateIntake from "./RateIntake";
 import {
-  CARRIERS,
-  CONTAINER_TYPES,
-  Carrier,
-  ContainerType,
+  CARRIER_SUGGESTIONS,
+  CONTAINER_TYPE_SUGGESTIONS,
   EBS_STORAGE_KEY,
   Ebs,
   SEED_EBS,
   uid,
+  uniqueSuggestions,
 } from "./constants";
 
 const emptyDraft: Omit<Ebs, "id"> = {
-  carrier: "OOCL",
+  carrier: "",
   traffic: "",
-  tipo: "20'",
+  tipo: "",
   amountPerTEU: 0,
   validFrom: "",
   validTo: "",
   notes: "",
 };
 
-function teuFor(tipo: ContainerType): number {
-  if (tipo.startsWith("40")) return 2;
-  return 1;
+function teuFor(tipo: string): number {
+  return tipo.startsWith("40") ? 2 : 1;
+}
+
+function toNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value.replace(/[^0-9.-]/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function toStr(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return String(value);
 }
 
 export default function EbsTab() {
@@ -36,15 +49,30 @@ export default function EbsTab() {
   );
 
   const [search, setSearch] = useState("");
-  const [carrierFilter, setCarrierFilter] = useState<Carrier | "">("");
+  const [carrierFilter, setCarrierFilter] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Omit<Ebs, "id">>(emptyDraft);
+  const [showIntake, setShowIntake] = useState(false);
   const [showForm, setShowForm] = useState(false);
+
+  const carrierSuggestions = useMemo(
+    () => uniqueSuggestions(items.map((r) => r.carrier), CARRIER_SUGGESTIONS),
+    [items]
+  );
+  const trafficSuggestions = useMemo(
+    () => uniqueSuggestions(items.map((r) => r.traffic)),
+    [items]
+  );
+  const tipoSuggestions = useMemo(
+    () => uniqueSuggestions(items.map((r) => r.tipo), CONTAINER_TYPE_SUGGESTIONS),
+    [items]
+  );
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
+    const cf = carrierFilter.toLowerCase().trim();
     return items.filter((r) => {
-      if (carrierFilter && r.carrier !== carrierFilter) return false;
+      if (cf && !r.carrier.toLowerCase().includes(cf)) return false;
       if (!q) return true;
       return (
         r.carrier.toLowerCase().includes(q) ||
@@ -58,7 +86,8 @@ export default function EbsTab() {
   const openNew = () => {
     setDraft(emptyDraft);
     setEditingId(null);
-    setShowForm(true);
+    setShowIntake(true);
+    setShowForm(false);
   };
 
   const openEdit = (ebs: Ebs) => {
@@ -66,6 +95,27 @@ export default function EbsTab() {
     void _id;
     setDraft(rest);
     setEditingId(ebs.id);
+    setShowIntake(false);
+    setShowForm(true);
+  };
+
+  const handleExtracted = (data: Record<string, unknown>) => {
+    setDraft({
+      carrier: toStr(data.carrier),
+      traffic: toStr(data.traffic),
+      tipo: toStr(data.tipo),
+      amountPerTEU: toNumber(data.amountPerTEU),
+      validFrom: toStr(data.validFrom),
+      validTo: toStr(data.validTo),
+      notes: toStr(data.notes),
+    });
+    setShowIntake(false);
+    setShowForm(true);
+  };
+
+  const skipIntake = () => {
+    setDraft(emptyDraft);
+    setShowIntake(false);
     setShowForm(true);
   };
 
@@ -75,6 +125,12 @@ export default function EbsTab() {
     } else {
       add({ ...draft, id: uid("ebs") });
     }
+    setShowForm(false);
+    setEditingId(null);
+  };
+
+  const cancelAll = () => {
+    setShowIntake(false);
     setShowForm(false);
     setEditingId(null);
   };
@@ -93,21 +149,39 @@ export default function EbsTab() {
           onChange={(e) => setSearch(e.target.value)}
           className="border border-gray-200 rounded-md p-2 h-10 min-w-48"
         />
-        <select
+        <input
+          type="text"
+          list="ebs-filter-carrier"
+          placeholder="Filtrar carrier..."
           value={carrierFilter}
-          onChange={(e) => setCarrierFilter(e.target.value as Carrier | "")}
+          onChange={(e) => setCarrierFilter(e.target.value)}
           className="border border-gray-200 rounded-md p-2 h-10"
-        >
-          <option value="">Todos los carriers</option>
-          {CARRIERS.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
+        />
+        <datalist id="ebs-filter-carrier">
+          {carrierSuggestions.map((c) => (
+            <option key={c} value={c} />
           ))}
-        </select>
+        </datalist>
         <div className="flex-1" />
         <Button onClick={openNew}>Nuevo EBS</Button>
       </div>
+
+      {showIntake && (
+        <div className="flex flex-col gap-2">
+          <RateIntake
+            type="ebs"
+            onExtracted={handleExtracted}
+            onCancel={cancelAll}
+          />
+          <button
+            type="button"
+            onClick={skipIntake}
+            className="text-sm text-blue-700 hover:underline self-start cursor-pointer"
+          >
+            Prefiero completar manualmente el formulario →
+          </button>
+        </div>
+      )}
 
       {showForm && (
         <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
@@ -117,45 +191,49 @@ export default function EbsTab() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <label className="flex flex-col gap-1 text-sm">
               Carrier
-              <select
+              <input
+                type="text"
+                list="ebs-carrier-sugg"
                 value={draft.carrier}
-                onChange={(e) =>
-                  setDraft({ ...draft, carrier: e.target.value as Carrier })
-                }
+                onChange={(e) => setDraft({ ...draft, carrier: e.target.value })}
                 className="border border-gray-200 rounded-md p-2 h-10"
-              >
-                {CARRIERS.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
+              />
+              <datalist id="ebs-carrier-sugg">
+                {carrierSuggestions.map((c) => (
+                  <option key={c} value={c} />
                 ))}
-              </select>
+              </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Tráfico
               <input
                 type="text"
+                list="ebs-traffic-sugg"
                 value={draft.traffic}
                 onChange={(e) => setDraft({ ...draft, traffic: e.target.value })}
-                placeholder="ASIA / EUROPA / ..."
+                placeholder="Chile-N.Europa / Chile-Grangemouth / ..."
                 className="border border-gray-200 rounded-md p-2 h-10"
               />
+              <datalist id="ebs-traffic-sugg">
+                {trafficSuggestions.map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Tipo
-              <select
+              <input
+                type="text"
+                list="ebs-tipo-sugg"
                 value={draft.tipo}
-                onChange={(e) =>
-                  setDraft({ ...draft, tipo: e.target.value as ContainerType })
-                }
+                onChange={(e) => setDraft({ ...draft, tipo: e.target.value })}
                 className="border border-gray-200 rounded-md p-2 h-10"
-              >
-                {CONTAINER_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
+              />
+              <datalist id="ebs-tipo-sugg">
+                {tipoSuggestions.map((t) => (
+                  <option key={t} value={t} />
                 ))}
-              </select>
+              </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Monto por TEU (USD)
@@ -197,13 +275,7 @@ export default function EbsTab() {
             </label>
           </div>
           <div className="flex justify-end gap-2 mt-4">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setShowForm(false);
-                setEditingId(null);
-              }}
-            >
+            <Button variant="outline" onClick={cancelAll}>
               Cancelar
             </Button>
             <Button onClick={handleSave}>Guardar</Button>

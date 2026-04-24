@@ -3,26 +3,25 @@
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
+import RateIntake from "./RateIntake";
 import {
-  AGENTS,
   AGENT_COLORS,
-  Agent,
-  CARRIERS,
-  CONTAINER_TYPES,
-  Carrier,
-  ContainerType,
+  AGENT_SUGGESTIONS,
+  CARRIER_SUGGESTIONS,
+  CONTAINER_TYPE_SUGGESTIONS,
   RATES_STORAGE_KEY,
   Rate,
   SEED_RATES,
   getValidityStatus,
   uid,
+  uniqueSuggestions,
 } from "./constants";
 
 const emptyDraft: Omit<Rate, "id"> = {
-  agent: "IWS",
-  carrier: "OOCL",
+  agent: "",
+  carrier: "",
   route: "",
-  tipo: "20'",
+  tipo: "",
   sf: 0,
   blFee: 0,
   af: 0,
@@ -54,6 +53,20 @@ function ValidityBadge({ validTo }: { validTo: string }) {
   );
 }
 
+function toNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value.replace(/[^0-9.-]/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function toString(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return String(value);
+}
+
 export default function RatesTab() {
   const { items, add, update, remove, hydrated } = useLocalStore<Rate>(
     RATES_STORAGE_KEY,
@@ -61,17 +74,37 @@ export default function RatesTab() {
   );
 
   const [search, setSearch] = useState("");
-  const [agentFilter, setAgentFilter] = useState<Agent | "">("");
-  const [carrierFilter, setCarrierFilter] = useState<Carrier | "">("");
+  const [agentFilter, setAgentFilter] = useState("");
+  const [carrierFilter, setCarrierFilter] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Omit<Rate, "id">>(emptyDraft);
+  const [showIntake, setShowIntake] = useState(false);
   const [showForm, setShowForm] = useState(false);
+
+  const agentSuggestions = useMemo(
+    () => uniqueSuggestions(items.map((r) => r.agent), AGENT_SUGGESTIONS),
+    [items]
+  );
+  const carrierSuggestions = useMemo(
+    () => uniqueSuggestions(items.map((r) => r.carrier), CARRIER_SUGGESTIONS),
+    [items]
+  );
+  const routeSuggestions = useMemo(
+    () => uniqueSuggestions(items.map((r) => r.route)),
+    [items]
+  );
+  const tipoSuggestions = useMemo(
+    () => uniqueSuggestions(items.map((r) => r.tipo), CONTAINER_TYPE_SUGGESTIONS),
+    [items]
+  );
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
+    const af = agentFilter.toLowerCase().trim();
+    const cf = carrierFilter.toLowerCase().trim();
     return items.filter((r) => {
-      if (agentFilter && r.agent !== agentFilter) return false;
-      if (carrierFilter && r.carrier !== carrierFilter) return false;
+      if (af && !r.agent.toLowerCase().includes(af)) return false;
+      if (cf && !r.carrier.toLowerCase().includes(cf)) return false;
       if (!q) return true;
       return (
         r.agent.toLowerCase().includes(q) ||
@@ -86,7 +119,8 @@ export default function RatesTab() {
   const openNew = () => {
     setDraft(emptyDraft);
     setEditingId(null);
-    setShowForm(true);
+    setShowIntake(true);
+    setShowForm(false);
   };
 
   const openEdit = (rate: Rate) => {
@@ -94,6 +128,32 @@ export default function RatesTab() {
     void _id;
     setDraft(rest);
     setEditingId(rate.id);
+    setShowIntake(false);
+    setShowForm(true);
+  };
+
+  const handleExtracted = (data: Record<string, unknown>) => {
+    setDraft({
+      agent: toString(data.agent),
+      carrier: toString(data.carrier),
+      route: toString(data.route),
+      tipo: toString(data.tipo),
+      sf: toNumber(data.sf),
+      blFee: toNumber(data.blFee),
+      af: toNumber(data.af),
+      afMax: toNumber(data.afMax),
+      flexiArg: toNumber(data.flexiArg),
+      validFrom: toString(data.validFrom),
+      validTo: toString(data.validTo),
+      notes: toString(data.notes),
+    });
+    setShowIntake(false);
+    setShowForm(true);
+  };
+
+  const skipIntake = () => {
+    setDraft(emptyDraft);
+    setShowIntake(false);
     setShowForm(true);
   };
 
@@ -103,6 +163,12 @@ export default function RatesTab() {
     } else {
       add({ ...draft, id: uid("rate") });
     }
+    setShowForm(false);
+    setEditingId(null);
+  };
+
+  const cancelAll = () => {
+    setShowIntake(false);
     setShowForm(false);
     setEditingId(null);
   };
@@ -121,33 +187,52 @@ export default function RatesTab() {
           onChange={(e) => setSearch(e.target.value)}
           className="border border-gray-200 rounded-md p-2 h-10 min-w-48"
         />
-        <select
+        <input
+          type="text"
+          list="rates-filter-agent"
+          placeholder="Filtrar agente..."
           value={agentFilter}
-          onChange={(e) => setAgentFilter(e.target.value as Agent | "")}
+          onChange={(e) => setAgentFilter(e.target.value)}
           className="border border-gray-200 rounded-md p-2 h-10"
-        >
-          <option value="">Todos los agentes</option>
-          {AGENTS.map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
+        />
+        <datalist id="rates-filter-agent">
+          {agentSuggestions.map((a) => (
+            <option key={a} value={a} />
           ))}
-        </select>
-        <select
+        </datalist>
+        <input
+          type="text"
+          list="rates-filter-carrier"
+          placeholder="Filtrar carrier..."
           value={carrierFilter}
-          onChange={(e) => setCarrierFilter(e.target.value as Carrier | "")}
+          onChange={(e) => setCarrierFilter(e.target.value)}
           className="border border-gray-200 rounded-md p-2 h-10"
-        >
-          <option value="">Todos los carriers</option>
-          {CARRIERS.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
+        />
+        <datalist id="rates-filter-carrier">
+          {carrierSuggestions.map((c) => (
+            <option key={c} value={c} />
           ))}
-        </select>
+        </datalist>
         <div className="flex-1" />
         <Button onClick={openNew}>Nueva Tarifa</Button>
       </div>
+
+      {showIntake && (
+        <div className="flex flex-col gap-2">
+          <RateIntake
+            type="rate"
+            onExtracted={handleExtracted}
+            onCancel={cancelAll}
+          />
+          <button
+            type="button"
+            onClick={skipIntake}
+            className="text-sm text-blue-700 hover:underline self-start cursor-pointer"
+          >
+            Prefiero completar manualmente el formulario →
+          </button>
+        </div>
+      )}
 
       {showForm && (
         <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
@@ -157,58 +242,63 @@ export default function RatesTab() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <label className="flex flex-col gap-1 text-sm">
               Agente
-              <select
+              <input
+                type="text"
+                list="rates-agent-sugg"
                 value={draft.agent}
-                onChange={(e) => setDraft({ ...draft, agent: e.target.value as Agent })}
+                onChange={(e) => setDraft({ ...draft, agent: e.target.value })}
                 className="border border-gray-200 rounded-md p-2 h-10"
-              >
-                {AGENTS.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
+              />
+              <datalist id="rates-agent-sugg">
+                {agentSuggestions.map((a) => (
+                  <option key={a} value={a} />
                 ))}
-              </select>
+              </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Carrier
-              <select
+              <input
+                type="text"
+                list="rates-carrier-sugg"
                 value={draft.carrier}
-                onChange={(e) =>
-                  setDraft({ ...draft, carrier: e.target.value as Carrier })
-                }
+                onChange={(e) => setDraft({ ...draft, carrier: e.target.value })}
                 className="border border-gray-200 rounded-md p-2 h-10"
-              >
-                {CARRIERS.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
+              />
+              <datalist id="rates-carrier-sugg">
+                {carrierSuggestions.map((c) => (
+                  <option key={c} value={c} />
                 ))}
-              </select>
+              </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Ruta
               <input
                 type="text"
+                list="rates-route-sugg"
                 value={draft.route}
                 onChange={(e) => setDraft({ ...draft, route: e.target.value })}
                 className="border border-gray-200 rounded-md p-2 h-10"
               />
+              <datalist id="rates-route-sugg">
+                {routeSuggestions.map((r) => (
+                  <option key={r} value={r} />
+                ))}
+              </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Tipo
-              <select
+              <input
+                type="text"
+                list="rates-tipo-sugg"
                 value={draft.tipo}
-                onChange={(e) =>
-                  setDraft({ ...draft, tipo: e.target.value as ContainerType })
-                }
+                onChange={(e) => setDraft({ ...draft, tipo: e.target.value })}
                 className="border border-gray-200 rounded-md p-2 h-10"
-              >
-                {CONTAINER_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
+              />
+              <datalist id="rates-tipo-sugg">
+                {tipoSuggestions.map((t) => (
+                  <option key={t} value={t} />
                 ))}
-              </select>
+              </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               SF (USD/ctr)
@@ -286,13 +376,7 @@ export default function RatesTab() {
             </label>
           </div>
           <div className="flex justify-end gap-2 mt-4">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setShowForm(false);
-                setEditingId(null);
-              }}
-            >
+            <Button variant="outline" onClick={cancelAll}>
               Cancelar
             </Button>
             <Button onClick={handleSave}>Guardar</Button>
@@ -329,46 +413,49 @@ export default function RatesTab() {
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {filtered.map((r) => (
-              <tr
-                key={r.id}
-                style={{ backgroundColor: AGENT_COLORS[r.agent] }}
-                className="text-sm"
-              >
-                <td className="px-4 py-2 font-medium whitespace-nowrap">{r.agent}</td>
-                <td className="px-4 py-2 whitespace-nowrap">{r.carrier}</td>
-                <td className="px-4 py-2 whitespace-nowrap">{r.route}</td>
-                <td className="px-4 py-2 whitespace-nowrap">{r.tipo}</td>
-                <td className="px-4 py-2 whitespace-nowrap">${r.sf}</td>
-                <td className="px-4 py-2 whitespace-nowrap">${r.blFee}</td>
-                <td className="px-4 py-2 whitespace-nowrap">${r.af}</td>
-                <td className="px-4 py-2 whitespace-nowrap">${r.afMax}</td>
-                <td className="px-4 py-2 whitespace-nowrap">${r.flexiArg}</td>
-                <td className="px-4 py-2 whitespace-nowrap text-xs">
-                  {r.validFrom || "-"} / {r.validTo || "-"}
-                </td>
-                <td className="px-4 py-2 whitespace-nowrap">
-                  <ValidityBadge validTo={r.validTo} />
-                </td>
-                <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
-                <td className="px-4 py-2 whitespace-nowrap">
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => openEdit(r)}>
-                      Editar
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        if (confirm("¿Eliminar tarifa?")) remove(r.id);
-                      }}
-                    >
-                      Eliminar
-                    </Button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {filtered.map((r) => {
+              const bg = AGENT_COLORS[r.agent];
+              return (
+                <tr
+                  key={r.id}
+                  style={bg ? { backgroundColor: bg } : undefined}
+                  className="text-sm"
+                >
+                  <td className="px-4 py-2 font-medium whitespace-nowrap">{r.agent}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">{r.carrier}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">{r.route}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">{r.tipo}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">${r.sf}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">${r.blFee}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">${r.af}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">${r.afMax}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">${r.flexiArg}</td>
+                  <td className="px-4 py-2 whitespace-nowrap text-xs">
+                    {r.validFrom || "-"} / {r.validTo || "-"}
+                  </td>
+                  <td className="px-4 py-2 whitespace-nowrap">
+                    <ValidityBadge validTo={r.validTo} />
+                  </td>
+                  <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
+                  <td className="px-4 py-2 whitespace-nowrap">
+                    <div className="flex gap-2">
+                      <Button variant="outline" size="sm" onClick={() => openEdit(r)}>
+                        Editar
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          if (confirm("¿Eliminar tarifa?")) remove(r.id);
+                        }}
+                      >
+                        Eliminar
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         {filtered.length === 0 && (

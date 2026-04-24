@@ -5,13 +5,10 @@ import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
 import {
-  AGENTS,
   AGENT_COLORS,
-  Agent,
-  CARRIERS,
-  CONTAINER_TYPES,
-  Carrier,
-  ContainerType,
+  AGENT_SUGGESTIONS,
+  CARRIER_SUGGESTIONS,
+  CONTAINER_TYPE_SUGGESTIONS,
   EBS_STORAGE_KEY,
   Ebs,
   RATES_STORAGE_KEY,
@@ -46,21 +43,9 @@ function isPending(value: unknown): boolean {
   return PENDING_TOKENS.has(s);
 }
 
-function normalizeAgent(value: unknown): Agent | string {
+function normalizeWithList(value: unknown, list: readonly string[]): string {
   const s = String(value ?? "").trim();
-  const match = AGENTS.find((a) => a.toLowerCase() === s.toLowerCase());
-  return match ?? s;
-}
-
-function normalizeCarrier(value: unknown): Carrier | string {
-  const s = String(value ?? "").trim();
-  const match = CARRIERS.find((c) => c.toLowerCase() === s.toLowerCase());
-  return match ?? s;
-}
-
-function normalizeTipo(value: unknown): ContainerType | string {
-  const s = String(value ?? "").trim();
-  const match = CONTAINER_TYPES.find((t) => t.toLowerCase() === s.toLowerCase());
+  const match = list.find((a) => a.toLowerCase() === s.toLowerCase());
   return match ?? s;
 }
 
@@ -106,9 +91,15 @@ function teuMultiplier(tipo: string): number {
 
 function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
   return rows.map((row) => {
-    const agent = String(normalizeAgent(pickField(row, ["agent", "agente"])));
-    const carrier = String(normalizeCarrier(pickField(row, ["carrier", "naviera"])));
-    const tipo = String(normalizeTipo(pickField(row, ["tipo", "type", "ctrType"])));
+    const agent = normalizeWithList(pickField(row, ["agent", "agente"]), AGENT_SUGGESTIONS);
+    const carrier = normalizeWithList(
+      pickField(row, ["carrier", "naviera"]),
+      CARRIER_SUGGESTIONS
+    );
+    const tipo = normalizeWithList(
+      pickField(row, ["tipo", "type", "ctrType"]),
+      CONTAINER_TYPE_SUGGESTIONS
+    );
     const route = String(pickField(row, ["route", "ruta"]) ?? "");
     const blsRaw = pickField(row, ["bls", "bl", "cantidadBls"]);
     const ctrsRaw = pickField(row, ["ctrs", "ctr", "cantidadCtrs", "contenedores"]);
@@ -232,6 +223,7 @@ export default function InvoicingTab() {
   const [rawRows, setRawRows] = useState<Row[]>([]);
   const [processed, setProcessed] = useState<ProcessedRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = async (file: File) => {
@@ -296,17 +288,64 @@ export default function InvoicingTab() {
         <p className="text-xs text-gray-500 mb-3">
           Columnas esperadas: agente, carrier, ruta, tipo, bls, ctrs, notas.
         </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".xlsx,.xls"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleFile(file);
-            }}
-            className="text-sm"
-          />
+
+        <div
+          onClick={() => inputRef.current?.click()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              inputRef.current?.click();
+            }
+          }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            const file = e.dataTransfer.files[0];
+            if (file) handleFile(file);
+          }}
+          role="button"
+          tabIndex={0}
+          className={`cursor-pointer border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+            dragging
+              ? "border-blue-500 bg-blue-50"
+              : "border-gray-300 hover:border-blue-500 hover:bg-blue-50"
+          }`}
+        >
+          {fileName ? (
+            <div className="text-sm">
+              <div className="font-medium text-gray-800">{fileName}</div>
+              <div className="text-gray-500 mt-1">
+                {rawRows.length} filas cargadas — hacé clic o soltá para cambiar
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-600">
+              <div className="text-2xl mb-2">📊</div>
+              <div className="font-medium">
+                Hacé clic para elegir un Excel o arrastrá el archivo aquí
+              </div>
+              <div className="text-xs text-gray-500 mt-1">Formato: .xlsx o .xls</div>
+            </div>
+          )}
+        </div>
+
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".xlsx,.xls"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleFile(file);
+          }}
+          className="hidden"
+        />
+
+        <div className="flex flex-wrap items-center gap-3 mt-3">
           <Button onClick={handleProcess} disabled={!rawRows.length}>
             Procesar
           </Button>
@@ -317,15 +356,9 @@ export default function InvoicingTab() {
           >
             Descargar Excel
           </Button>
-          {fileName && (
-            <span className="text-sm text-gray-600">
-              Archivo: <strong>{fileName}</strong> — {rawRows.length} filas
-            </span>
-          )}
         </div>
-        {error && (
-          <div className="mt-3 text-sm text-red-600">{error}</div>
-        )}
+
+        {error && <div className="mt-3 text-sm text-red-600">{error}</div>}
       </div>
 
       {processed && (
@@ -358,9 +391,7 @@ export default function InvoicingTab() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {processed.map((r, idx) => {
-                const agentColor = AGENTS.includes(r.agent as Agent)
-                  ? AGENT_COLORS[r.agent as Agent]
-                  : undefined;
+                const agentColor = AGENT_COLORS[r.agent];
                 return (
                   <tr
                     key={idx}

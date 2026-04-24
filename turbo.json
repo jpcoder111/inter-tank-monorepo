@@ -2,13 +2,13 @@
   "$schema": "https://turborepo.com/schema.json",
   "ui": "tui",
   "globalDependencies": [".env"],
-  "globalEnv": ["BACKEND_URL", "SESSION_SECRET_KEY", "DATABASE_URL"],
+  "globalEnv": ["BACKEND_URL", "SESSION_SECRET_KEY", "DATABASE_URL", "ANTHROPIC_API_KEY"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
       "outputs": [".next/**", "!.next/cache/**"],
-      "env": ["BACKEND_URL", "SESSION_SECRET_KEY", "DATABASE_URL"]
+      "env": ["BACKEND_URL", "SESSION_SECRET_KEY", "DATABASE_URL", "ANTHROPIC_API_KEY"]
     },
     "lint": {
       "dependsOn": ["^lint"]

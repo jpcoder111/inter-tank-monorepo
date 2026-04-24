@@ -26,16 +26,16 @@ Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings fal
 }`;
 
 const EBS_SYSTEM = `Sos un extractor de EBS (Emergency Bunker Surcharge) para fletes marítimos.
+El EBS se expresa SIEMPRE por TEU (20' = 1 TEU, 40' = 2 TEU). Si el input da el valor por container de 40', dividilo por 2 para obtener el valor por TEU.
 Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
 
 {
   "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, etc.)
-  "traffic": string,       // tráfico o ruta (ej: "Chile-N.Europa", "Chile-Grangemouth")
-  "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
-  "amountPerTEU": number,  // monto en USD por TEU (si el input lo expresa /ctr aclaralo en notes)
+  "traffic": string,       // tráfico o ruta (ej: "Chile - Norte de Europa", "Chile - Grangemouth")
+  "amountPerTEU": number,  // monto en USD por TEU
   "validFrom": string,     // YYYY-MM-DD
   "validTo": string,       // YYYY-MM-DD
-  "notes": string          // cualquier observación (unidad, exclusiones, etc.)
+  "notes": string          // cualquier observación (unidad original si fue /ctr, exclusiones, etc.)
 }`;
 
 function readAsBase64(file: File): Promise<{ base64: string; mediaType: string }> {

@@ -38,9 +38,10 @@ export const AGENT_COLORS: Record<string, string> = {
   BULLET: "#f5eef8",
 };
 
-// Bumped to _v2 so users with old seed data get the new real seeds on next load.
+// Storage keys are version-suffixed: bump when the schema or seed changes so
+// existing localStorage data is replaced with the new seeds on next load.
 export const RATES_STORAGE_KEY = "it_rates_v2";
-export const EBS_STORAGE_KEY = "it_ebs_v2";
+export const EBS_STORAGE_KEY = "it_ebs_v3";
 
 export type Rate = {
   id: string;
@@ -62,7 +63,6 @@ export type Ebs = {
   id: string;
   carrier: string;
   traffic: string;
-  tipo: string;
   amountPerTEU: number;
   validFrom: string;
   validTo: string;
@@ -239,40 +239,27 @@ export const SEED_RATES: Rate[] = [
 
 export const SEED_EBS: Ebs[] = [
   {
-    id: "seed-ebs-oocl-cl-neu-20flexi",
+    id: "seed-ebs-oocl-cl-neu",
     carrier: "OOCL",
-    traffic: "Chile-N.Europa",
-    tipo: "20'-Flexi",
+    traffic: "Chile - Norte de Europa",
     amountPerTEU: 126,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "",
   },
   {
-    id: "seed-ebs-oocl-cl-neu-40",
-    carrier: "OOCL",
-    traffic: "Chile-N.Europa",
-    tipo: "40'",
-    amountPerTEU: 252,
+    id: "seed-ebs-hapag-cl-grm",
+    carrier: "HAPAG",
+    traffic: "Chile - Grangemouth",
+    amountPerTEU: 160,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "",
   },
   {
-    id: "seed-ebs-hapag-cl-grm-40",
-    carrier: "HAPAG",
-    traffic: "Chile-Grangemouth",
-    tipo: "40'",
-    amountPerTEU: 320,
-    validFrom: "2026-04-01",
-    validTo: "2026-06-30",
-    notes: "320/ctr (valor por container, no por TEU)",
-  },
-  {
-    id: "seed-ebs-cma-cl-neu-flexi",
+    id: "seed-ebs-cma-cl-neu",
     carrier: "CMA-CGM",
-    traffic: "Chile-N.Europa",
-    tipo: "Flexi",
+    traffic: "Chile - Norte de Europa",
     amountPerTEU: 160,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",

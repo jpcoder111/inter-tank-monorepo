@@ -77,12 +77,8 @@ function findRate(
   );
 }
 
-function findEbs(ebs: Ebs[], carrier: string, tipo: string): Ebs | undefined {
-  return ebs.find(
-    (e) =>
-      e.carrier.toLowerCase() === carrier.toLowerCase() &&
-      e.tipo.toLowerCase() === tipo.toLowerCase()
-  );
+function findEbs(ebs: Ebs[], carrier: string): Ebs | undefined {
+  return ebs.find((e) => e.carrier.toLowerCase() === carrier.toLowerCase());
 }
 
 function teuMultiplier(tipo: string): number {
@@ -117,7 +113,7 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
     if (isPending(ctrsRaw)) pending.add("ctrs");
 
     const rate = findRate(rates, agent, carrier, tipo, route);
-    const ebsRow = findEbs(ebs, carrier, tipo);
+    const ebsRow = findEbs(ebs, carrier);
 
     let sf: number | string = "TBD";
     let blFee: number | string = "TBD";

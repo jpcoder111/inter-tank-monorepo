@@ -6,10 +6,11 @@ import { useLocalStore } from "./useLocalStore";
 import RateIntake from "./RateIntake";
 import {
   CARRIER_SUGGESTIONS,
-  CONTAINER_TYPE_SUGGESTIONS,
   EBS_STORAGE_KEY,
   Ebs,
   SEED_EBS,
+  ValidityStatus,
+  getValidityStatus,
   uid,
   uniqueSuggestions,
 } from "./constants";
@@ -17,15 +18,37 @@ import {
 const emptyDraft: Omit<Ebs, "id"> = {
   carrier: "",
   traffic: "",
-  tipo: "",
   amountPerTEU: 0,
   validFrom: "",
   validTo: "",
   notes: "",
 };
 
-function teuFor(tipo: string): number {
-  return tipo.startsWith("40") ? 2 : 1;
+const STATUS_ORDER: Record<ValidityStatus, number> = {
+  active: 0,
+  soon: 1,
+  expired: 2,
+};
+
+function VigenciaBadge({ validTo }: { validTo: string }) {
+  const status = getValidityStatus(validTo);
+  const styles: Record<ValidityStatus, string> = {
+    active: "bg-green-100 text-green-800 border-green-300",
+    soon: "bg-yellow-100 text-yellow-800 border-yellow-300",
+    expired: "bg-red-100 text-red-800 border-red-300",
+  };
+  const labels: Record<ValidityStatus, string> = {
+    active: "Vigente",
+    soon: "Vence <30d",
+    expired: "Expirada",
+  };
+  return (
+    <span
+      className={`inline-block px-3 py-1 rounded-full text-sm font-semibold border ${styles[status]}`}
+    >
+      {labels[status]}
+    </span>
+  );
 }
 
 function toNumber(value: unknown): number {
@@ -63,23 +86,28 @@ export default function EbsTab() {
     () => uniqueSuggestions(items.map((r) => r.traffic)),
     [items]
   );
-  const tipoSuggestions = useMemo(
-    () => uniqueSuggestions(items.map((r) => r.tipo), CONTAINER_TYPE_SUGGESTIONS),
-    [items]
-  );
 
-  const filtered = useMemo(() => {
+  const sortedFiltered = useMemo(() => {
     const q = search.toLowerCase().trim();
     const cf = carrierFilter.toLowerCase().trim();
-    return items.filter((r) => {
+    const filtered = items.filter((r) => {
       if (cf && !r.carrier.toLowerCase().includes(cf)) return false;
       if (!q) return true;
       return (
         r.carrier.toLowerCase().includes(q) ||
         r.traffic.toLowerCase().includes(q) ||
-        r.tipo.toLowerCase().includes(q) ||
         r.notes.toLowerCase().includes(q)
       );
+    });
+    return filtered.slice().sort((a, b) => {
+      const sa = STATUS_ORDER[getValidityStatus(a.validTo)];
+      const sb = STATUS_ORDER[getValidityStatus(b.validTo)];
+      if (sa !== sb) return sa - sb;
+      // Within same status: sooner validTo first for active/soon, later first for expired
+      if (a.validTo && b.validTo) {
+        return a.validTo.localeCompare(b.validTo);
+      }
+      return 0;
     });
   }, [items, search, carrierFilter]);
 
@@ -103,7 +131,6 @@ export default function EbsTab() {
     setDraft({
       carrier: toStr(data.carrier),
       traffic: toStr(data.traffic),
-      tipo: toStr(data.tipo),
       amountPerTEU: toNumber(data.amountPerTEU),
       validFrom: toStr(data.validFrom),
       validTo: toStr(data.validTo),
@@ -152,7 +179,7 @@ export default function EbsTab() {
         <input
           type="text"
           list="ebs-filter-carrier"
-          placeholder="Filtrar carrier..."
+          placeholder="Filtrar naviera..."
           value={carrierFilter}
           onChange={(e) => setCarrierFilter(e.target.value)}
           className="border border-gray-200 rounded-md p-2 h-10"
@@ -188,9 +215,12 @@ export default function EbsTab() {
           <h3 className="font-semibold mb-3">
             {editingId ? "Editar EBS" : "Nuevo EBS"}
           </h3>
+          <p className="text-xs text-gray-500 mb-3">
+            El valor se ingresa por TEU. El sistema calcula 20&apos;/Flexi = 1 TEU y 40&apos; = 2 TEU automáticamente.
+          </p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <label className="flex flex-col gap-1 text-sm">
-              Carrier
+              Naviera
               <input
                 type="text"
                 list="ebs-carrier-sugg"
@@ -211,7 +241,7 @@ export default function EbsTab() {
                 list="ebs-traffic-sugg"
                 value={draft.traffic}
                 onChange={(e) => setDraft({ ...draft, traffic: e.target.value })}
-                placeholder="Chile-N.Europa / Chile-Grangemouth / ..."
+                placeholder="Chile - Norte de Europa / ..."
                 className="border border-gray-200 rounded-md p-2 h-10"
               />
               <datalist id="ebs-traffic-sugg">
@@ -221,22 +251,7 @@ export default function EbsTab() {
               </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
-              Tipo
-              <input
-                type="text"
-                list="ebs-tipo-sugg"
-                value={draft.tipo}
-                onChange={(e) => setDraft({ ...draft, tipo: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-              <datalist id="ebs-tipo-sugg">
-                {tipoSuggestions.map((t) => (
-                  <option key={t} value={t} />
-                ))}
-              </datalist>
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              Monto por TEU (USD)
+              USD por TEU
               <input
                 type="number"
                 value={draft.amountPerTEU}
@@ -264,7 +279,7 @@ export default function EbsTab() {
                 className="border border-gray-200 rounded-md p-2 h-10"
               />
             </label>
-            <label className="flex flex-col gap-1 text-sm col-span-2">
+            <label className="flex flex-col gap-1 text-sm col-span-2 md:col-span-3">
               Notas
               <input
                 type="text"
@@ -288,12 +303,13 @@ export default function EbsTab() {
           <thead className="bg-gray-50">
             <tr>
               {[
-                "Carrier",
+                "Naviera",
                 "Tráfico",
-                "Tipo",
                 "USD/TEU",
-                "Equiv. 20'",
-                "Equiv. 40'",
+                "20' equiv.",
+                "40' equiv.",
+                "Válido desde",
+                "Válido hasta",
                 "Vigencia",
                 "Notas",
                 "Acciones",
@@ -308,52 +324,55 @@ export default function EbsTab() {
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {filtered.map((r) => {
-              const per20 = r.amountPerTEU * 1;
-              const per40 = r.amountPerTEU * 2;
-              const currentTeu = teuFor(r.tipo);
-              return (
-                <tr key={r.id} className="text-sm">
-                  <td className="px-4 py-2 font-medium whitespace-nowrap">
-                    {r.carrier}
-                  </td>
-                  <td className="px-4 py-2 whitespace-nowrap">{r.traffic}</td>
-                  <td className="px-4 py-2 whitespace-nowrap">
-                    {r.tipo}{" "}
-                    <span className="text-xs text-gray-500">
-                      ({currentTeu} TEU)
-                    </span>
-                  </td>
-                  <td className="px-4 py-2 whitespace-nowrap">${r.amountPerTEU}</td>
-                  <td className="px-4 py-2 whitespace-nowrap">${per20}</td>
-                  <td className="px-4 py-2 whitespace-nowrap">${per40}</td>
-                  <td className="px-4 py-2 whitespace-nowrap text-xs">
-                    {r.validFrom || "-"} / {r.validTo || "-"}
-                  </td>
-                  <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
-                  <td className="px-4 py-2 whitespace-nowrap">
-                    <div className="flex gap-2">
-                      <Button variant="outline" size="sm" onClick={() => openEdit(r)}>
-                        Editar
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          if (confirm("¿Eliminar EBS?")) remove(r.id);
-                        }}
-                      >
-                        Eliminar
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
+            {sortedFiltered.map((r) => (
+              <tr key={r.id} className="text-sm">
+                <td className="px-4 py-3 font-medium whitespace-nowrap">
+                  {r.carrier}
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap">{r.traffic}</td>
+                <td className="px-4 py-3 whitespace-nowrap font-medium">
+                  ${r.amountPerTEU}/TEU
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap">${r.amountPerTEU}</td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  ${r.amountPerTEU * 2}
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap text-gray-600">
+                  {r.validFrom || "-"}
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap text-gray-600">
+                  {r.validTo || "-"}
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  <VigenciaBadge validTo={r.validTo} />
+                </td>
+                <td className="px-4 py-3 max-w-xs truncate text-gray-600">
+                  {r.notes}
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => openEdit(r)}>
+                      Editar
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (confirm("¿Eliminar EBS?")) remove(r.id);
+                      }}
+                    >
+                      Eliminar
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
-        {filtered.length === 0 && (
-          <div className="text-center py-8 text-gray-500">No hay registros EBS</div>
+        {sortedFiltered.length === 0 && (
+          <div className="text-center py-8 text-gray-500">
+            No hay registros EBS
+          </div>
         )}
       </div>
     </div>

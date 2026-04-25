@@ -107,6 +107,8 @@ async function readExcelAsText(file: File): Promise<string> {
 const DOCX_MIME =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+const LARGE_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
 function isDocx(file: File): boolean {
   return file.name.toLowerCase().endsWith(".docx") || file.type === DOCX_MIME;
 }
@@ -149,6 +151,7 @@ export default function RateIntake({
   >(null);
   const [docxText, setDocxText] = useState("");
   const [excelText, setExcelText] = useState("");
+  const [sizeWarning, setSizeWarning] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -170,6 +173,7 @@ export default function RateIntake({
     setImageData(null);
     setDocxText("");
     setExcelText("");
+    setSizeWarning(null);
     setError(null);
   };
 
@@ -178,6 +182,14 @@ export default function RateIntake({
     setFileName(file.name);
     setImageData(null);
     setDocxText("");
+    if (file.size > LARGE_FILE_BYTES) {
+      const mb = (file.size / (1024 * 1024)).toFixed(1);
+      setSizeWarning(
+        `Archivo muy grande (${mb} MB) — se recomienda usar una imagen o texto en su lugar.`
+      );
+    } else {
+      setSizeWarning(null);
+    }
     try {
       if (isDocx(file)) {
         const text = await readDocxAsText(file);
@@ -393,6 +405,12 @@ export default function RateIntake({
           rows={8}
           className="w-full border border-gray-200 rounded-md p-2 text-sm font-mono"
         />
+      )}
+
+      {sizeWarning && (
+        <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mt-3">
+          ⚠️ {sizeWarning}
+        </div>
       )}
 
       {error && <div className="text-sm text-red-600 mt-3">{error}</div>}

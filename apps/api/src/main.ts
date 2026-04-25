@@ -1,10 +1,16 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
+import { json, urlencoded } from 'express';
 
 async function bootstrap() {
   try {
-    const app = await NestFactory.create(AppModule);
+    // Disable default body parser so we can set a larger limit. The /ai/extract-rate
+    // route accepts base64-encoded PDFs that easily exceed Express's 100kb default.
+    const app = await NestFactory.create(AppModule, { bodyParser: false });
+
+    app.use(json({ limit: '20mb' }));
+    app.use(urlencoded({ limit: '20mb', extended: true }));
 
     // Enable CORS
     app.enableCors({

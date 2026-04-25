@@ -9,6 +9,7 @@ import { ConfigModule } from '@nestjs/config';
 import { UploaderModule } from './uploader/uploader.module';
 import { ConfirmationModule } from './confirmation/confirmation.module';
 import { AiConfigModule } from './ai-config/ai-config.module';
+import { AiModule } from './ai/ai.module';
 import { FeatureRequestModule } from './feature-request/feature-request.module';
 import { AppSettingsModule } from './app-settings/app-settings.module';
 
@@ -23,6 +24,7 @@ import { AppSettingsModule } from './app-settings/app-settings.module';
     UploaderModule,
     ConfirmationModule,
     AiConfigModule,
+    AiModule,
     FeatureRequestModule,
     AppSettingsModule,
   ],

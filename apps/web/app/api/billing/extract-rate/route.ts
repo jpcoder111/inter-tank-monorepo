@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/session";
 
 export const runtime = "nodejs";
 
@@ -23,30 +24,11 @@ function hasMedia(content: string | ContentBlock[]): boolean {
   return content.some((c) => c.type === "image" || c.type === "document");
 }
 
-export async function POST(req: NextRequest) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "ANTHROPIC_API_KEY not configured" },
-      { status: 500 }
-    );
-  }
-
-  let body: RequestBody;
-  try {
-    body = (await req.json()) as RequestBody;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const { system, content } = body;
-  if (!system || !content) {
-    return NextResponse.json(
-      { error: "Missing 'system' or 'content'" },
-      { status: 400 }
-    );
-  }
-
+async function callAnthropicDirect(
+  apiKey: string,
+  system: string,
+  content: string | ContentBlock[]
+) {
   const model = hasMedia(content) ? VISION_MODEL : TEXT_MODEL;
   const userContent: ContentBlock[] =
     typeof content === "string" ? [{ type: "text", text: content }] : content;
@@ -82,4 +64,76 @@ export async function POST(req: NextRequest) {
     data.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
 
   return NextResponse.json({ text, model });
+}
+
+async function callBackendProxy(
+  backendUrl: string,
+  body: RequestBody
+) {
+  const session = await getSession();
+  if (!session?.accessToken) {
+    return NextResponse.json(
+      { error: "Not authenticated — cannot proxy to backend" },
+      { status: 401 }
+    );
+  }
+
+  const response = await fetch(`${backendUrl}/ai/extract-rate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    return NextResponse.json(
+      { error: `Backend proxy error ${response.status}`, detail },
+      { status: 502 }
+    );
+  }
+
+  const data = (await response.json()) as { text?: string; model?: string };
+  return NextResponse.json({
+    text: data.text ?? "",
+    model: data.model ?? "unknown",
+  });
+}
+
+export async function POST(req: NextRequest) {
+  let body: RequestBody;
+  try {
+    body = (await req.json()) as RequestBody;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const { system, content } = body;
+  if (!system || !content) {
+    return NextResponse.json(
+      { error: "Missing 'system' or 'content'" },
+      { status: 400 }
+    );
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (apiKey) {
+    return callAnthropicDirect(apiKey, system, content);
+  }
+
+  const backendUrl =
+    process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (backendUrl) {
+    return callBackendProxy(backendUrl, body);
+  }
+
+  return NextResponse.json(
+    {
+      error:
+        "Missing ANTHROPIC_API_KEY (frontend) and BACKEND_URL (proxy fallback). Configure one of them.",
+    },
+    { status: 500 }
+  );
 }

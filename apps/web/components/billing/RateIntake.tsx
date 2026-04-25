@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
 
@@ -103,6 +104,19 @@ async function readExcelAsText(file: File): Promise<string> {
     .join("\n\n");
 }
 
+const DOCX_MIME =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+function isDocx(file: File): boolean {
+  return file.name.toLowerCase().endsWith(".docx") || file.type === DOCX_MIME;
+}
+
+async function readDocxAsText(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  return result.value;
+}
+
 function parseExtractedJson(raw: string): Record<string, unknown> {
   const cleaned = raw
     .trim()
@@ -133,6 +147,7 @@ export default function RateIntake({
   const [imageData, setImageData] = useState<
     { base64: string; mediaType: string } | null
   >(null);
+  const [docxText, setDocxText] = useState("");
   const [excelText, setExcelText] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -153,6 +168,7 @@ export default function RateIntake({
     setManualText("");
     setFileName("");
     setImageData(null);
+    setDocxText("");
     setExcelText("");
     setError(null);
   };
@@ -160,11 +176,22 @@ export default function RateIntake({
   const handleImage = async (file: File) => {
     setError(null);
     setFileName(file.name);
+    setImageData(null);
+    setDocxText("");
     try {
-      const data = await readAsBase64(file);
-      setImageData(data);
+      if (isDocx(file)) {
+        const text = await readDocxAsText(file);
+        if (!text.trim()) {
+          setError("El documento Word no contiene texto extraíble.");
+          return;
+        }
+        setDocxText(text);
+      } else {
+        const data = await readAsBase64(file);
+        setImageData(data);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Error al leer imagen");
+      setError(err instanceof Error ? err.message : "Error al leer el archivo");
     }
   };
 
@@ -189,27 +216,30 @@ export default function RateIntake({
     try {
       let content: string | ContentPayload;
       if (mode === "image") {
-        if (!imageData) {
+        if (docxText) {
+          content = `Contenido del documento Word:\n\n${docxText}`;
+        } else if (imageData) {
+          const isPdf = imageData.mediaType === "application/pdf";
+          content = [
+            {
+              type: isPdf ? "document" : "image",
+              source: {
+                type: "base64",
+                media_type: imageData.mediaType,
+                data: imageData.base64,
+              },
+            },
+            {
+              type: "text",
+              text: isPdf
+                ? "Extraé los datos del PDF según las instrucciones del system."
+                : "Extraé los datos de la imagen según las instrucciones del system.",
+            },
+          ];
+        } else {
           setError("Subí un archivo primero.");
           return;
         }
-        const isPdf = imageData.mediaType === "application/pdf";
-        content = [
-          {
-            type: isPdf ? "document" : "image",
-            source: {
-              type: "base64",
-              media_type: imageData.mediaType,
-              data: imageData.base64,
-            },
-          },
-          {
-            type: "text",
-            text: isPdf
-              ? "Extraé los datos del PDF según las instrucciones del system."
-              : "Extraé los datos de la imagen según las instrucciones del system.",
-          },
-        ];
       } else if (mode === "excel") {
         if (!excelText) {
           setError("Subí un Excel primero.");
@@ -259,8 +289,8 @@ export default function RateIntake({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <IntakeCard
             icon="📷"
-            title="Imagen, PDF o correo"
-            desc="Subí un screenshot, foto o PDF y Claude extrae los datos"
+            title="Imagen, PDF, Word o correo"
+            desc="Subí un screenshot, foto, PDF o Word y Claude extrae los datos"
             onClick={() => setMode("image")}
           />
           <IntakeCard
@@ -285,7 +315,7 @@ export default function RateIntake({
       <div className="flex justify-between items-center mb-3">
         <h3 className="font-semibold">
           {mode === "image"
-            ? "Subir imagen, PDF o screenshot"
+            ? "Subir imagen, PDF, Word o screenshot"
             : mode === "excel"
               ? "Subir Excel"
               : "Pegar texto"}
@@ -313,7 +343,7 @@ export default function RateIntake({
               <>
                 <div className="font-medium">Hacé clic para elegir un archivo</div>
                 <div className="text-xs text-gray-500 mt-1">
-                  PNG, JPG, PDF — screenshot de email, foto de pantalla, documento PDF, etc.
+                  PNG, JPG, PDF, DOCX — screenshot de email, foto de pantalla, documento PDF o Word
                 </div>
               </>
             )}
@@ -321,7 +351,7 @@ export default function RateIntake({
           <input
             ref={imageInput}
             type="file"
-            accept="image/*,.pdf"
+            accept="image/*,.pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) handleImage(file);

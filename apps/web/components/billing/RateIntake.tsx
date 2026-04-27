@@ -849,6 +849,10 @@ export default function RateIntake({
     totalForUi: number,
     systemOverride?: string
   ) => {
+    // [debug-rate] unconditional sanity check that the new build is running
+    console.log(
+      `[debug-rate] STARTING processChunks with ${items.length} items, totalForUi=${totalForUi}, systemOverride=${systemOverride ? "yes" : "no"}`
+    );
     const rows: Record<string, unknown>[] = [];
     const failed: Array<{ index: number; content: string }> = [];
     let partial = false;
@@ -980,6 +984,10 @@ export default function RateIntake({
 
   const submitChunked = async () => {
     if (!excelText) return;
+    // [debug-rate] unconditional log to confirm the fresh build is running
+    console.log(
+      `[debug-rate] STARTING submitChunked, excelText length=${excelText.length}, type=${type}`
+    );
     const chunks = chunkExcelCsv(excelText);
     const preamble = extractContextPreamble(excelText);
     // Step 1: resolve the agent-wide costs ONCE upfront. Skipped for EBS
@@ -1099,26 +1107,24 @@ export default function RateIntake({
       unmatchedLines,
     };
     setExtractionStats(stats);
-    // [debug-rate] temp: full extraction breakdown for diagnosing missing rows
+    // [debug-rate] temp: full extraction breakdown for diagnosing missing rows.
+    // Logs are UNCONDITIONAL so they always fire — that way we can confirm
+    // the new build is running even when input and extracted counts happen
+    // to match.
     console.log("[debug-rate] extraction stats:", stats);
-    // Compact summary of the missing rows: counts + the actual CSV text
-    // for each line we couldn't match to an extracted rate. The user can
-    // grep this to find what Claude skipped on the source Excel.
-    if (inputDataLines.length !== cleanRows.length) {
-      console.log(
-        `[debug-rate] MISSING ROWS: input=${inputDataLines.length}, extracted=${cleanRows.length}, gap=${inputDataLines.length - cleanRows.length}`
-      );
-      console.log(
-        "[debug-rate] unmatched input lines (full list):",
-        unmatchedLines
-      );
-      console.log(
-        "[debug-rate] extracted routes:",
-        cleanRows.map(
-          (r) => `${String(r.carrier ?? "")} | ${String(r.route ?? "")}`
-        )
-      );
-    }
+    console.log(
+      `[debug-rate] MISSING ROWS check: input=${inputDataLines.length}, extracted=${cleanRows.length}, gap=${inputDataLines.length - cleanRows.length}`
+    );
+    console.log(
+      "[debug-rate] unmatched input lines (full list):",
+      unmatchedLines
+    );
+    console.log(
+      "[debug-rate] extracted routes:",
+      cleanRows.map(
+        (r) => `${String(r.carrier ?? "")} | ${String(r.route ?? "")}`
+      )
+    );
 
     if (supportsMany) {
       setPreviewRows(cleanRows);

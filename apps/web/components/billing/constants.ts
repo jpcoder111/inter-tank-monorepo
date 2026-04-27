@@ -597,3 +597,193 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     validFrom: "2026-03-03",
   },
 ];
+
+// ===== Local charge matching =====
+// "CMA-CGM" must equal "CMA CGM" must equal "cma-cgm".
+function normalizeCarrier(c: string): string {
+  return c.toLowerCase().replace(/[\s-]+/g, "");
+}
+
+export function carriersMatch(a: string, b: string): boolean {
+  return normalizeCarrier(a) === normalizeCarrier(b);
+}
+
+// True when a shipper name matches the exception's customer field directly OR
+// any of the brands listed in includedBrands (comma/semicolon separated).
+export function shipperMatchesException(
+  shipper: string,
+  exception: Pick<LocalException, "customer" | "includedBrands">
+): boolean {
+  const s = shipper.trim().toLowerCase();
+  if (!s) return false;
+  if (exception.customer.trim().toLowerCase() === s) return true;
+  const brands = exception.includedBrands
+    .split(/[,;]/)
+    .map((b) => b.trim().toLowerCase())
+    .filter(Boolean);
+  return brands.includes(s);
+}
+
+export function containerTipoToLocalTipo(tipo: string): LocalExceptionTipo {
+  const t = tipo.toUpperCase();
+  return t.includes("RF") || t.includes("REEFER") ? "Reefer" : "Dry";
+}
+
+// Standard Gate Out only applies to a fixed carrier list per
+// LOCAL_GATE_OUT_CONDITIONS_DEFAULT. Yang Ming is excluded from auto-apply
+// because the standard says "solo algunos destinos Asia" — too freeform to
+// auto-resolve without destination metadata.
+const STD_GATE_OUT_CARRIERS = ["CMA-CGM", "PIL", "OOCL", "COSCO"];
+
+export function carrierGetsStandardGateOut(carrier: string): boolean {
+  return STD_GATE_OUT_CARRIERS.some((c) => carriersMatch(c, carrier));
+}
+
+// Pick the current standard rate by name with the latest validFrom. Defaults
+// to "Estándar"; falls back to whatever is most recent if that name is absent.
+export function pickCurrentStandard(
+  standards: LocalStandardRate[],
+  preferredName: string = "Estándar"
+): LocalStandardRate | undefined {
+  const byName = new Map<string, LocalStandardRate>();
+  for (const s of standards) {
+    const existing = byName.get(s.name);
+    if (!existing || s.validFrom > existing.validFrom) {
+      byName.set(s.name, s);
+    }
+  }
+  return (
+    byName.get(preferredName) ??
+    Array.from(byName.values()).sort((a, b) =>
+      b.validFrom.localeCompare(a.validFrom)
+    )[0]
+  );
+}
+
+export function findLocalException(
+  exceptions: LocalException[],
+  shipper: string,
+  carrier: string,
+  localTipo: LocalExceptionTipo
+): LocalException | undefined {
+  return exceptions.find((e) => {
+    if (e.tipo !== localTipo) return false;
+    const carrierOk =
+      e.carrier.toLowerCase().includes("todas") ||
+      carriersMatch(e.carrier, carrier);
+    if (!carrierOk) return false;
+    return shipperMatchesException(shipper, e);
+  });
+}
+
+export type LocalChargeBreakdown = {
+  matchedException: LocalException | undefined;
+  appliedStandard: LocalStandardRate | undefined;
+  othc: number;
+  sello: number;
+  ams: number;
+  blFee: number;
+  gateOut: number;
+  otherCharges: number;
+  total: number;
+  // Charges that exist in the exception but require manual review (e.g.,
+  // Gate Out limited to specific ports/units that we can't auto-resolve).
+  conditional: string[];
+  // Reason this row has no charges resolved. Empty when fully resolved.
+  unresolved: string[];
+};
+
+export function computeLocalCharges(args: {
+  shipper: string;
+  carrier: string;
+  tipo: string;
+  bls: number;
+  ctrs: number;
+  exceptions: LocalException[];
+  standards: LocalStandardRate[];
+}): LocalChargeBreakdown {
+  const { shipper, carrier, tipo, bls, ctrs, exceptions, standards } = args;
+  const empty: LocalChargeBreakdown = {
+    matchedException: undefined,
+    appliedStandard: undefined,
+    othc: 0,
+    sello: 0,
+    ams: 0,
+    blFee: 0,
+    gateOut: 0,
+    otherCharges: 0,
+    total: 0,
+    conditional: [],
+    unresolved: [],
+  };
+
+  if (!carrier || !tipo) {
+    return { ...empty, unresolved: ["carrier/tipo"] };
+  }
+
+  const localTipo = containerTipoToLocalTipo(tipo);
+  const exception = shipper
+    ? findLocalException(exceptions, shipper, carrier, localTipo)
+    : undefined;
+
+  if (exception) {
+    const conditional: string[] = [];
+    let gateOut = 0;
+    if (exception.gateOut > 0) {
+      const hasFilters =
+        exception.gateOutPorts.trim() !== "" ||
+        exception.gateOutUnitTypes.trim() !== "";
+      if (hasFilters) {
+        conditional.push("gateOut");
+      } else {
+        gateOut = exception.gateOut * ctrs;
+      }
+    }
+    const othc = exception.othc * ctrs;
+    const sello = exception.sello * ctrs;
+    const ams = exception.ams * bls;
+    const blFee = exception.blFee * bls;
+    const otherCharges = exception.otherCharges * ctrs;
+    return {
+      matchedException: exception,
+      appliedStandard: undefined,
+      othc,
+      sello,
+      ams,
+      blFee,
+      gateOut,
+      otherCharges,
+      total: othc + sello + ams + blFee + gateOut + otherCharges,
+      conditional,
+      unresolved: [],
+    };
+  }
+
+  const standard = pickCurrentStandard(standards);
+  if (!standard) {
+    return { ...empty, unresolved: ["sin tarifa estándar"] };
+  }
+
+  const othcRate = localTipo === "Reefer" ? standard.othcReefer : standard.othcDry;
+  const gateOutRate =
+    localTipo === "Reefer" ? standard.gateOutReefer : standard.gateOutDry;
+  const gateOut = carrierGetsStandardGateOut(carrier) ? gateOutRate * ctrs : 0;
+  const othc = othcRate * ctrs;
+  const sello = standard.sello * ctrs;
+  const ams = standard.ams * bls;
+  const blFee = standard.blFee * bls;
+
+  return {
+    matchedException: undefined,
+    appliedStandard: standard,
+    othc,
+    sello,
+    ams,
+    blFee,
+    gateOut,
+    otherCharges: 0,
+    total: othc + sello + ams + blFee + gateOut,
+    conditional: [],
+    unresolved: [],
+  };
+}

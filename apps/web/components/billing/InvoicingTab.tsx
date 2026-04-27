@@ -19,10 +19,18 @@ import {
   InvoiceHistoryRow,
   InvoicedBL,
   InvoicedBLsRegistry,
+  LOCAL_EXCEPTIONS_STORAGE_KEY,
+  LOCAL_STD_STORAGE_KEY,
+  LocalChargeBreakdown,
+  LocalException,
+  LocalStandardRate,
   RATES_STORAGE_KEY,
   Rate,
   SEED_EBS,
+  SEED_LOCAL_EXCEPTIONS,
+  SEED_LOCAL_STANDARDS,
   SEED_RATES,
+  computeLocalCharges,
   formatDateCl,
   invoiceHistoryKey,
   uid,
@@ -35,6 +43,7 @@ type ProcessedRow = {
   etd: string;
   agent: string;
   carrier: string;
+  shipper: string;
   route: string;
   tipo: string;
   bls: number;
@@ -43,6 +52,8 @@ type ProcessedRow = {
   blFee: number | string;
   af: number | string;
   ebs: number | string;
+  locals: number | string;
+  localBreakdown: LocalChargeBreakdown | null;
   total: number | string;
   notes: string;
   pending: Set<string>;
@@ -129,7 +140,13 @@ function teuMultiplier(tipo: string): number {
   return tipo.startsWith("40") ? 2 : 1;
 }
 
-function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
+function processRows(
+  rows: Row[],
+  rates: Rate[],
+  ebs: Ebs[],
+  standards: LocalStandardRate[],
+  exceptions: LocalException[]
+): ProcessedRow[] {
   return rows.map((row) => {
     const blNumber = String(
       pickField(row, ["blNumber", "bl", "blNro", "booking", "bookingNumber", "reference", "ref"]) ?? ""
@@ -144,6 +161,9 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
       pickField(row, ["tipo", "type", "ctrType"]),
       CONTAINER_TYPE_SUGGESTIONS
     );
+    const shipper = String(
+      pickField(row, ["shipper", "embarcador", "exporter", "exportador", "cliente"]) ?? ""
+    ).trim();
     const route = String(pickField(row, ["route", "ruta"]) ?? "");
     const blsRaw = pickField(row, ["bls", "cantidadBls", "qtyBls"]);
     const ctrsRaw = pickField(row, ["ctrs", "ctr", "cantidadCtrs", "contenedores"]);
@@ -185,14 +205,40 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
       pending.add("ebs");
     }
 
+    const localBreakdown =
+      carrier && tipo
+        ? computeLocalCharges({
+            shipper,
+            carrier,
+            tipo,
+            bls,
+            ctrs,
+            standards,
+            exceptions,
+          })
+        : null;
+
+    let locals: number | string = "TBD";
+    if (localBreakdown && localBreakdown.unresolved.length === 0) {
+      locals = localBreakdown.total;
+      if (localBreakdown.conditional.length > 0) {
+        // gateOut depends on ports/units we can't auto-resolve — flag for review
+        // but still apply the determined charges
+        pending.add("locals");
+      }
+    } else {
+      pending.add("locals");
+    }
+
     let total: number | string = "TBD";
     if (
       typeof sf === "number" &&
       typeof blFee === "number" &&
       typeof af === "number" &&
-      typeof ebsAmount === "number"
+      typeof ebsAmount === "number" &&
+      typeof locals === "number"
     ) {
-      total = sf + blFee + af + ebsAmount;
+      total = sf + blFee + af + ebsAmount + locals;
     } else {
       pending.add("total");
     }
@@ -202,6 +248,7 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
       etd,
       agent,
       carrier,
+      shipper,
       route,
       tipo,
       bls,
@@ -210,6 +257,8 @@ function processRows(rows: Row[], rates: Rate[], ebs: Ebs[]): ProcessedRow[] {
       blFee,
       af,
       ebs: ebsAmount,
+      locals,
+      localBreakdown,
       total,
       notes,
       pending,
@@ -224,6 +273,8 @@ function downloadExcel(processed: ProcessedRow[]) {
       "ETD",
       "Agente",
       "Carrier",
+      "Shipper",
+      "Excepción",
       "Ruta",
       "Tipo",
       "BLs",
@@ -232,25 +283,44 @@ function downloadExcel(processed: ProcessedRow[]) {
       "BL Fee",
       "AF",
       "EBS",
+      "OTHC",
+      "Sello",
+      "AMS",
+      "BL Fee Local",
+      "Gate Out",
+      "Otros",
+      "Locales",
       "Total",
       "Notas",
     ],
-    ...processed.map((r) => [
-      r.blNumber,
-      r.etd,
-      r.agent,
-      r.carrier,
-      r.route,
-      r.tipo,
-      r.bls,
-      r.ctrs,
-      r.sf,
-      r.blFee,
-      r.af,
-      r.ebs,
-      r.total,
-      r.notes,
-    ]),
+    ...processed.map((r) => {
+      const b = r.localBreakdown;
+      return [
+        r.blNumber,
+        r.etd,
+        r.agent,
+        r.carrier,
+        r.shipper,
+        b?.matchedException?.customer ?? "",
+        r.route,
+        r.tipo,
+        r.bls,
+        r.ctrs,
+        r.sf,
+        r.blFee,
+        r.af,
+        r.ebs,
+        b?.othc ?? "",
+        b?.sello ?? "",
+        b?.ams ?? "",
+        b?.blFee ?? "",
+        b?.gateOut ?? "",
+        b?.otherCharges ?? "",
+        r.locals,
+        r.total,
+        r.notes,
+      ];
+    }),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();
@@ -297,6 +367,13 @@ export default function InvoicingTab() {
     EBS_STORAGE_KEY,
     SEED_EBS
   );
+  const { items: standards, hydrated: stdHydrated } =
+    useLocalStore<LocalStandardRate>(LOCAL_STD_STORAGE_KEY, SEED_LOCAL_STANDARDS);
+  const { items: exceptions, hydrated: excHydrated } =
+    useLocalStore<LocalException>(
+      LOCAL_EXCEPTIONS_STORAGE_KEY,
+      SEED_LOCAL_EXCEPTIONS
+    );
 
   const [fileName, setFileName] = useState<string>("");
   const [rawRows, setRawRows] = useState<Row[]>([]);
@@ -386,7 +463,13 @@ export default function InvoicingTab() {
     }
     setError(null);
     const currentBls = loadInvoicedBls();
-    const rows = processRows(filteredRows, rates, ebs).map((r) => {
+    const rows = processRows(
+      filteredRows,
+      rates,
+      ebs,
+      standards,
+      exceptions
+    ).map((r) => {
       if (r.blNumber && currentBls[r.blNumber]) {
         return { ...r, duplicate: currentBls[r.blNumber] };
       }
@@ -462,6 +545,78 @@ export default function InvoicingTab() {
     );
   };
 
+  const renderExceptionCell = (
+    breakdown: LocalChargeBreakdown | null,
+    shipper: string
+  ) => {
+    if (!breakdown) return <span className="text-gray-400">—</span>;
+    if (breakdown.matchedException) {
+      const isViaBrand =
+        shipper &&
+        breakdown.matchedException.customer.trim().toLowerCase() !==
+          shipper.trim().toLowerCase();
+      return (
+        <span
+          className="inline-block px-2 py-0.5 rounded-full text-xs font-medium border bg-blue-50 text-blue-800 border-blue-200"
+          title={
+            isViaBrand
+              ? `Aplica excepción de ${breakdown.matchedException.customer} (vía marca incluida "${shipper}")`
+              : `Aplica excepción específica de ${breakdown.matchedException.customer}`
+          }
+        >
+          {breakdown.matchedException.customer}
+          {isViaBrand && " ↪"}
+        </span>
+      );
+    }
+    if (breakdown.appliedStandard) {
+      return (
+        <span
+          className="text-xs text-gray-500"
+          title={`Aplica tarifa estándar "${breakdown.appliedStandard.name}"`}
+        >
+          estándar
+        </span>
+      );
+    }
+    return <span className="text-gray-400">—</span>;
+  };
+
+  const renderLocalsCell = (row: ProcessedRow) => {
+    const pendingCell = row.pending.has("locals");
+    const value = row.locals;
+    const text =
+      typeof value === "number" ? `$${value.toLocaleString("es-AR")}` : String(value);
+    const b = row.localBreakdown;
+    const tooltip = b
+      ? [
+          `OTHC: $${b.othc}`,
+          `Sello: $${b.sello}`,
+          `AMS: $${b.ams}`,
+          `BL Fee local: $${b.blFee}`,
+          `Gate Out: $${b.gateOut}${
+            b.conditional.includes("gateOut") ? " (condicional, requiere revisión)" : ""
+          }`,
+          `Otros: $${b.otherCharges}`,
+        ].join(" · ")
+      : "Sin datos";
+    return (
+      <td
+        title={tooltip}
+        className={`px-4 py-2 whitespace-nowrap ${
+          pendingCell ? "bg-yellow-200" : ""
+        }`}
+      >
+        {text}
+        {b && b.conditional.length > 0 && (
+          <span className="ml-1 text-xs text-yellow-700" title="Hay cargos condicionales — revisar manualmente">
+            ⚠
+          </span>
+        )}
+      </td>
+    );
+  };
+
   const renderCell = (
     value: number | string,
     field: string,
@@ -481,7 +636,7 @@ export default function InvoicingTab() {
     );
   };
 
-  if (!ratesHydrated || !ebsHydrated) {
+  if (!ratesHydrated || !ebsHydrated || !stdHydrated || !excHydrated) {
     return <div className="text-gray-500 py-8 text-center">Cargando...</div>;
   }
 
@@ -492,7 +647,7 @@ export default function InvoicingTab() {
       <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
         <h3 className="font-semibold mb-3">Subir Excel de facturación</h3>
         <p className="text-xs text-gray-500 mb-3">
-          Columnas esperadas: bl, etd, agente, carrier, ruta, tipo, bls, ctrs, notas.
+          Columnas esperadas: bl, etd, agente, carrier, ruta, tipo, bls, ctrs, notas. Opcional: <strong>shipper</strong> (para aplicar excepciones de gastos locales por cliente — incluye marcas como Viña Maipo, Cono Sur que heredan de Concha y Toro).
         </p>
 
         <div
@@ -658,6 +813,8 @@ export default function InvoicingTab() {
                   "ETD",
                   "Agente",
                   "Carrier",
+                  "Shipper",
+                  "Excepción",
                   "Ruta",
                   "Tipo",
                   "BLs",
@@ -666,6 +823,7 @@ export default function InvoicingTab() {
                   "BL Fee",
                   "AF",
                   "EBS",
+                  "Locales",
                   "Total",
                   "Notas",
                 ].map((h) => (
@@ -707,6 +865,12 @@ export default function InvoicingTab() {
                       >
                         {r.carrier || "—"}
                       </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-xs">
+                        {r.shipper || "—"}
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-xs">
+                        {renderExceptionCell(r.localBreakdown, r.shipper)}
+                      </td>
                       <td className="px-4 py-2 whitespace-nowrap">{r.route || "—"}</td>
                       <td
                         className={`px-4 py-2 whitespace-nowrap ${
@@ -733,13 +897,14 @@ export default function InvoicingTab() {
                       {renderCell(r.blFee, "blFee", r)}
                       {renderCell(r.af, "af", r)}
                       {renderCell(r.ebs, "ebs", r)}
+                      {renderLocalsCell(r)}
                       {renderCell(r.total, "total", r)}
                       <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
                     </tr>
                     {r.duplicate && (
                       <tr className="bg-yellow-100 text-xs">
                         <td
-                          colSpan={14}
+                          colSpan={17}
                           className="px-4 py-2 text-yellow-900 border-l-4 border-yellow-500"
                         >
                           ⚠️ Este BL ya fue facturado el{" "}

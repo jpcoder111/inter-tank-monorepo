@@ -143,15 +143,24 @@ function cleanCsvText(raw: string): string {
 
 // Hard cap so Claude's response stays well under max_tokens. Empirically a
 // row of EBS data parses to ~80 tokens; 150 rows leaves headroom under the
-// 4096 max_tokens cap on the API route.
+// 8192 max_tokens cap on the API route.
 const EXCEL_MAX_ROWS = 150;
+// Hard cap on the text payload sent to the API. Vercel serverless input is
+// generously sized but Claude generation cost scales with input tokens, and
+// >15k chars of CSV usually means we have a misshapen sheet anyway.
+const EXCEL_MAX_CHARS = 15000;
 
 type ExcelReadResult = {
   text: string;
   totalRows: number;
   usedRows: number;
   truncated: boolean;
+  charTruncated: boolean;
 };
+
+function csvEscapeCell(s: string): string {
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
 
 async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   const buffer = await file.arrayBuffer();
@@ -162,8 +171,24 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
     if (!ws) continue;
-    const csv = XLSX.utils.sheet_to_csv(ws);
-    const cleaned = cleanCsvText(csv);
+    // sheet_to_json with header:1 returns array-of-arrays — easier to drop
+    // entirely-empty columns (a major source of payload bloat in exports
+    // that include unused columns far to the right of the data).
+    const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, {
+      header: 1,
+      defval: "",
+    });
+    if (aoa.length === 0) continue;
+    const maxCols = Math.max(0, ...aoa.map((r) => r.length));
+    const keepCols: number[] = [];
+    for (let c = 0; c < maxCols; c++) {
+      if (aoa.some((r) => String(r[c] ?? "").trim() !== "")) keepCols.push(c);
+    }
+    if (keepCols.length === 0) continue;
+    const csvLines = aoa.map((r) =>
+      keepCols.map((c) => csvEscapeCell(String(r[c] ?? ""))).join(",")
+    );
+    const cleaned = cleanCsvText(csvLines.join("\n"));
     if (!cleaned) continue;
     const lines = cleaned.split("\n");
     totalRows += lines.length;
@@ -173,11 +198,18 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
       usedRows += taken.length;
     }
   }
+  let text = sheets.join("\n\n");
+  let charTruncated = false;
+  if (text.length > EXCEL_MAX_CHARS) {
+    text = text.slice(0, EXCEL_MAX_CHARS) + "\n... (truncado)";
+    charTruncated = true;
+  }
   return {
-    text: sheets.join("\n\n"),
+    text,
     totalRows,
     usedRows,
     truncated: totalRows > usedRows,
+    charTruncated,
   };
 }
 
@@ -396,13 +428,6 @@ export default function RateIntake({
     parsed: Record<string, unknown> | Record<string, unknown>[]
   ) => {
     const rows = toRecordArray(parsed);
-    // [debug-rate] confirms how many rows reach the preview pipeline
-    console.log(
-      "[debug-rate] consumeParsed: rows.length =",
-      rows.length,
-      "supportsMany =",
-      Boolean(onExtractedMany)
-    );
     if (supportsMany) {
       setPreviewRows(rows);
       setPreviewSelected(new Set(rows.map((_, i) => i)));
@@ -454,11 +479,18 @@ export default function RateIntake({
         return;
       }
       setExcelText(result.text);
+      const warnings: string[] = [];
       if (result.truncated) {
-        setSizeWarning(
+        warnings.push(
           `Excel tiene ${result.totalRows} filas — se procesarán las primeras ${result.usedRows}. Para el resto, sube el archivo nuevamente seleccionando otro rango.`
         );
       }
+      if (result.charTruncated) {
+        warnings.push(
+          `El texto excede ${EXCEL_MAX_CHARS} caracteres — se truncó antes de enviarlo a Claude (las últimas filas pueden quedar afuera).`
+        );
+      }
+      if (warnings.length > 0) setSizeWarning(warnings.join(" "));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al leer Excel");
     }
@@ -508,23 +540,6 @@ export default function RateIntake({
         content = manualText;
       }
 
-      // [debug-rate] temp: verify what we send to the API for rate extraction
-      console.log("[debug-rate] type =", type);
-      console.log(
-        "[debug-rate] system prompt (first 300):",
-        system.slice(0, 300)
-      );
-      if (typeof content === "string") {
-        console.log(
-          "[debug-rate] content (first 500 chars of",
-          content.length,
-          "total):",
-          content.slice(0, 500)
-        );
-      } else {
-        console.log("[debug-rate] content is multimodal (image/PDF blocks)");
-      }
-
       const res = await fetch("/api/billing/extract-rate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -539,19 +554,8 @@ export default function RateIntake({
       }
 
       const { text: responseText } = (await res.json()) as { text: string };
-      // [debug-rate] full raw response from Claude
-      console.log("[debug-rate] raw response length:", responseText.length);
-      console.log("[debug-rate] raw response:", responseText);
       try {
         const parsed = parseExtractedJson(responseText);
-        // [debug-rate] what JSON.parse produced — array vs object, length
-        console.log(
-          "[debug-rate] parsed:",
-          Array.isArray(parsed)
-            ? `array of ${parsed.length}`
-            : `object with keys ${Object.keys(parsed).join(", ")}`,
-          parsed
-        );
         consumeParsed(parsed);
       } catch (parseErr) {
         // Surface the raw response so the user can read what Claude returned and

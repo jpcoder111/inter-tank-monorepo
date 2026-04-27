@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/session";
 
 export const runtime = "nodejs";
+// Vercel Hobby caps serverless functions at 60s. Large Excel extractions can
+// take ~30-40s end-to-end (CSV upload + Claude generation), so we explicitly
+// claim the full window rather than letting the function default to 10s.
+export const maxDuration = 60;
 
 type Base64Source = { type: "base64"; media_type: string; data: string };
 type UrlSource = { type: "url"; url: string };

@@ -20,7 +20,7 @@ export default function BillingPage() {
         { key: "rates" as const, label: "Tarifas Agentes", adminOnly: true },
         { key: "ebs" as const, label: "Tabla EBS", adminOnly: true },
         { key: "local" as const, label: "Gastos Locales", adminOnly: true },
-        { key: "argClients" as const, label: "Clientes ARG", adminOnly: true },
+        { key: "argClients" as const, label: "Clientes ARG", adminOnly: false },
         { key: "invoicing" as const, label: "Facturación", adminOnly: false },
       ].filter((t) => (t.adminOnly ? isAdmin : true)),
     [isAdmin]
@@ -68,7 +68,7 @@ export default function BillingPage() {
         {active === "rates" && isAdmin && <RatesTab />}
         {active === "ebs" && isAdmin && <EbsTab />}
         {active === "local" && isAdmin && <LocalChargesTab />}
-        {active === "argClients" && isAdmin && <ArgClientsTab />}
+        {active === "argClients" && <ArgClientsTab readOnly={!isAdmin} />}
         {active === "invoicing" && <InvoicingTab />}
       </div>
     </div>

@@ -9,12 +9,14 @@ import BulkActionsBar from "./BulkActionsBar";
 import {
   ARG_CLIENTS_STORAGE_KEY,
   ArgClient,
+  ArgClientTipo,
   SEED_ARG_CLIENTS,
   uid,
 } from "./constants";
 
 const emptyDraft: Omit<ArgClient, "id"> = {
   name: "",
+  tipo: "Bodega",
   alternativeNames: "",
   notes: "",
 };
@@ -40,25 +42,56 @@ function Chips({ value }: { value: string }) {
   );
 }
 
-export default function ArgClientsTab() {
-  const { items, add, update, remove, removeMany, hydrated } =
+function TipoBadge({ tipo }: { tipo: ArgClientTipo }) {
+  return (
+    <span
+      className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium border ${
+        tipo === "Mostero"
+          ? "bg-purple-50 text-purple-800 border-purple-200"
+          : "bg-amber-50 text-amber-800 border-amber-200"
+      }`}
+    >
+      {tipo}
+    </span>
+  );
+}
+
+export default function ArgClientsTab({
+  readOnly = false,
+}: {
+  // When true, hides every editing affordance (new/edit/delete/bulk). The
+  // tab itself stays visible so non-admins can browse the catalog.
+  readOnly?: boolean;
+}) {
+  const { items: rawItems, add, update, remove, removeMany, hydrated } =
     useLocalStore<ArgClient>(ARG_CLIENTS_STORAGE_KEY, SEED_ARG_CLIENTS);
 
+  // Coerce legacy records (before `tipo` existed) to "Bodega" so the table
+  // and form can rely on the field being present.
+  const items = useMemo(
+    () =>
+      rawItems.map((c) => ({ ...c, tipo: (c.tipo ?? "Bodega") as ArgClientTipo })),
+    [rawItems]
+  );
+
   const [search, setSearch] = useState("");
+  const [tipoFilter, setTipoFilter] = useState<"" | ArgClientTipo>("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Omit<ArgClient, "id">>(emptyDraft);
   const [showForm, setShowForm] = useState(false);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
-    if (!q) return items;
-    return items.filter(
-      (c) =>
+    return items.filter((c) => {
+      if (tipoFilter && c.tipo !== tipoFilter) return false;
+      if (!q) return true;
+      return (
         c.name.toLowerCase().includes(q) ||
         c.alternativeNames.toLowerCase().includes(q) ||
         c.notes.toLowerCase().includes(q)
-    );
-  }, [items, search]);
+      );
+    });
+  }, [items, search, tipoFilter]);
 
   const visibleIds = useMemo(() => filtered.map((c) => c.id), [filtered]);
   const { selected, toggleOne, toggleAllVisible, clear, allVisibleSelected } =
@@ -122,11 +155,29 @@ export default function ArgClientsTab() {
           onChange={(e) => setSearch(e.target.value)}
           className="border border-gray-200 rounded-md p-2 h-10 min-w-48"
         />
+        <select
+          value={tipoFilter}
+          onChange={(e) => setTipoFilter(e.target.value as "" | ArgClientTipo)}
+          className="border border-gray-200 rounded-md p-2 h-10 bg-white"
+        >
+          <option value="">Todos los tipos</option>
+          <option value="Bodega">Bodegas</option>
+          <option value="Mostero">Mosteros</option>
+        </select>
+        <span className="text-xs text-gray-500">
+          {filtered.length} de {items.length} clientes
+        </span>
         <div className="flex-1" />
-        <Button onClick={openNew}>Nuevo cliente</Button>
+        {!readOnly && <Button onClick={openNew}>Nuevo cliente</Button>}
       </div>
 
-      {showForm && (
+      {readOnly && (
+        <div className="text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-md px-3 py-2">
+          Vista de solo lectura. Para editar la lista, pedile a un administrador.
+        </div>
+      )}
+
+      {!readOnly && showForm && (
         <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
           <h3 className="font-semibold mb-3">
             {editingId ? "Editar cliente" : "Nuevo cliente"}
@@ -149,6 +200,19 @@ export default function ArgClientsTab() {
               />
             </label>
             <label className="flex flex-col gap-1 text-sm">
+              Tipo
+              <select
+                value={draft.tipo}
+                onChange={(e) =>
+                  setDraft({ ...draft, tipo: e.target.value as ArgClientTipo })
+                }
+                className="border border-gray-200 rounded-md p-2 h-10 bg-white"
+              >
+                <option value="Bodega">Bodega</option>
+                <option value="Mostero">Mostero</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-sm md:col-span-2">
               Marcas / nombres alternativos
               <input
                 type="text"
@@ -183,26 +247,36 @@ export default function ArgClientsTab() {
         </div>
       )}
 
-      <BulkActionsBar
-        count={selected.size}
-        onDelete={handleBulkDelete}
-        onClear={clear}
-        itemLabel="cliente"
-      />
+      {!readOnly && (
+        <BulkActionsBar
+          count={selected.size}
+          onDelete={handleBulkDelete}
+          onClear={clear}
+          itemLabel="cliente"
+        />
+      )}
 
       <div className="bg-white rounded-lg shadow overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="px-3 py-3 w-10">
-                <input
-                  type="checkbox"
-                  checked={allVisibleSelected}
-                  onChange={toggleAllVisible}
-                  aria-label="Seleccionar todos"
-                />
-              </th>
-              {["Cliente", "Marcas alternativas", "Notas", "Acciones"].map((h) => (
+              {!readOnly && (
+                <th className="px-3 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={toggleAllVisible}
+                    aria-label="Seleccionar todos"
+                  />
+                </th>
+              )}
+              {[
+                "Cliente",
+                "Tipo",
+                "Marcas alternativas",
+                "Notas",
+                ...(readOnly ? [] : ["Acciones"]),
+              ].map((h) => (
                 <th
                   key={h}
                   className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
@@ -215,16 +289,21 @@ export default function ArgClientsTab() {
           <tbody className="bg-white divide-y divide-gray-200">
             {filtered.map((c) => (
               <tr key={c.id} className="text-sm">
-                <td className="px-3 py-2 w-10">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(c.id)}
-                    onChange={() => toggleOne(c.id)}
-                    aria-label={`Seleccionar ${c.name}`}
-                  />
-                </td>
+                {!readOnly && (
+                  <td className="px-3 py-2 w-10">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(c.id)}
+                      onChange={() => toggleOne(c.id)}
+                      aria-label={`Seleccionar ${c.name}`}
+                    />
+                  </td>
+                )}
                 <td className="px-4 py-3 font-medium whitespace-nowrap">
                   {c.name}
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  <TipoBadge tipo={c.tipo} />
                 </td>
                 <td className="px-4 py-3 max-w-md">
                   <Chips value={c.alternativeNames} />
@@ -232,22 +311,29 @@ export default function ArgClientsTab() {
                 <td className="px-4 py-3 max-w-xs truncate text-gray-600">
                   {c.notes || "—"}
                 </td>
-                <td className="px-4 py-3 whitespace-nowrap">
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => openEdit(c)}>
-                      Editar
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        if (confirm(`¿Eliminar cliente "${c.name}"?`)) remove(c.id);
-                      }}
-                    >
-                      Eliminar
-                    </Button>
-                  </div>
-                </td>
+                {!readOnly && (
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openEdit(c)}
+                      >
+                        Editar
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          if (confirm(`¿Eliminar cliente "${c.name}"?`))
+                            remove(c.id);
+                        }}
+                      >
+                        Eliminar
+                      </Button>
+                    </div>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>

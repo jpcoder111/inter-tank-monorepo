@@ -160,7 +160,7 @@ export const RATES_STORAGE_KEY = "it_rates_v2";
 export const EBS_STORAGE_KEY = "it_ebs_v4";
 export const LOCAL_STD_STORAGE_KEY = "it_local_std";
 export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions_v2";
-export const ARG_CLIENTS_STORAGE_KEY = "it_arg_clients";
+export const ARG_CLIENTS_STORAGE_KEY = "it_arg_clients_v2";
 export const INVOICED_BLS_KEY = "it_invoiced_bls";
 export const INVOICE_HISTORY_PREFIX = "it_invoiced_history_";
 
@@ -1049,33 +1049,117 @@ export function computeLocalCharges(args: {
 // invoicing instead of Chile. Stored as a simple list with optional comma-
 // separated alternative names so a single client (e.g., Grupo Peñaflor) can
 // match multiple shipper labels on incoming BLs.
+export type ArgClientTipo = "Bodega" | "Mostero";
+
 export type ArgClient = {
   id: string;
   name: string;
+  tipo: ArgClientTipo;
   // Comma- or semicolon-separated alternative names / brands.
   alternativeNames: string;
   notes: string;
 };
 
 export const SEED_ARG_CLIENTS: ArgClient[] = [
-  {
-    id: "seed-arg-bodegas-fabre",
-    name: "Bodegas Fabre",
-    alternativeNames: "",
-    notes: "",
-  },
-  {
-    id: "seed-arg-grupo-penaflor",
-    name: "Grupo Peñaflor",
-    alternativeNames: "Peñaflor, Trapiche, Finca Las Moras, Andean Vineyards",
-    notes: "",
-  },
-  {
-    id: "seed-arg-10int-goyenechea",
-    name: "10 Int + Goyenechea",
-    alternativeNames: "Goyenechea, 10 Int",
-    notes: "",
-  },
+  // ===== Bodegas =====
+  { id: "seed-arg-bodegas-fabre", tipo: "Bodega", name: "Bodegas Fabre", alternativeNames: "", notes: "" },
+  { id: "seed-arg-grupo-penaflor", tipo: "Bodega", name: "Grupo Peñaflor", alternativeNames: "Trapiche, Finca Las Moras, Navarro Correas, Andean Vineyards", notes: "" },
+  { id: "seed-arg-goyenechea", tipo: "Bodega", name: "Goyenechea", alternativeNames: "", notes: "" },
+  { id: "seed-arg-mipster", tipo: "Bodega", name: "Mipster", alternativeNames: "", notes: "" },
+  { id: "seed-arg-vina-montpellier", tipo: "Bodega", name: "Viña Montpellier", alternativeNames: "", notes: "" },
+  { id: "seed-arg-catena-zapata", tipo: "Bodega", name: "Catena Zapata", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-norton", tipo: "Bodega", name: "Bodega Norton", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-trapiche", tipo: "Bodega", name: "Bodega Trapiche", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-rutini", tipo: "Bodega", name: "Bodega Rutini", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-salentein", tipo: "Bodega", name: "Bodega Salentein", alternativeNames: "", notes: "" },
+  { id: "seed-arg-luigi-bosca", tipo: "Bodega", name: "Luigi Bosca", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-chandon", tipo: "Bodega", name: "Bodega Chandón", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-lagarde", tipo: "Bodega", name: "Bodega Lagarde", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-la-rural", tipo: "Bodega", name: "Bodega La Rural", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-santa-julia", tipo: "Bodega", name: "Bodega Santa Julia", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-bianchi", tipo: "Bodega", name: "Bodega Bianchi", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-nieto-senetiner", tipo: "Bodega", name: "Bodega Nieto Senetiner", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-septima", tipo: "Bodega", name: "Bodega Séptima", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-renacer", tipo: "Bodega", name: "Bodega Renacer", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-atamisque", tipo: "Bodega", name: "Bodega Atamisque", alternativeNames: "", notes: "" },
+  { id: "seed-arg-casa-de-uco", tipo: "Bodega", name: "Casa de Uco", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-casarena", tipo: "Bodega", name: "Bodega Casarena", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-la-celia", tipo: "Bodega", name: "Bodega La Celia", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodegas-lopez", tipo: "Bodega", name: "Bodegas López", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-vistalba", tipo: "Bodega", name: "Bodega Vistalba", alternativeNames: "", notes: "" },
+  { id: "seed-arg-durigutti", tipo: "Bodega", name: "Durigutti Family Winemakers", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-argento", tipo: "Bodega", name: "Bodega Argento", alternativeNames: "Grupo Avinea", notes: "" },
+  { id: "seed-arg-cheval-des-andes", tipo: "Bodega", name: "Cheval des Andes", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-alta-vista", tipo: "Bodega", name: "Bodega Alta Vista", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-alfredo-roca", tipo: "Bodega", name: "Bodega Alfredo Roca", alternativeNames: "", notes: "" },
+  { id: "seed-arg-altos-las-hormigas", tipo: "Bodega", name: "Altos Las Hormigas", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-bressia", tipo: "Bodega", name: "Bodega Bressia", alternativeNames: "Grappolo", notes: "" },
+  { id: "seed-arg-vina-las-perdices", tipo: "Bodega", name: "Viña Las Perdices", alternativeNames: "", notes: "" },
+  { id: "seed-arg-rosell-boher", tipo: "Bodega", name: "Rosell Boher", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-antucura", tipo: "Bodega", name: "Bodega Antucurá", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-amalaya", tipo: "Bodega", name: "Bodega Amalaya", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-aleanna", tipo: "Bodega", name: "Bodega Aleanna", alternativeNames: "", notes: "" },
+  { id: "seed-arg-mosquita-muerta", tipo: "Bodega", name: "Mosquita Muerta Wines", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-monteviejo", tipo: "Bodega", name: "Bodega Monteviejo", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-el-esteco", tipo: "Bodega", name: "Bodega El Esteco", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-del-fin-del-mundo", tipo: "Bodega", name: "Bodega Del Fin del Mundo", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-colome", tipo: "Bodega", name: "Bodega Colomé", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-andeluna", tipo: "Bodega", name: "Bodega Andeluna", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-chakana", tipo: "Bodega", name: "Bodega Chakana", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodegas-esmeralda", tipo: "Bodega", name: "Bodegas Esmeralda", alternativeNames: "", notes: "" },
+  { id: "seed-arg-trivento", tipo: "Bodega", name: "Trivento Bodegas y Viñedos", alternativeNames: "", notes: "" },
+  { id: "seed-arg-clos-de-los-siete", tipo: "Bodega", name: "Clos de los Siete", alternativeNames: "", notes: "" },
+  { id: "seed-arg-piattelli", tipo: "Bodega", name: "Piattelli Vineyards", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-dante-robino", tipo: "Bodega", name: "Bodega Dante Robino", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-tittarelli", tipo: "Bodega", name: "Bodega Tittarelli", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodegas-augusto-pulenta", tipo: "Bodega", name: "Bodegas Augusto Pulenta", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodegas-hugo-eduardo-pulenta", tipo: "Bodega", name: "Bodegas Hugo y Eduardo Pulenta", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodegas-crotta", tipo: "Bodega", name: "Bodegas Crotta", alternativeNames: "", notes: "" },
+  { id: "seed-arg-pascual-toso", tipo: "Bodega", name: "Pascual Toso", alternativeNames: "", notes: "" },
+  { id: "seed-arg-cuarta-generacion", tipo: "Bodega", name: "Cuarta Generación", alternativeNames: "Cabrini", notes: "" },
+  { id: "seed-arg-dominio-del-plata", tipo: "Bodega", name: "Dominio del Plata", alternativeNames: "Susana Balbo", notes: "" },
+  { id: "seed-arg-humberto-canale", tipo: "Bodega", name: "Establecimiento Humberto Canale", alternativeNames: "", notes: "" },
+  { id: "seed-arg-finca-agostino", tipo: "Bodega", name: "Finca Agostino", alternativeNames: "", notes: "" },
+  { id: "seed-arg-finca-flichman", tipo: "Bodega", name: "Finca Flichman", alternativeNames: "", notes: "" },
+  { id: "seed-arg-finca-la-celia", tipo: "Bodega", name: "Finca La Celia", alternativeNames: "", notes: "" },
+  { id: "seed-arg-la-riojana", tipo: "Bodega", name: "La Riojana Cooperativa", alternativeNames: "", notes: "" },
+  { id: "seed-arg-leoncio-arizu", tipo: "Bodega", name: "Leoncio Arizu", alternativeNames: "", notes: "" },
+  { id: "seed-arg-los-haroldos", tipo: "Bodega", name: "Los Haroldos", alternativeNames: "", notes: "" },
+  { id: "seed-arg-pernod-ricard", tipo: "Bodega", name: "Pernod Ricard Argentina", alternativeNames: "", notes: "" },
+  { id: "seed-arg-fincas-patagonicas", tipo: "Bodega", name: "Fincas Patagónicas", alternativeNames: "Bodega Tapiz", notes: "" },
+  { id: "seed-arg-dona-paula", tipo: "Bodega", name: "Doña Paula", alternativeNames: "", notes: "" },
+  { id: "seed-arg-escorihuela", tipo: "Bodega", name: "Establecimiento Vitivinícola Escorihuela", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-malma", tipo: "Bodega", name: "Bodega Malma", alternativeNames: "Viñedos de la Patagonia", notes: "" },
+  { id: "seed-arg-huarpe", tipo: "Bodega", name: "Bodegas y Viñedos Huarpe", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-chanarmuyo", tipo: "Bodega", name: "Bodega Chañarmuyo", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-pie-de-palo", tipo: "Bodega", name: "Bodega Pie de Palo", alternativeNames: "Bórbore", notes: "" },
+  { id: "seed-arg-casa-montes", tipo: "Bodega", name: "Casa Montes", alternativeNames: "", notes: "" },
+  { id: "seed-arg-dolium", tipo: "Bodega", name: "Dolium", alternativeNames: "", notes: "" },
+  { id: "seed-arg-kaiken", tipo: "Bodega", name: "Kaiken", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-antigal", tipo: "Bodega", name: "Bodega Antigal", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bodega-tacuil", tipo: "Bodega", name: "Bodega Tacuil", alternativeNames: "", notes: "" },
+  { id: "seed-arg-matervini", tipo: "Bodega", name: "Matervini", alternativeNames: "", notes: "" },
+  { id: "seed-arg-sophenia", tipo: "Bodega", name: "Sophenia", alternativeNames: "", notes: "" },
+  { id: "seed-arg-don-rosendo", tipo: "Bodega", name: "Don Rosendo Wines", alternativeNames: "", notes: "" },
+  { id: "seed-arg-carmelo-patti", tipo: "Bodega", name: "Carmelo Patti", alternativeNames: "", notes: "" },
+  { id: "seed-arg-la-guarda", tipo: "Bodega", name: "La Guarda", alternativeNames: "", notes: "" },
+  { id: "seed-arg-bournett", tipo: "Bodega", name: "Bournett", alternativeNames: "", notes: "" },
+  { id: "seed-arg-carelli", tipo: "Bodega", name: "Carelli", alternativeNames: "", notes: "" },
+  { id: "seed-arg-budeguer", tipo: "Bodega", name: "Budeguer", alternativeNames: "", notes: "" },
+  { id: "seed-arg-vinos-del-potrero", tipo: "Bodega", name: "Vinos del Potrero", alternativeNames: "", notes: "" },
+  { id: "seed-arg-xumek", tipo: "Bodega", name: "Xumek", alternativeNames: "", notes: "" },
+  { id: "seed-arg-cassone", tipo: "Bodega", name: "Cassone", alternativeNames: "Obra Prima, La Florencia", notes: "" },
+  { id: "seed-arg-finca-bandini", tipo: "Bodega", name: "Finca Bandini", alternativeNames: "", notes: "" },
+  { id: "seed-arg-terrazas-de-los-andes", tipo: "Bodega", name: "Terrazas de los Andes", alternativeNames: "", notes: "" },
+  { id: "seed-arg-finca-victoria", tipo: "Bodega", name: "Finca Victoria", alternativeNames: "", notes: "" },
+  { id: "seed-arg-familia-zuccardi", tipo: "Bodega", name: "Familia Zuccardi", alternativeNames: "", notes: "" },
+  { id: "seed-arg-dervinsa", tipo: "Bodega", name: "Derivados Vínicos", alternativeNames: "Dervinsa", notes: "" },
+
+  // ===== Mosteros =====
+  { id: "seed-arg-mostera-rio-mendoza", tipo: "Mostero", name: "Mostera Río Mendoza", alternativeNames: "", notes: "" },
+  { id: "seed-arg-fecovita", tipo: "Mostero", name: "Fecovita", alternativeNames: "", notes: "" },
+  { id: "seed-arg-mosto-argentino", tipo: "Mostero", name: "Mosto Argentino", alternativeNames: "", notes: "" },
+  { id: "seed-arg-cooperativa-vitivinicola-arg", tipo: "Mostero", name: "Cooperativa Vitivinícola de Argentina", alternativeNames: "", notes: "" },
 ];
 
 // True when the BL's shipper text matches any ARG client. Match is bidirectional

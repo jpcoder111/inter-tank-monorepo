@@ -28,6 +28,19 @@ export const CONTAINER_TYPE_SUGGESTIONS = [
   "40'RF",
 ] as const;
 
+// EBS aplica por región/tráfico, no por puerto específico. Estas regiones
+// alimentan el datalist del campo "Tráfico" pero el campo es texto libre.
+export const EBS_TRAFFIC_SUGGESTIONS = [
+  "Chile - Norte de Europa",
+  "Chile - Mediterráneo",
+  "Chile - Asia",
+  "Chile - Sudamérica",
+  "Chile - Norteamérica",
+  "Chile - Centroamérica",
+  "Chile - África",
+  "Chile - Oceanía",
+] as const;
+
 export const AGENT_COLORS: Record<string, string> = {
   IWS: "#d9ead3",
   "Van Moer": "#cfe2f3",
@@ -41,9 +54,9 @@ export const AGENT_COLORS: Record<string, string> = {
 // Storage keys are version-suffixed: bump when the schema or seed changes so
 // existing localStorage data is replaced with the new seeds on next load.
 export const RATES_STORAGE_KEY = "it_rates_v2";
-export const EBS_STORAGE_KEY = "it_ebs_v3";
+export const EBS_STORAGE_KEY = "it_ebs_v4";
 export const LOCAL_STD_STORAGE_KEY = "it_local_std";
-export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions";
+export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions_v2";
 export const INVOICED_BLS_KEY = "it_invoiced_bls";
 export const INVOICE_HISTORY_PREFIX = "it_invoiced_history_";
 
@@ -284,16 +297,16 @@ export const SEED_EBS: Ebs[] = [
     amountPerTEU: 126,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
-    notes: "",
+    notes: "Cubre Rotterdam, Hamburg, Antwerp, London, Copenhagen, Klaipeda, etc.",
   },
   {
-    id: "seed-ebs-hapag-cl-grm",
+    id: "seed-ebs-hapag-cl-neu",
     carrier: "HAPAG",
-    traffic: "Chile - Grangemouth",
+    traffic: "Chile - Norte de Europa",
     amountPerTEU: 160,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
-    notes: "",
+    notes: "Cubre Grangemouth, Rotterdam, Hamburg, etc.",
   },
   {
     id: "seed-ebs-cma-cl-neu",
@@ -322,6 +335,24 @@ export function getValidityStatus(validTo: string): ValidityStatus {
 
 export function uid(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Display helper: stored dates are always ISO yyyy-mm-dd (because <input type="date">
+// requires that and string-sort matches chronological order). For UI we render in
+// Chilean format dd/mm/yyyy.
+export function formatDateCl(value: string | null | undefined): string {
+  if (!value) return "-";
+  const trimmed = value.trim();
+  if (!trimmed) return "-";
+  // Already dd/mm/yyyy — pass through
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(trimmed)) return trimmed;
+  // ISO yyyy-mm-dd (with optional time component)
+  const iso = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    const [, y, m, d] = iso;
+    return `${d!.padStart(2, "0")}/${m!.padStart(2, "0")}/${y}`;
+  }
+  return trimmed;
 }
 
 export function uniqueSuggestions(
@@ -370,6 +401,9 @@ export type LocalException = {
   gateOutUnitTypes: string;
   otherCharges: number;
   otherChargesDetail: string;
+  // Marcas/empresas subsidiarias del cliente que también heredan esta excepción
+  // cuando aparecen como shipper en el BL. Texto libre separado por comas.
+  includedBrands: string;
   notes: string;
   validFrom: string;
 };
@@ -433,6 +467,8 @@ export const SEED_LOCAL_STANDARDS: LocalStandardRate[] = [
   },
 ];
 
+export const CONCHA_Y_TORO_BRANDS = "Viña Maipo, Cono Sur";
+
 export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
   {
     id: "seed-exc-mipster-iws-dry",
@@ -448,6 +484,7 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     gateOutUnitTypes: "",
     otherCharges: 0,
     otherChargesDetail: "",
+    includedBrands: "",
     notes: "Gate Out solo cuando la naviera corresponda (ver condiciones estándar)",
     validFrom: "2026-03-03",
   },
@@ -465,6 +502,7 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     gateOutUnitTypes: "",
     otherCharges: 22,
     otherChargesDetail: "Security Surcharge 10/unit + TPO TPA 12/unit + Doc Fee 38/BL",
+    includedBrands: CONCHA_Y_TORO_BRANDS,
     notes: "",
     validFrom: "2026-03-03",
   },
@@ -482,6 +520,7 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     gateOutUnitTypes: "",
     otherCharges: 0,
     otherChargesDetail: "",
+    includedBrands: CONCHA_Y_TORO_BRANDS,
     notes: "",
     validFrom: "2026-03-03",
   },
@@ -499,6 +538,7 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     gateOutUnitTypes: "",
     otherCharges: 0,
     otherChargesDetail: "",
+    includedBrands: CONCHA_Y_TORO_BRANDS,
     notes: "",
     validFrom: "2026-03-03",
   },
@@ -516,6 +556,7 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     gateOutUnitTypes: "",
     otherCharges: 0,
     otherChargesDetail: "",
+    includedBrands: CONCHA_Y_TORO_BRANDS,
     notes: "",
     validFrom: "2026-03-03",
   },
@@ -533,6 +574,7 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     gateOutUnitTypes: "Configurar tipos de unidad",
     otherCharges: 0,
     otherChargesDetail: "",
+    includedBrands: CONCHA_Y_TORO_BRANDS,
     notes: "No se cobra siempre — solo algunos puertos y tipos de unidad",
     validFrom: "2026-03-03",
   },
@@ -550,6 +592,7 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
     gateOutUnitTypes: "",
     otherCharges: 0,
     otherChargesDetail: "",
+    includedBrands: "",
     notes: "",
     validFrom: "2026-03-03",
   },

@@ -9,6 +9,7 @@ import {
   LOCAL_STD_STORAGE_KEY,
   LocalStandardRate,
   SEED_LOCAL_STANDARDS,
+  formatDateCl,
   uid,
 } from "./constants";
 
@@ -346,7 +347,7 @@ export default function LocalStandardSection() {
                 <td className="px-4 py-2 max-w-xs text-xs text-gray-700">
                   {r.gateOutConditions || "—"}
                 </td>
-                <td className="px-4 py-2 whitespace-nowrap">{r.validFrom || "-"}</td>
+                <td className="px-4 py-2 whitespace-nowrap">{formatDateCl(r.validFrom)}</td>
                 <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
                 <td className="px-4 py-2 whitespace-nowrap">
                   <Button variant="outline" size="sm" onClick={() => openUpdate(r)}>
@@ -418,7 +419,7 @@ export default function LocalStandardSection() {
                       ${r.gateOutReefer}
                     </td>
                     <td className="px-4 py-2 whitespace-nowrap">
-                      {r.validFrom || "-"}
+                      {formatDateCl(r.validFrom)}
                     </td>
                     <td className="px-4 py-2 whitespace-nowrap">
                       {isCurrent ? (

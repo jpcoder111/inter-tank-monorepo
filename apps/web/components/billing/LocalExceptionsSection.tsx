@@ -12,6 +12,7 @@ import {
   LocalException,
   LocalExceptionTipo,
   SEED_LOCAL_EXCEPTIONS,
+  formatDateCl,
   uid,
   uniqueSuggestions,
 } from "./constants";
@@ -29,6 +30,7 @@ const emptyDraft: Omit<LocalException, "id"> = {
   gateOutUnitTypes: "",
   otherCharges: 0,
   otherChargesDetail: "",
+  includedBrands: "",
   notes: "",
   validFrom: "",
 };
@@ -145,6 +147,7 @@ export default function LocalExceptionsSection() {
       gateOutUnitTypes: toStr(data.gateOutUnitTypes),
       otherCharges: toNumber(data.otherCharges),
       otherChargesDetail: toStr(data.otherChargesDetail),
+      includedBrands: toStr(data.includedBrands),
       notes: toStr(data.notes),
       validFrom: toStr(data.validFrom),
     });
@@ -411,6 +414,21 @@ export default function LocalExceptionsSection() {
               />
             </label>
             <label className="flex flex-col gap-1 text-sm col-span-2 md:col-span-4">
+              Marcas incluidas / También aplica para
+              <input
+                type="text"
+                value={draft.includedBrands}
+                onChange={(e) =>
+                  setDraft({ ...draft, includedBrands: e.target.value })
+                }
+                placeholder="Viña Maipo, Cono Sur"
+                className="border border-gray-200 rounded-md p-2 h-10"
+              />
+              <span className="text-xs text-gray-500">
+                Si el shipper del BL coincide con una de estas marcas, la excepción del cliente principal se aplica automáticamente.
+              </span>
+            </label>
+            <label className="flex flex-col gap-1 text-sm col-span-2 md:col-span-4">
               Notas
               <input
                 type="text"
@@ -470,8 +488,13 @@ export default function LocalExceptionsSection() {
                   style={bg ? { backgroundColor: bg } : undefined}
                   className="text-sm"
                 >
-                  <td className="px-4 py-2 font-medium whitespace-nowrap">
-                    {r.customer}
+                  <td className="px-4 py-2 align-top">
+                    <div className="font-medium whitespace-nowrap">{r.customer}</div>
+                    {r.includedBrands.trim() && (
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        + {r.includedBrands}
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-2 whitespace-nowrap">{r.carrier}</td>
                   <td className="px-4 py-2 whitespace-nowrap">
@@ -505,7 +528,7 @@ export default function LocalExceptionsSection() {
                     {r.otherChargesDetail || "—"}
                   </td>
                   <td className="px-4 py-2 whitespace-nowrap text-xs">
-                    {r.validFrom || "-"}
+                    {formatDateCl(r.validFrom)}
                   </td>
                   <td className="px-4 py-2 max-w-xs truncate">{r.notes}</td>
                   <td className="px-4 py-2 whitespace-nowrap">

@@ -23,6 +23,7 @@ import {
   Rate,
   SEED_EBS,
   SEED_RATES,
+  formatDateCl,
   invoiceHistoryKey,
   uid,
 } from "./constants";
@@ -271,7 +272,7 @@ function loadInvoicedBls(): InvoicedBLsRegistry {
 function formatDuplicateDate(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("es-AR", {
+  return d.toLocaleDateString("es-CL", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -319,7 +320,7 @@ export default function InvoicingTab() {
       return `Filas ${from}–${to}`;
     }
     if (filterMode === "etd") {
-      return `ETD ${etdFrom || "?"} a ${etdTo || "?"}`;
+      return `ETD ${etdFrom ? formatDateCl(etdFrom) : "?"} a ${etdTo ? formatDateCl(etdTo) : "?"}`;
     }
     return "Todas las filas";
   }, [filterMode, rowFrom, rowTo, etdFrom, etdTo, rawRows.length]);
@@ -690,7 +691,7 @@ export default function InvoicingTab() {
                         {r.blNumber || "—"}
                       </td>
                       <td className="px-4 py-2 whitespace-nowrap text-xs">
-                        {r.etd || "—"}
+                        {r.etd ? formatDateCl(r.etd) : "—"}
                       </td>
                       <td
                         className={`px-4 py-2 font-medium whitespace-nowrap ${

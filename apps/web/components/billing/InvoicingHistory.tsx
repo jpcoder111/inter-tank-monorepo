@@ -41,7 +41,7 @@ function formatDateTime(iso: string): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString("es-AR", {
+    return d.toLocaleString("es-CL", {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",

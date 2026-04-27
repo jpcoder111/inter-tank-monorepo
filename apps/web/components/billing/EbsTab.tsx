@@ -7,9 +7,11 @@ import RateIntake from "./RateIntake";
 import {
   CARRIER_SUGGESTIONS,
   EBS_STORAGE_KEY,
+  EBS_TRAFFIC_SUGGESTIONS,
   Ebs,
   SEED_EBS,
   ValidityStatus,
+  formatDateCl,
   getValidityStatus,
   uid,
   uniqueSuggestions,
@@ -83,7 +85,7 @@ export default function EbsTab() {
     [items]
   );
   const trafficSuggestions = useMemo(
-    () => uniqueSuggestions(items.map((r) => r.traffic)),
+    () => uniqueSuggestions(items.map((r) => r.traffic), EBS_TRAFFIC_SUGGESTIONS),
     [items]
   );
 
@@ -216,7 +218,9 @@ export default function EbsTab() {
             {editingId ? "Editar EBS" : "Nuevo EBS"}
           </h3>
           <p className="text-xs text-gray-500 mb-3">
-            El valor se ingresa por TEU. El sistema calcula 20&apos;/Flexi = 1 TEU y 40&apos; = 2 TEU automáticamente.
+            El EBS aplica por <strong>región/tráfico</strong>, no por puerto específico. Por
+            ejemplo &quot;Chile - Norte de Europa&quot; cubre Rotterdam, Hamburg, Antwerp, Grangemouth, etc.
+            El valor se ingresa por TEU; el sistema calcula 20&apos;/Flexi = 1 TEU y 40&apos; = 2 TEU automáticamente.
           </p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <label className="flex flex-col gap-1 text-sm">
@@ -338,10 +342,10 @@ export default function EbsTab() {
                   ${r.amountPerTEU * 2}
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap text-gray-600">
-                  {r.validFrom || "-"}
+                  {formatDateCl(r.validFrom)}
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap text-gray-600">
-                  {r.validTo || "-"}
+                  {formatDateCl(r.validTo)}
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">
                   <VigenciaBadge validTo={r.validTo} />

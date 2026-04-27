@@ -396,6 +396,13 @@ export default function RateIntake({
     parsed: Record<string, unknown> | Record<string, unknown>[]
   ) => {
     const rows = toRecordArray(parsed);
+    // [debug-rate] confirms how many rows reach the preview pipeline
+    console.log(
+      "[debug-rate] consumeParsed: rows.length =",
+      rows.length,
+      "supportsMany =",
+      Boolean(onExtractedMany)
+    );
     if (supportsMany) {
       setPreviewRows(rows);
       setPreviewSelected(new Set(rows.map((_, i) => i)));
@@ -501,6 +508,23 @@ export default function RateIntake({
         content = manualText;
       }
 
+      // [debug-rate] temp: verify what we send to the API for rate extraction
+      console.log("[debug-rate] type =", type);
+      console.log(
+        "[debug-rate] system prompt (first 300):",
+        system.slice(0, 300)
+      );
+      if (typeof content === "string") {
+        console.log(
+          "[debug-rate] content (first 500 chars of",
+          content.length,
+          "total):",
+          content.slice(0, 500)
+        );
+      } else {
+        console.log("[debug-rate] content is multimodal (image/PDF blocks)");
+      }
+
       const res = await fetch("/api/billing/extract-rate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -515,8 +539,19 @@ export default function RateIntake({
       }
 
       const { text: responseText } = (await res.json()) as { text: string };
+      // [debug-rate] full raw response from Claude
+      console.log("[debug-rate] raw response length:", responseText.length);
+      console.log("[debug-rate] raw response:", responseText);
       try {
         const parsed = parseExtractedJson(responseText);
+        // [debug-rate] what JSON.parse produced — array vs object, length
+        console.log(
+          "[debug-rate] parsed:",
+          Array.isArray(parsed)
+            ? `array of ${parsed.length}`
+            : `object with keys ${Object.keys(parsed).join(", ")}`,
+          parsed
+        );
         consumeParsed(parsed);
       } catch (parseErr) {
         // Surface the raw response so the user can read what Claude returned and

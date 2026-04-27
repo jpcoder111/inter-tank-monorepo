@@ -111,10 +111,8 @@ function summarizeAgent(agent: string, rates: Rate[]): AgentSummary {
 }
 
 export default function RatesTab() {
-  const { items, add, update, remove, removeMany, hydrated } = useLocalStore<Rate>(
-    RATES_STORAGE_KEY,
-    SEED_RATES
-  );
+  const { items, setItems, add, update, remove, removeMany, hydrated } =
+    useLocalStore<Rate>(RATES_STORAGE_KEY, SEED_RATES);
 
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState("");
@@ -237,6 +235,38 @@ export default function RatesTab() {
     setShowForm(true);
   };
 
+  const handleExtractedMany = (rows: Record<string, unknown>[]) => {
+    // Single setItems call avoids the closure trap that bit us in the EBS bulk
+    // save: a loop of add() reads stale state on every iteration.
+    setItems((prev) => {
+      const next = prev.slice();
+      for (const row of rows) {
+        next.push({
+          id: uid("rate"),
+          agent: toString(row.agent),
+          carrier: toString(row.carrier),
+          route: toString(row.route),
+          tipo: toString(row.tipo),
+          sf: toNumber(row.sf),
+          blFee: toNumber(row.blFee),
+          af: toNumber(row.af),
+          afMax: toNumber(row.afMax),
+          flexiArg: toNumber(row.flexiArg),
+          validFrom: toString(row.validFrom),
+          validTo: toString(row.validTo),
+          notes: toString(row.notes),
+        });
+      }
+      return next;
+    });
+    toast.success(
+      `${rows.length} tarifa${rows.length === 1 ? "" : "s"} guardada${rows.length === 1 ? "" : "s"}`
+    );
+    setShowIntake(false);
+    setShowForm(false);
+    setEditingId(null);
+  };
+
   const skipIntake = () => {
     setDraft(emptyDraft);
     setShowIntake(false);
@@ -325,6 +355,7 @@ export default function RatesTab() {
           <RateIntake
             type="rate"
             onExtracted={handleExtracted}
+            onExtractedMany={handleExtractedMany}
             onCancel={cancelAll}
           />
           <button

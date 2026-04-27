@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
@@ -10,25 +10,34 @@ type Mode = "choose" | "image" | "excel" | "manual";
 
 const STRICT_RESPONSE_RULES = `IMPORTANTE: Respondé SOLO con el JSON, sin backticks de markdown (\`\`\`), sin texto adicional antes o después. Si hay muchas tarifas, limitá la respuesta a las primeras 20.`;
 
-const RATE_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input describe una tarifa (agente logístico, carrier, ruta, tipo de contenedor, costos, vigencia).
-Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
+// Same formatting discipline but no row cap — used for prompts where the user
+// expects every input row to round-trip into a result (rates extraction).
+const STRICT_RESPONSE_RULES_NO_LIMIT = `IMPORTANTE: Respondé SOLO con el JSON, sin backticks de markdown (\`\`\`), sin texto adicional antes o después.`;
 
-{
-  "agent": string,         // nombre del agente (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
-  "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, PIL, COSCO, Evergreen, MSC u otra)
-  "route": string,         // ruta o puerto de destino
-  "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
-  "sf": number,            // Sea Freight en USD por contenedor
-  "blFee": number,         // BL fee en USD por BL
-  "af": number,            // Agency fee por contenedor
-  "afMax": number,         // AF máximo por BL/operación
-  "flexiArg": number,      // cargo adicional Flexi ARG
-  "validFrom": string,     // YYYY-MM-DD
-  "validTo": string,       // YYYY-MM-DD
-  "notes": string          // cualquier observación relevante (incluido all-in, EBS variable, etc.)
-}
+const RATE_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input puede contener UNA o MÚLTIPLES tarifas (por ejemplo, un Excel con muchas filas, una por tarifa).
 
-${STRICT_RESPONSE_RULES}`;
+Extrae TODAS las tarifas que encuentres en el input. Devolvé un JSON ARRAY con un objeto por cada tarifa/fila. Si hay 50 filas, devolvé 50 objetos. Si hay 100 filas, devolvé los primeros 100. Si solo hay una tarifa, devolvé un array con un único elemento.
+
+Cada objeto tiene los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios ni texto adicional.
+
+[
+  {
+    "agent": string,         // nombre del agente (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
+    "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, PIL, COSCO, Evergreen, MSC u otra)
+    "route": string,         // ruta o puerto de destino
+    "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
+    "sf": number,            // Sea Freight en USD por contenedor
+    "blFee": number,         // BL fee en USD por BL
+    "af": number,            // Agency fee por contenedor
+    "afMax": number,         // AF máximo por BL/operación
+    "flexiArg": number,      // cargo adicional Flexi ARG
+    "validFrom": string,     // YYYY-MM-DD
+    "validTo": string,       // YYYY-MM-DD
+    "notes": string          // cualquier observación relevante (incluido all-in, EBS variable, etc.)
+  }
+]
+
+${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
 const EBS_SYSTEM = `Sos un extractor de EBS (Emergency Bunker Surcharge) para fletes marítimos.
 
@@ -585,8 +594,9 @@ export default function RateIntake({
   };
 
   if (previewRows && supportsMany) {
+    const Preview = type === "rate" ? RateMultiPreview : MultiResultPreview;
     return (
-      <MultiResultPreview
+      <Preview
         rows={previewRows}
         selected={previewSelected}
         onToggle={togglePreview}
@@ -952,6 +962,307 @@ function MultiResultPreview({
         </Button>
       </div>
     </div>
+  );
+}
+
+// Compact table-style preview for rate extraction. Shows the most-identifying
+// columns at a glance and reveals the full editable form for a single row when
+// the user clicks "Editar". All checkboxes are pre-selected on entry so the
+// default action is "save everything Claude found".
+function RateMultiPreview({
+  rows,
+  selected,
+  onToggle,
+  onUpdateField,
+  onConfirm,
+  onBack,
+  onCancel,
+  error,
+}: {
+  rows: Record<string, unknown>[];
+  selected: Set<number>;
+  onToggle: (idx: number) => void;
+  onUpdateField: (idx: number, field: string, value: unknown) => void;
+  onConfirm: () => void;
+  onBack: () => void;
+  onCancel: () => void;
+  error: string | null;
+}) {
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const allSelected = rows.length > 0 && rows.every((_, i) => selected.has(i));
+  const toggleAll = () => {
+    // Re-emit a toggle for every index whose state needs flipping. Callers
+    // already debounce setState updates so a loop is fine here.
+    rows.forEach((_, i) => {
+      const shouldBeSelected = !allSelected;
+      const isSelected = selected.has(i);
+      if (shouldBeSelected !== isSelected) onToggle(i);
+    });
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="font-semibold">
+          Tarifas extraídas ({rows.length}) — seleccioná las que quieras guardar
+        </h3>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onBack}>
+            Volver
+          </Button>
+          <Button variant="outline" size="sm" onClick={onCancel}>
+            Cancelar
+          </Button>
+        </div>
+      </div>
+
+      <p className="text-xs text-gray-500 mb-3">
+        Por defecto todas están marcadas. Hacé clic en &quot;Editar&quot; para corregir
+        cualquier campo de una fila antes de guardar.
+      </p>
+
+      <div className="max-h-[60vh] overflow-y-auto border border-gray-200 rounded">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50 sticky top-0">
+            <tr>
+              <th className="px-3 py-2 w-10">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={toggleAll}
+                  aria-label="Seleccionar todas"
+                />
+              </th>
+              {[
+                "Agente",
+                "Carrier",
+                "Ruta",
+                "Tipo",
+                "SF",
+                "BL Fee",
+                "Acciones",
+              ].map((h) => (
+                <th
+                  key={h}
+                  className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {rows.map((row, idx) => {
+              const isEditing = editingIdx === idx;
+              const isSelected = selected.has(idx);
+              return (
+                <Fragment key={idx}>
+                  <tr
+                    className={`text-sm ${
+                      isSelected ? "" : "opacity-60"
+                    }`}
+                  >
+                    <td className="px-3 py-2 w-10">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => onToggle(idx)}
+                      />
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap font-medium">
+                      {strField(row, "agent") || "—"}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {strField(row, "carrier") || "—"}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {strField(row, "route") || "—"}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {strField(row, "tipo") || "—"}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      ${numField(row, "sf")}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      ${numField(row, "blFee")}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setEditingIdx(isEditing ? null : idx)}
+                      >
+                        {isEditing ? "Cerrar" : "Editar"}
+                      </Button>
+                    </td>
+                  </tr>
+                  {isEditing && (
+                    <tr className="bg-blue-50/40">
+                      <td colSpan={8} className="px-4 py-3">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                          <RateField
+                            label="Agente"
+                            row={row}
+                            field="agent"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateField
+                            label="Carrier"
+                            row={row}
+                            field="carrier"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateField
+                            label="Ruta"
+                            row={row}
+                            field="route"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateField
+                            label="Tipo"
+                            row={row}
+                            field="tipo"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="SF"
+                            row={row}
+                            field="sf"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="BL Fee"
+                            row={row}
+                            field="blFee"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="AF"
+                            row={row}
+                            field="af"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="AF Max"
+                            row={row}
+                            field="afMax"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="Flexi ARG"
+                            row={row}
+                            field="flexiArg"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateField
+                            label="Vigente desde"
+                            row={row}
+                            field="validFrom"
+                            inputType="date"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateField
+                            label="Vigente hasta"
+                            row={row}
+                            field="validTo"
+                            inputType="date"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateField
+                            label="Notas"
+                            row={row}
+                            field="notes"
+                            onChange={onUpdateField}
+                            idx={idx}
+                            colSpan="col-span-2 md:col-span-4"
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
+
+      <div className="flex justify-end gap-2 mt-4">
+        <Button onClick={onConfirm} disabled={selected.size === 0}>
+          Guardar seleccionadas ({selected.size} de {rows.length})
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function RateField({
+  label,
+  row,
+  field,
+  inputType = "text",
+  onChange,
+  idx,
+  colSpan,
+}: {
+  label: string;
+  row: Record<string, unknown>;
+  field: string;
+  inputType?: "text" | "date";
+  onChange: (idx: number, field: string, value: unknown) => void;
+  idx: number;
+  colSpan?: string;
+}) {
+  return (
+    <label className={`flex flex-col gap-1 ${colSpan ?? ""}`}>
+      {label}
+      <input
+        type={inputType}
+        value={strField(row, field)}
+        onChange={(e) => onChange(idx, field, e.target.value)}
+        className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+      />
+    </label>
+  );
+}
+
+function RateNumField({
+  label,
+  row,
+  field,
+  onChange,
+  idx,
+}: {
+  label: string;
+  row: Record<string, unknown>;
+  field: string;
+  onChange: (idx: number, field: string, value: unknown) => void;
+  idx: number;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      {label}
+      <input
+        type="number"
+        value={numField(row, field)}
+        onChange={(e) => onChange(idx, field, Number(e.target.value))}
+        className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+      />
+    </label>
   );
 }
 

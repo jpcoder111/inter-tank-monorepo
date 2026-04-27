@@ -196,14 +196,22 @@ export default function RatesTab() {
   }, [items, search, agentFilter, carrierFilter]);
 
   const groups = useMemo<AgentSummary[]>(() => {
-    const map = new Map<string, Rate[]>();
+    // Key by lowercase-trimmed agent so case variants ("Balguerie" /
+    // "BALGUERIE" / "balguerie") collapse into one card. Display name uses
+    // the casing of the first row encountered for the slot.
+    const map = new Map<string, { display: string; rates: Rate[] }>();
     for (const r of filtered) {
-      const key = r.agent.trim() || "(Sin agente)";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(r);
+      const trimmed = r.agent.trim();
+      const key = trimmed ? trimmed.toLowerCase() : "(sin agente)";
+      let slot = map.get(key);
+      if (!slot) {
+        slot = { display: trimmed || "(Sin agente)", rates: [] };
+        map.set(key, slot);
+      }
+      slot.rates.push(r);
     }
-    return Array.from(map.entries())
-      .map(([agent, rates]) => summarizeAgent(agent, rates))
+    return Array.from(map.values())
+      .map(({ display, rates }) => summarizeAgent(display, rates))
       .sort((a, b) => a.agent.localeCompare(b.agent));
   }, [filtered]);
 
@@ -319,10 +327,6 @@ export default function RatesTab() {
   };
 
   const handleExtractedMany = (rows: Record<string, unknown>[]) => {
-    console.log(
-      "[debug-save] handleExtractedMany ENTRY, rows.length =",
-      rows.length
-    );
     // Pre-generate IDs OUTSIDE the setState updater so React StrictMode's
     // double-invocation can't produce different IDs on the two runs (which
     // could mask itself as "duplicates collapsed"). The index suffix also
@@ -362,50 +366,11 @@ export default function RatesTab() {
       notes: toString(row.notes),
     }));
 
-    // [debug-save] temp: inputs to setItems and sanity-check the IDs are unique
-    console.log(
-      "[debug-save] saving",
-      newRates.length,
-      "rates",
-      newRates.map((r) => r.id)
-    );
-    const idSet = new Set(newRates.map((r) => r.id));
-    if (idSet.size !== newRates.length) {
-      console.warn(
-        "[debug-save] DUPLICATE IDs in newRates:",
-        newRates.length - idSet.size
-      );
-    }
     // Reference uid here so the linter doesn't flag the unused import — we
-    // intentionally bypassed uid() above for the deterministic-id pattern.
+    // intentionally bypass uid() above for the deterministic-id pattern.
     void uid;
 
-    setItems((prev) => {
-      const next = [...prev, ...newRates];
-      console.log(
-        "[debug-save] setItems updater: prev.length =",
-        prev.length,
-        "→ next.length =",
-        next.length
-      );
-      return next;
-    });
-
-    // localStorage is written inside setItemsState's callback; the setTimeout
-    // gives React + the storage write time to flush before we read back.
-    setTimeout(() => {
-      try {
-        const raw = window.localStorage.getItem(RATES_STORAGE_KEY);
-        const parsed = raw ? (JSON.parse(raw) as Rate[]) : [];
-        console.log(
-          "[debug-save] localStorage after save:",
-          parsed.length,
-          "rates persisted"
-        );
-      } catch (err) {
-        console.warn("[debug-save] could not read back localStorage:", err);
-      }
-    }, 100);
+    setItems((prev) => [...prev, ...newRates]);
 
     toast.success(
       `${rows.length} tarifa${rows.length === 1 ? "" : "s"} guardada${rows.length === 1 ? "" : "s"}`

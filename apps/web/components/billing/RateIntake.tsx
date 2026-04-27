@@ -851,10 +851,6 @@ export default function RateIntake({
     totalForUi: number,
     systemOverride?: string
   ) => {
-    // [debug-rate] unconditional sanity check that the new build is running
-    console.log(
-      `[debug-rate] STARTING processChunks with ${items.length} items, totalForUi=${totalForUi}, systemOverride=${systemOverride ? "yes" : "no"}`
-    );
     const rows: Record<string, unknown>[] = [];
     const failed: Array<{ index: number; content: string }> = [];
     let partial = false;
@@ -986,10 +982,6 @@ export default function RateIntake({
 
   const submitChunked = async () => {
     if (!excelText) return;
-    // [debug-rate] unconditional log to confirm the fresh build is running
-    console.log(
-      `[debug-rate] STARTING submitChunked, excelText length=${excelText.length}, type=${type}`
-    );
     const chunks = chunkExcelCsv(excelText);
     const preamble = extractContextPreamble(excelText);
     // Step 1: resolve the agent-wide costs ONCE upfront. Skipped for EBS
@@ -1005,20 +997,6 @@ export default function RateIntake({
       type === "rate"
         ? await resolvePreambleCosts(resolveContext)
         : ZERO_RESOLVED;
-    // [debug-rate] temp: confirm what we sent to step 1 and what came back
-    console.log(
-      "[debug-rate] preamble length:",
-      preamble.length,
-      "preamble preview:",
-      preamble.slice(0, 300)
-    );
-    console.log(
-      "[debug-rate] resolveContext used:",
-      resolveContext === preamble ? "preamble" : "excelText slice",
-      "length:",
-      resolveContext.length
-    );
-    console.log("[debug-rate] resolved costs:", resolved);
     // For rate chunks we no longer prepend the preamble — Claude doesn't
     // need it (we're filling those values in code). For EBS we keep the
     // existing preamble-prepended payload.
@@ -1047,29 +1025,27 @@ export default function RateIntake({
       .map((r) =>
         type === "rate" ? applyAdditionalCosts(r, resolved) : r
       );
-    // [debug-rate] temp: confirm the cost fields are landing on rows.
-    // Per-row haulage values printed explicitly so we can see whether
-    // applyAdditionalCosts is actually populating the slot or it's being
-    // overwritten downstream.
-    console.log(
-      "[debug-rate] first 3 rows after applyAdditionalCosts:",
-      cleanRows.slice(0, 3)
-    );
-    console.log(
-      "[debug-rate] haulage Mendoza values on first 5 rows:",
-      cleanRows.slice(0, 5).map((r, i) => ({
-        i,
-        carrier: r.carrier,
-        route: r.route,
-        thermalLinerChile20: r.thermalLinerChile20,
-        thermalLinerChile40: r.thermalLinerChile40,
-        thermalLinerMendoza20: r.thermalLinerMendoza20,
-        thermalLinerMendoza40: r.thermalLinerMendoza40,
-        fcaHaulageMendoza20: r.fcaHaulageMendoza20,
-        fcaHaulageMendoza40: r.fcaHaulageMendoza40,
-        discountInsulated: r.discountInsulated,
-      }))
-    );
+
+    // Default-agent fill: when Claude drops the agent column on a chunk
+    // (typical when the header row didn't repeat clearly), the row arrives
+    // with agent="". We assume the whole batch belongs to a single agent
+    // and propagate the first non-empty agent to the empty rows.
+    if (type === "rate") {
+      let defaultAgent = "";
+      for (const r of cleanRows) {
+        const a = String(r.agent ?? "").trim();
+        if (a) {
+          defaultAgent = a;
+          break;
+        }
+      }
+      if (defaultAgent) {
+        for (let i = 0; i < cleanRows.length; i++) {
+          const a = String(cleanRows[i]!.agent ?? "").trim();
+          if (!a) cleanRows[i] = { ...cleanRows[i]!, agent: defaultAgent };
+        }
+      }
+    }
     let warning: string | null = null;
     if (result.failed.length > 0) {
       const totalCount = chunks.length;
@@ -1109,24 +1085,6 @@ export default function RateIntake({
       unmatchedLines,
     };
     setExtractionStats(stats);
-    // [debug-rate] temp: full extraction breakdown for diagnosing missing rows.
-    // Logs are UNCONDITIONAL so they always fire — that way we can confirm
-    // the new build is running even when input and extracted counts happen
-    // to match.
-    console.log("[debug-rate] extraction stats:", stats);
-    console.log(
-      `[debug-rate] MISSING ROWS check: input=${inputDataLines.length}, extracted=${cleanRows.length}, gap=${inputDataLines.length - cleanRows.length}`
-    );
-    console.log(
-      "[debug-rate] unmatched input lines (full list):",
-      unmatchedLines
-    );
-    console.log(
-      "[debug-rate] extracted routes:",
-      cleanRows.map(
-        (r) => `${String(r.carrier ?? "")} | ${String(r.route ?? "")}`
-      )
-    );
 
     if (supportsMany) {
       setPreviewRows(cleanRows);
@@ -1323,25 +1281,8 @@ export default function RateIntake({
   };
 
   const confirmPreview = () => {
-    console.log(
-      "[debug-save] confirmPreview entry, previewRows =",
-      previewRows?.length,
-      "previewSelected.size =",
-      previewSelected.size,
-      "onExtractedMany =",
-      typeof onExtractedMany
-    );
-    if (!previewRows || !onExtractedMany) {
-      console.warn(
-        "[debug-save] confirmPreview EARLY RETURN: previewRows or onExtractedMany missing"
-      );
-      return;
-    }
+    if (!previewRows || !onExtractedMany) return;
     const selected = previewRows.filter((_, i) => previewSelected.has(i));
-    console.log(
-      "[debug-save] confirmPreview filtered selected =",
-      selected.length
-    );
     if (selected.length === 0) {
       setError("Seleccioná al menos una fila para guardar.");
       return;
@@ -2219,18 +2160,7 @@ function RateMultiPreview({
       {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
 
       <div className="flex justify-end gap-2 mt-4">
-        <Button
-          onClick={() => {
-            console.log(
-              "[debug-save] RateMultiPreview button click, selected.size =",
-              selected.size,
-              "rows.length =",
-              rows.length
-            );
-            onConfirm();
-          }}
-          disabled={selected.size === 0}
-        >
+        <Button onClick={onConfirm} disabled={selected.size === 0}>
           Guardar seleccionadas ({selected.size} de {rows.length})
         </Button>
       </div>

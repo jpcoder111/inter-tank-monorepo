@@ -32,12 +32,11 @@ export const CONTAINER_TYPE_SUGGESTIONS = [
 // alimentan el datalist del campo "Tráfico" pero el campo es texto libre.
 export const EBS_TRAFFIC_SUGGESTIONS = [
   "Chile - Norte de Europa",
-  "Chile - Mediterráneo",
+  "Chile - USA",
+  "Chile - Canadá",
   "Chile - Asia",
-  "Chile - Sudamérica",
-  "Chile - Norteamérica",
-  "Chile - Centroamérica",
-  "Chile - África",
+  "Chile - Intraamérica",
+  "Chile - Mediterráneo",
   "Chile - Oceanía",
 ] as const;
 
@@ -50,6 +49,38 @@ export const AGENT_COLORS: Record<string, string> = {
   CCL: "#eaf2fb",
   BULLET: "#f5eef8",
 };
+
+// Colores institucionales suaves por naviera. Se usan como fondo de fila en
+// EbsTab y como chip/cell highlight en el resto de la app donde aparece la
+// naviera.
+export const CARRIER_COLORS: Record<string, string> = {
+  OOCL: "#e8eaed",
+  HAPAG: "#fff0e0",
+  "CMA-CGM": "#e8f0fe",
+  "CMA CGM": "#e8f0fe",
+  MSC: "#f5f0e8",
+  Evergreen: "#e0f2e0",
+  PIL: "#fde0e0",
+  ONE: "#fce4ec",
+  "Yang Ming": "#e8f5e9",
+  COSCO: "#e0f0f0",
+  ZIM: "#e8e0f0",
+};
+
+export const CARRIER_COLOR_FALLBACK = "#f3f4f6";
+
+// Resolves a carrier name to its brand color, tolerant of dash/space variants
+// ("CMA-CGM" vs "CMA CGM" vs "cma cgm"). Returns the neutral fallback for
+// unknown carriers.
+export function carrierColor(carrier: string): string {
+  if (!carrier) return CARRIER_COLOR_FALLBACK;
+  const direct = CARRIER_COLORS[carrier];
+  if (direct) return direct;
+  for (const key of Object.keys(CARRIER_COLORS)) {
+    if (carriersMatch(key, carrier)) return CARRIER_COLORS[key]!;
+  }
+  return CARRIER_COLOR_FALLBACK;
+}
 
 // Storage keys are version-suffixed: bump when the schema or seed changes so
 // existing localStorage data is replaced with the new seeds on next load.

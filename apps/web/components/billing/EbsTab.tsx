@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import toast from "react-hot-toast";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
 import RateIntake from "./RateIntake";
@@ -11,6 +12,8 @@ import {
   Ebs,
   SEED_EBS,
   ValidityStatus,
+  carrierColor,
+  carriersMatch,
   formatDateCl,
   getValidityStatus,
   uid,
@@ -67,8 +70,23 @@ function toStr(value: unknown): string {
   return String(value);
 }
 
+function trafficKey(t: string): string {
+  return t.trim().toLowerCase();
+}
+
+// Identifies an existing EBS that "shares slot" with the candidate (same carrier
+// + same traffic region). Used to detect duplicates and same-region-different-
+// vigencia overlaps.
+function findSameSlot(items: Ebs[], candidate: Pick<Ebs, "carrier" | "traffic">) {
+  return items.find(
+    (e) =>
+      carriersMatch(e.carrier, candidate.carrier) &&
+      trafficKey(e.traffic) === trafficKey(candidate.traffic)
+  );
+}
+
 export default function EbsTab() {
-  const { items, add, update, remove, hydrated } = useLocalStore<Ebs>(
+  const { items, setItems, add, update, remove, hydrated } = useLocalStore<Ebs>(
     EBS_STORAGE_KEY,
     SEED_EBS
   );
@@ -143,17 +161,60 @@ export default function EbsTab() {
   };
 
   const handleExtractedMany = (rows: Record<string, unknown>[]) => {
-    for (const row of rows) {
-      add({
-        id: uid("ebs"),
-        carrier: toStr(row.carrier),
-        traffic: toStr(row.traffic),
-        amountPerTEU: toNumber(row.amountPerTEU),
-        validFrom: toStr(row.validFrom),
-        validTo: toStr(row.validTo),
-        notes: toStr(row.notes),
-      });
-    }
+    let added = 0;
+    let updated = 0;
+    let newPeriod = 0;
+    // Compute the full next state in one pass and commit with a single setItems
+    // call. Prior version called add() in a loop, which read stale `items` from
+    // closure each time and silently dropped all but one row.
+    setItems((prev) => {
+      const next = prev.slice();
+      for (const row of rows) {
+        const candidate: Ebs = {
+          id: uid("ebs"),
+          carrier: toStr(row.carrier),
+          traffic: toStr(row.traffic),
+          amountPerTEU: toNumber(row.amountPerTEU),
+          validFrom: toStr(row.validFrom),
+          validTo: toStr(row.validTo),
+          notes: toStr(row.notes),
+        };
+        if (!candidate.carrier || !candidate.traffic) {
+          // skip rows without enough info to slot
+          next.push(candidate);
+          added++;
+          continue;
+        }
+        const sameSlotIdx = next.findIndex(
+          (e) =>
+            carriersMatch(e.carrier, candidate.carrier) &&
+            trafficKey(e.traffic) === trafficKey(candidate.traffic) &&
+            e.validFrom === candidate.validFrom
+        );
+        if (sameSlotIdx >= 0) {
+          // Same carrier+traffic+validFrom → real duplicate, refresh in place
+          next[sameSlotIdx] = { ...candidate, id: next[sameSlotIdx]!.id };
+          updated++;
+          continue;
+        }
+        const differentVigencia = next.find(
+          (e) =>
+            carriersMatch(e.carrier, candidate.carrier) &&
+            trafficKey(e.traffic) === trafficKey(candidate.traffic)
+        );
+        if (differentVigencia) newPeriod++;
+        next.push(candidate);
+        added++;
+      }
+      return next;
+    });
+
+    const parts = [`${added} guardado${added === 1 ? "" : "s"}`];
+    if (updated > 0) parts.push(`${updated} actualizado${updated === 1 ? "" : "s"}`);
+    if (newPeriod > 0)
+      parts.push(`${newPeriod} nuevo${newPeriod === 1 ? "" : "s"} periodo${newPeriod === 1 ? "" : "s"}`);
+    toast.success(parts.join(", "));
+
     setShowIntake(false);
     setShowForm(false);
     setEditingId(null);
@@ -168,9 +229,33 @@ export default function EbsTab() {
   const handleSave = () => {
     if (editingId) {
       update(editingId, draft);
-    } else {
-      add({ ...draft, id: uid("ebs") });
+      setShowForm(false);
+      setEditingId(null);
+      return;
     }
+
+    const slot = findSameSlot(items, draft);
+    if (slot) {
+      if (slot.validFrom === draft.validFrom) {
+        // Real duplicate — same carrier+traffic+validFrom
+        const ok = confirm(
+          `Ya existe un EBS de ${slot.carrier} para "${slot.traffic}" con la misma vigencia (${formatDateCl(slot.validFrom) || "sin fecha"}). ¿Querés actualizar el existente con estos valores?`
+        );
+        if (!ok) return; // user wants to keep editing — do not save
+        update(slot.id, draft);
+        toast.success("EBS existente actualizado");
+        setShowForm(false);
+        setEditingId(null);
+        return;
+      }
+      // Same carrier+traffic, distinct validFrom → new period, save with notice
+      toast(
+        `Ya existe un EBS de ${slot.carrier} para "${slot.traffic}" vigente desde ${formatDateCl(slot.validFrom) || "sin fecha"}. Se creará un nuevo registro con la vigencia indicada.`,
+        { duration: 6000, icon: "ℹ️" }
+      );
+    }
+
+    add({ ...draft, id: uid("ebs") });
     setShowForm(false);
     setEditingId(null);
   };
@@ -347,7 +432,11 @@ export default function EbsTab() {
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {sortedFiltered.map((r) => (
-              <tr key={r.id} className="text-sm">
+              <tr
+                key={r.id}
+                className="text-sm"
+                style={{ backgroundColor: carrierColor(r.carrier) }}
+              >
                 <td className="px-4 py-3 font-medium whitespace-nowrap">
                   {r.carrier}
                 </td>

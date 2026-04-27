@@ -30,8 +30,8 @@ const EBS_SYSTEM = `Sos un extractor de EBS (Emergency Bunker Surcharge) para fl
 
 CONTEXTO IMPORTANTE:
 - El EBS se expresa SIEMPRE por TEU (20' = 1 TEU, 40' = 2 TEU). Si el input da el valor por contenedor de 40', dividilo por 2.
-- El EBS aplica por REGIÓN/TRÁFICO, no por puerto específico. Mapeá nombres de zona a regiones canónicas tipo "Chile - Norte de Europa", "Chile - Mediterráneo", "Chile - Asia", "Chile - Sudamérica", "Chile - Norteamérica", "Chile - Centroamérica", "Chile - África", "Chile - Oceanía".
-- Ejemplos de mapeo: "Europa", "NEUR", "Norte EU" → "Chile - Norte de Europa"; "USA", "NA" → "Chile - Norteamérica"; "Asia", "FE", "Far East" → "Chile - Asia".
+- El EBS aplica por REGIÓN/TRÁFICO, no por puerto específico. La lista CANÓNICA de regiones es: "Chile - Norte de Europa", "Chile - USA", "Chile - Canadá", "Chile - Asia", "Chile - Intraamérica", "Chile - Mediterráneo", "Chile - Oceanía". Mapeá siempre al valor canónico — no inventes regiones nuevas.
+- Ejemplos de mapeo: "Europa", "NEUR", "Norte EU", "Rotterdam/Hamburg" → "Chile - Norte de Europa"; "USA", "NA", "USEC", "USWC" → "Chile - USA"; "Canadá", "Vancouver", "Montreal" → "Chile - Canadá"; "Asia", "FE", "Far East", "Shanghai", "Busan" → "Chile - Asia"; "Sudamérica", "Brasil", "Perú", "Colombia" → "Chile - Intraamérica"; "Med", "Mediterráneo", "Italia", "España" → "Chile - Mediterráneo"; "Oceanía", "Australia", "NZ" → "Chile - Oceanía".
 - Las fechas suelen estar en formato dd/mm o dd-mm. Si no hay año explícito, asumí el año actual. "onwards" o similar significa que validTo queda vacío ("").
 
 FORMATO TÍPICO (Excel agrupado por naviera):

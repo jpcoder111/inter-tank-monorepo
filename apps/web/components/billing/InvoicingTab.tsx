@@ -30,6 +30,7 @@ import {
   SEED_LOCAL_EXCEPTIONS,
   SEED_LOCAL_STANDARDS,
   SEED_RATES,
+  carrierColor,
   computeLocalCharges,
   formatDateCl,
   invoiceHistoryKey,
@@ -863,7 +864,16 @@ export default function InvoicingTab() {
                           r.pending.has("carrier") ? "bg-yellow-200" : ""
                         }`}
                       >
-                        {r.carrier || "—"}
+                        {r.carrier ? (
+                          <span
+                            className="inline-block px-2 py-0.5 rounded text-xs font-medium"
+                            style={{ backgroundColor: carrierColor(r.carrier) }}
+                          >
+                            {r.carrier}
+                          </span>
+                        ) : (
+                          "—"
+                        )}
                       </td>
                       <td className="px-4 py-2 whitespace-nowrap text-xs">
                         {r.shipper || "—"}

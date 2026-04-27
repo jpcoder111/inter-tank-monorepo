@@ -13,6 +13,7 @@ import {
   Rate,
   SEED_RATES,
   ValidityStatus,
+  carrierColor,
   formatDateCl,
   getValidityStatus,
   uid,
@@ -552,7 +553,18 @@ export default function RatesTab() {
                       <tbody className="bg-white divide-y divide-gray-200">
                         {g.rates.map((r) => (
                           <tr key={r.id} className="text-sm">
-                            <td className="px-4 py-2 whitespace-nowrap">{r.carrier}</td>
+                            <td className="px-4 py-2 whitespace-nowrap">
+                              {r.carrier ? (
+                                <span
+                                  className="inline-block px-2 py-0.5 rounded text-xs font-medium"
+                                  style={{ backgroundColor: carrierColor(r.carrier) }}
+                                >
+                                  {r.carrier}
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
                             <td className="px-4 py-2 whitespace-nowrap">{r.route}</td>
                             <td className="px-4 py-2 whitespace-nowrap">{r.tipo}</td>
                             <td className="px-4 py-2 whitespace-nowrap">${r.sf}</td>

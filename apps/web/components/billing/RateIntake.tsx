@@ -112,6 +112,8 @@ Extrae las tarifas. Devolvé un JSON ARRAY con un objeto por cada tarifa/fila. S
 
 Usá "" para strings faltantes y 0 para números faltantes. NO incluyas thermalLiner, fcaHaulage ni discountInsulated — el frontend rellena esos campos después.
 
+CELDAS COMPUESTAS: si una celda tiene formato "USD 2540 + USD 60 BL Fee" o "USD X + Y BL" (común en tarifas Reefer 40' de PIL u otras navieras), SIEMPRE extralo como UNA tarifa válida — NO descartes esas filas. Parseá el primer número antes del "+" como sf, el segundo como blFee. Lo mismo para variantes tipo "2540/60", "2540 (60 BL)", "2540+60". Si solo hay un número, ponelo en sf y blFee=0. Estas filas son tarifas reales y deben aparecer en el array de salida.
+
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
 const EBS_SYSTEM = `Sos un extractor de EBS (Emergency Bunker Surcharge) para fletes marítimos.

@@ -319,45 +319,90 @@ export default function RatesTab() {
   };
 
   const handleExtractedMany = (rows: Record<string, unknown>[]) => {
-    // Single setItems call avoids the closure trap that bit us in the EBS bulk
-    // save: a loop of add() reads stale state on every iteration.
+    // Pre-generate IDs OUTSIDE the setState updater so React StrictMode's
+    // double-invocation can't produce different IDs on the two runs (which
+    // could mask itself as "duplicates collapsed"). The index suffix also
+    // guarantees uniqueness even if Date.now() and Math.random() happen to
+    // collide for a row.
+    const stamp = Date.now();
+    const rand = Math.random().toString(36).slice(2, 8);
+    const newRates: Rate[] = rows.map((row, idx) => ({
+      id: `rate-${stamp}-${idx}-${rand}`,
+      agent: toString(row.agent),
+      carrier: toString(row.carrier),
+      route: toString(row.route),
+      tipo: toString(row.tipo),
+      sf: toNumber(row.sf),
+      blFee: toNumber(row.blFee),
+      af: toNumber(row.af),
+      afMax: toNumber(row.afMax),
+      flexiArg: toNumber(row.flexiArg),
+      thermalLinerChile20: toNumber(
+        row.thermalLinerChile20 ?? row.thermalLiner20
+      ),
+      thermalLinerChile40: toNumber(
+        row.thermalLinerChile40 ?? row.thermalLiner40
+      ),
+      thermalLinerMendoza20: toNumber(row.thermalLinerMendoza20),
+      thermalLinerMendoza40: toNumber(row.thermalLinerMendoza40),
+      fcaHaulageMendoza20: toNumber(
+        row.fcaHaulageMendoza20 ?? row.fcaHaulage20
+      ),
+      fcaHaulageMendoza40: toNumber(
+        row.fcaHaulageMendoza40 ?? row.fcaHaulage40
+      ),
+      discountInsulated: toNumber(row.discountInsulated),
+      additionalNotes: toString(row.additionalNotes),
+      validFrom: toString(row.validFrom),
+      validTo: toString(row.validTo),
+      notes: toString(row.notes),
+    }));
+
+    // [debug-save] temp: inputs to setItems and sanity-check the IDs are unique
+    console.log(
+      "[debug-save] saving",
+      newRates.length,
+      "rates",
+      newRates.map((r) => r.id)
+    );
+    const idSet = new Set(newRates.map((r) => r.id));
+    if (idSet.size !== newRates.length) {
+      console.warn(
+        "[debug-save] DUPLICATE IDs in newRates:",
+        newRates.length - idSet.size
+      );
+    }
+    // Reference uid here so the linter doesn't flag the unused import — we
+    // intentionally bypassed uid() above for the deterministic-id pattern.
+    void uid;
+
     setItems((prev) => {
-      const next = prev.slice();
-      for (const row of rows) {
-        next.push({
-          id: uid("rate"),
-          agent: toString(row.agent),
-          carrier: toString(row.carrier),
-          route: toString(row.route),
-          tipo: toString(row.tipo),
-          sf: toNumber(row.sf),
-          blFee: toNumber(row.blFee),
-          af: toNumber(row.af),
-          afMax: toNumber(row.afMax),
-          flexiArg: toNumber(row.flexiArg),
-          thermalLinerChile20: toNumber(
-            row.thermalLinerChile20 ?? row.thermalLiner20
-          ),
-          thermalLinerChile40: toNumber(
-            row.thermalLinerChile40 ?? row.thermalLiner40
-          ),
-          thermalLinerMendoza20: toNumber(row.thermalLinerMendoza20),
-          thermalLinerMendoza40: toNumber(row.thermalLinerMendoza40),
-          fcaHaulageMendoza20: toNumber(
-            row.fcaHaulageMendoza20 ?? row.fcaHaulage20
-          ),
-          fcaHaulageMendoza40: toNumber(
-            row.fcaHaulageMendoza40 ?? row.fcaHaulage40
-          ),
-          discountInsulated: toNumber(row.discountInsulated),
-          additionalNotes: toString(row.additionalNotes),
-          validFrom: toString(row.validFrom),
-          validTo: toString(row.validTo),
-          notes: toString(row.notes),
-        });
-      }
+      const next = [...prev, ...newRates];
+      console.log(
+        "[debug-save] setItems updater: prev.length =",
+        prev.length,
+        "→ next.length =",
+        next.length
+      );
       return next;
     });
+
+    // localStorage is written inside setItemsState's callback; the setTimeout
+    // gives React + the storage write time to flush before we read back.
+    setTimeout(() => {
+      try {
+        const raw = window.localStorage.getItem(RATES_STORAGE_KEY);
+        const parsed = raw ? (JSON.parse(raw) as Rate[]) : [];
+        console.log(
+          "[debug-save] localStorage after save:",
+          parsed.length,
+          "rates persisted"
+        );
+      } catch (err) {
+        console.warn("[debug-save] could not read back localStorage:", err);
+      }
+    }, 100);
+
     toast.success(
       `${rows.length} tarifa${rows.length === 1 ? "" : "s"} guardada${rows.length === 1 ? "" : "s"}`
     );

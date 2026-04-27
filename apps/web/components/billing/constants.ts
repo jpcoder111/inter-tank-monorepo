@@ -204,11 +204,6 @@ export type Rate = {
   agent: string;
   carrier: string;
   route: string;
-  // Port of Loading / origen. Used to decide which thermal/haulage
-  // variant applies — Mendoza (or Argentinian) origins get the Mendoza
-  // values, everything else gets the Chile values. Optional because
-  // legacy records pre-date this field.
-  pol?: string;
   tipo: string;
   sf: number;
   blFee: number;
@@ -1302,17 +1297,6 @@ export function findSimilarClient(
     if (maxSim >= ARG_NAME_SIMILARITY_THRESHOLD) similar.push(client);
   }
   return { exactMatch: null, similarMatches: similar };
-}
-
-// True when the given text (POL, route, etc.) names an Argentinian / Mendoza
-// origin. Used during rate ingest to decide which thermal/haulage column
-// gets the resolved values.
-const ARG_ORIGIN_KEYWORDS = ["mendoza", "mza", "argentina", "buenos aires"];
-
-export function isArgentinianOrigin(s: string): boolean {
-  if (!s) return false;
-  const norm = s.toLowerCase();
-  return ARG_ORIGIN_KEYWORDS.some((k) => norm.includes(k));
 }
 
 // True when the BL's shipper text matches any ARG client. Match is bidirectional

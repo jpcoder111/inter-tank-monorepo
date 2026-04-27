@@ -4,7 +4,6 @@ import { Fragment, useRef, useState } from "react";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
-import { isArgentinianOrigin } from "./constants";
 
 type IntakeType = "rate" | "ebs" | "local_std" | "local_exception";
 type Mode = "choose" | "image" | "excel" | "manual";
@@ -99,7 +98,6 @@ Extrae las tarifas. Devolvé un JSON ARRAY con un objeto por cada tarifa/fila. S
     "agent": string,         // agente logístico (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
     "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, etc.)
     "route": string,         // ruta o puerto de destino
-    "pol": string,           // puerto de origen / Port Of Loading. Mirá columnas tipo POL/Origin/Origen/Loading. Devolvé el nombre tal cual aparece en el input ("Mendoza", "Valparaíso", "San Antonio", "Buenos Aires", etc.). Vacío si no se puede determinar de la fila.
     "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
     "sf": number,            // Sea Freight USD por contenedor
     "blFee": number,         // BL fee USD por BL
@@ -898,28 +896,24 @@ export default function RateIntake({
     }
   };
 
-  // Fills the additional-cost fields on a row based on the row's POL (or
-  // route as fallback). Mendoza-origin rows get the Mendoza values and
-  // Chile slots stay 0; Chile-origin rows get the Chile values and Mendoza
-  // slots stay 0. discountInsulated applies to every row.
+  // Stores ALL 7 resolved cost fields on every rate. Rates extracted from an
+  // agent quote are generic — they don't know who the eventual shipper will
+  // be — so both Chile and Mendoza values travel with each rate. Invoicing
+  // (InvoicingTab) decides Chile-vs-Mendoza per BL using the shipper match
+  // against the ARG clients list.
   const applyAdditionalCosts = (
     row: Record<string, unknown>,
     resolved: ResolvedAdditionalCosts
-  ): Record<string, unknown> => {
-    const pol = String(row.pol ?? "");
-    const route = String(row.route ?? "");
-    const isMendoza = isArgentinianOrigin(pol) || isArgentinianOrigin(route);
-    return {
-      ...row,
-      thermalLinerChile20: isMendoza ? 0 : resolved.thermalLinerChile20,
-      thermalLinerChile40: isMendoza ? 0 : resolved.thermalLinerChile40,
-      thermalLinerMendoza20: isMendoza ? resolved.thermalLinerMendoza20 : 0,
-      thermalLinerMendoza40: isMendoza ? resolved.thermalLinerMendoza40 : 0,
-      fcaHaulageMendoza20: isMendoza ? resolved.fcaHaulageMendoza20 : 0,
-      fcaHaulageMendoza40: isMendoza ? resolved.fcaHaulageMendoza40 : 0,
-      discountInsulated: resolved.discountInsulated,
-    };
-  };
+  ): Record<string, unknown> => ({
+    ...row,
+    thermalLinerChile20: resolved.thermalLinerChile20,
+    thermalLinerChile40: resolved.thermalLinerChile40,
+    thermalLinerMendoza20: resolved.thermalLinerMendoza20,
+    thermalLinerMendoza40: resolved.thermalLinerMendoza40,
+    fcaHaulageMendoza20: resolved.fcaHaulageMendoza20,
+    fcaHaulageMendoza40: resolved.fcaHaulageMendoza40,
+    discountInsulated: resolved.discountInsulated,
+  });
 
   const submitChunked = async () => {
     if (!excelText) return;

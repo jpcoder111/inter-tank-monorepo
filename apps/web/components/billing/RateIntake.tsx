@@ -16,9 +16,11 @@ const STRICT_RESPONSE_RULES_NO_LIMIT = `IMPORTANTE: Respondé SOLO con el JSON, 
 
 const RATE_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input puede contener UNA o MÚLTIPLES tarifas (por ejemplo, un Excel con muchas filas, una por tarifa).
 
-Extrae TODAS las tarifas que encuentres en el input. Devolvé un JSON ARRAY con un objeto por cada tarifa/fila. Si hay 50 filas, devolvé 50 objetos. Si hay 100 filas, devolvé los primeros 100. Si solo hay una tarifa, devolvé un array con un único elemento.
+Extrae las tarifas que encuentres en el input. Devolvé un JSON ARRAY con un objeto por cada tarifa/fila.
 
-Cada objeto tiene los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios ni texto adicional.
+LÍMITE: Si el Excel tiene más de 30 tarifas distintas, devolvé las primeras 30 y agregá un campo extra \`"truncated": true\` SOLO en el último objeto del array. Si hay 30 o menos tarifas, NO agregues el campo truncated. El frontend muestra un aviso cuando ve truncated:true para que el usuario suba el resto del Excel.
+
+Si solo hay una tarifa, devolvé un array con un único elemento. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios ni texto adicional.
 
 [
   {
@@ -228,14 +230,15 @@ async function readDocxAsText(file: File): Promise<string> {
   return result.value;
 }
 
-// Strips a leading ```json (or ```) fence and a trailing ``` fence, plus any
-// surrounding whitespace. Tolerant of variants like "```JSON\n…```" with or
-// without a newline after the opening fence.
+// Removes ALL ```...``` fence markers from the text — opener (with optional
+// language hint) and closer alike, regardless of position. Claude sometimes
+// prepends prose like "Aquí está el JSON:" before opening a fence; the prior
+// implementation only stripped fences that hugged the string boundaries and
+// that was leaving stray backticks inside extractJsonRegion's slice.
 function stripCodeFences(s: string): string {
   return s
-    .trim()
-    .replace(/^```(?:json|JSON)?\s*\n?/i, "")
-    .replace(/\s*```\s*$/i, "")
+    .replace(/```(?:json|JSON|js|JS)?\s*\n?/g, "")
+    .replace(/```/g, "")
     .trim();
 }
 
@@ -324,32 +327,112 @@ function aggressiveClean(s: string): string {
   return out;
 }
 
-function parseExtractedJson(
-  raw: string
-): Record<string, unknown> | Record<string, unknown>[] {
+// Walks an array-shaped JSON string from `[`, collecting only complete top-level
+// objects. Stops at the first object that's truncated (mid-object, unmatched
+// braces). This is the most robust path for max_tokens-truncated responses —
+// it never invents content, just keeps what's intact. Returns undefined if no
+// `[` was found or no complete objects could be extracted.
+function recoverJsonArray(s: string): Record<string, unknown>[] | undefined {
+  const start = s.indexOf("[");
+  if (start === -1) return undefined;
+  const out: Record<string, unknown>[] = [];
+  let i = start + 1;
+  while (i < s.length) {
+    while (i < s.length && /[\s,]/.test(s.charAt(i))) i++;
+    if (i >= s.length) break;
+    const c = s.charAt(i);
+    if (c === "]") break;
+    if (c !== "{") break; // unexpected char outside an object — stop collecting
+    // Find the matching closing brace for the object that starts at i.
+    let depth = 0;
+    let inStr = false;
+    let escape = false;
+    let end = -1;
+    for (let j = i; j < s.length; j++) {
+      const ch = s.charAt(j);
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inStr = !inStr;
+        continue;
+      }
+      if (inStr) continue;
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          end = j;
+          break;
+        }
+      }
+    }
+    if (end === -1) break; // truncated mid-object — stop, return what we have
+    try {
+      out.push(JSON.parse(s.slice(i, end + 1)) as Record<string, unknown>);
+    } catch {
+      break; // malformed object — stop collecting
+    }
+    i = end + 1;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+export type ParseResult = {
+  data: Record<string, unknown> | Record<string, unknown>[];
+  // True when the standard JSON.parse failed and we had to recover via
+  // autoCloseJson or recoverJsonArray. The caller surfaces a warning.
+  partial: boolean;
+};
+
+function parseExtractedJson(raw: string): ParseResult {
   const stripped = stripCodeFences(raw);
   const region = extractJsonRegion(stripped);
   try {
-    return JSON.parse(region) as
-      | Record<string, unknown>
-      | Record<string, unknown>[];
+    return {
+      data: JSON.parse(region) as
+        | Record<string, unknown>
+        | Record<string, unknown>[],
+      partial: false,
+    };
   } catch {
-    // First fallback: the response was likely truncated. Try again after
-    // closing dangling brackets/braces.
-    const closed = autoCloseJson(region);
-    return JSON.parse(closed) as
-      | Record<string, unknown>
-      | Record<string, unknown>[];
+    // Fallback 1: close dangling brackets/braces.
+    try {
+      const closed = autoCloseJson(region);
+      return {
+        data: JSON.parse(closed) as
+          | Record<string, unknown>
+          | Record<string, unknown>[],
+        partial: true,
+      };
+    } catch {
+      // Fallback 2: walk the array and collect what's fully intact.
+      const recovered = recoverJsonArray(region);
+      if (recovered) return { data: recovered, partial: true };
+      throw new Error("No se pudo recuperar JSON parseable");
+    }
   }
 }
 
-function parseExtractedJsonAggressive(
-  raw: string
-): Record<string, unknown> | Record<string, unknown>[] {
+function parseExtractedJsonAggressive(raw: string): ParseResult {
   const cleaned = aggressiveClean(raw);
-  return JSON.parse(cleaned) as
-    | Record<string, unknown>
-    | Record<string, unknown>[];
+  try {
+    return {
+      data: JSON.parse(cleaned) as
+        | Record<string, unknown>
+        | Record<string, unknown>[],
+      partial: false,
+    };
+  } catch {
+    const recovered = recoverJsonArray(cleaned);
+    if (recovered) return { data: recovered, partial: true };
+    throw new Error("No se pudo recuperar JSON parseable (modo agresivo)");
+  }
 }
 
 function toRecordArray(
@@ -391,6 +474,7 @@ export default function RateIntake({
     null
   );
   const [previewSelected, setPreviewSelected] = useState<Set<number>>(new Set());
+  const [previewWarning, setPreviewWarning] = useState<string | null>(null);
   // Raw Claude response when JSON parse fails — user can edit and retry
   const [rawResponse, setRawResponse] = useState<string | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -416,6 +500,7 @@ export default function RateIntake({
     setError(null);
     setPreviewRows(null);
     setPreviewSelected(new Set());
+    setPreviewWarning(null);
     setRawResponse(null);
   };
 
@@ -424,13 +509,34 @@ export default function RateIntake({
   // those rolled up into a single form.
   const supportsMany = Boolean(onExtractedMany);
 
-  const consumeParsed = (
-    parsed: Record<string, unknown> | Record<string, unknown>[]
-  ) => {
-    const rows = toRecordArray(parsed);
+  const consumeParsed = (result: ParseResult) => {
+    const rawRows = toRecordArray(result.data);
+    // Claude marks the last row with `truncated: true` when the source had
+    // more than 30 tarifas. Treat that field as metadata: use it to surface
+    // a warning, then strip it from the rows we save.
+    const claudeMarkedTruncated = rawRows.some(
+      (r) => r.truncated === true
+    );
+    const rows = rawRows.map((r) => {
+      if ("truncated" in r) {
+        const { truncated: _t, ...rest } = r;
+        void _t;
+        return rest;
+      }
+      return r;
+    });
+
+    let warning: string | null = null;
+    if (claudeMarkedTruncated) {
+      warning = `Se extrajeron las primeras ${rows.length} tarifas — el Excel tenía más. Para el resto, sube el Excel nuevamente seleccionando otro rango.`;
+    } else if (result.partial) {
+      warning = `Se extrajeron ${rows.length} tarifas, pero la respuesta de Claude llegó truncada. Es posible que falten algunas — subí el Excel nuevamente si esperabas más.`;
+    }
+
     if (supportsMany) {
       setPreviewRows(rows);
       setPreviewSelected(new Set(rows.map((_, i) => i)));
+      setPreviewWarning(warning);
       setRawResponse(null);
       return;
     }
@@ -644,10 +750,12 @@ export default function RateIntake({
         onBack={() => {
           setPreviewRows(null);
           setPreviewSelected(new Set());
+          setPreviewWarning(null);
           setError(null);
         }}
         onCancel={onCancel}
         error={error}
+        warning={previewWarning}
       />
     );
   }
@@ -859,6 +967,7 @@ function MultiResultPreview({
   onBack,
   onCancel,
   error,
+  warning,
 }: {
   rows: Record<string, unknown>[];
   selected: Set<number>;
@@ -868,6 +977,7 @@ function MultiResultPreview({
   onBack: () => void;
   onCancel: () => void;
   error: string | null;
+  warning?: string | null;
 }) {
   return (
     <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
@@ -884,6 +994,12 @@ function MultiResultPreview({
           </Button>
         </div>
       </div>
+
+      {warning && (
+        <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mb-3">
+          ⚠️ {warning}
+        </div>
+      )}
 
       <p className="text-xs text-gray-500 mb-3">
         Los items marcados se guardarán como nuevos EBS. Podés editar cualquier campo antes de confirmar.
@@ -1017,6 +1133,7 @@ function RateMultiPreview({
   onBack,
   onCancel,
   error,
+  warning,
 }: {
   rows: Record<string, unknown>[];
   selected: Set<number>;
@@ -1026,6 +1143,7 @@ function RateMultiPreview({
   onBack: () => void;
   onCancel: () => void;
   error: string | null;
+  warning?: string | null;
 }) {
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const allSelected = rows.length > 0 && rows.every((_, i) => selected.has(i));
@@ -1059,6 +1177,12 @@ function RateMultiPreview({
         Por defecto todas están marcadas. Hacé clic en &quot;Editar&quot; para corregir
         cualquier campo de una fila antes de guardar.
       </p>
+
+      {warning && (
+        <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mb-3">
+          ⚠️ {warning}
+        </div>
+      )}
 
       <div className="max-h-[60vh] overflow-y-auto border border-gray-200 rounded">
         <table className="min-w-full divide-y divide-gray-200">

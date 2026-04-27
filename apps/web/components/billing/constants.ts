@@ -1162,6 +1162,143 @@ export const SEED_ARG_CLIENTS: ArgClient[] = [
   { id: "seed-arg-cooperativa-vitivinicola-arg", tipo: "Mostero", name: "Cooperativa Vitivinícola de Argentina", alternativeNames: "", notes: "" },
 ];
 
+// Common Spanish wine-industry words and articles. Stripped before comparing
+// names so "Bodega Catena Zapata" and "Catena Zapata" collapse to the same
+// canonical form. Adding more words is cheap; over-stripping is the risk
+// (e.g., a real brand "La Rural" could collapse to "rural").
+const ARG_NAME_STOPWORDS = new Set([
+  "bodega",
+  "bodegas",
+  "grupo",
+  "finca",
+  "fincas",
+  "vina",
+  "viña",
+  "vinos",
+  "casa",
+  "establecimiento",
+  "vitivinicola",
+  "vitivinícola",
+  "vinedos",
+  "viñedos",
+  "y",
+  "de",
+  "del",
+  "la",
+  "el",
+  "los",
+  "las",
+  "wines",
+  "cooperativa",
+  "cooperative",
+  "cia",
+  "compania",
+  "compañia",
+  "compañía",
+  "familia",
+  "family",
+  "winemakers",
+]);
+
+function normalizeNameText(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    // U+0300 - U+036F is the Combining Diacritical Marks block. Stripping
+    // it after NFD turns "peñaflor" / "Cony Toro" / etc. into ASCII-ish.
+    .replace(/[̀-ͯ]/g, "");
+}
+
+function tokenizeName(s: string): string[] {
+  return normalizeNameText(s)
+    .split(/[\s\-,.;()]+/)
+    .filter((t) => t && !ARG_NAME_STOPWORDS.has(t));
+}
+
+function canonicalizeName(s: string): string {
+  return tokenizeName(s).join(" ");
+}
+
+// Iterative DP Levenshtein. Acceptable for tens of clients × short names.
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr: number[] = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1;
+      curr.push(
+        Math.min(prev[j]! + 1, curr[j - 1]! + 1, prev[j - 1]! + cost)
+      );
+    }
+    prev = curr;
+  }
+  return prev[b.length]!;
+}
+
+// Similarity in [0, 1] over canonical (stopword-stripped) names. 1 means
+// identical or one is a substring of the other; otherwise normalized
+// Levenshtein distance.
+export function argClientNameSimilarity(a: string, b: string): number {
+  const ca = canonicalizeName(a);
+  const cb = canonicalizeName(b);
+  if (!ca || !cb) return 0;
+  if (ca === cb) return 1;
+  // Substring match after stripping common prefixes catches "Catena Zapata"
+  // ⊂ "Bodega Catena Zapata" and "Peñaflor" ⊂ "Grupo Peñaflor".
+  if (ca.includes(cb) || cb.includes(ca)) return 0.9;
+  const dist = levenshtein(ca, cb);
+  return 1 - dist / Math.max(ca.length, cb.length);
+}
+
+const ARG_NAME_SIMILARITY_THRESHOLD = 0.75;
+
+// Classifies a candidate name against an existing ARG client list:
+//   - exactMatch:   case-insensitive trim equality against the client's name
+//                   OR any of its alternativeNames. Caller should DISCARD.
+//   - similarMatches: clients with similarity >= 0.75 against the canonical
+//                   form of name or any alternative. Caller should ASK the
+//                   user (default action: merge as alternative).
+// When exactMatch is set, similarMatches is empty — exact wins.
+export function findSimilarClient(
+  name: string,
+  clients: ArgClient[]
+): { exactMatch: ArgClient | null; similarMatches: ArgClient[] } {
+  const candidate = name.trim().toLowerCase();
+  if (!candidate) return { exactMatch: null, similarMatches: [] };
+  for (const client of clients) {
+    if (client.name.trim().toLowerCase() === candidate) {
+      return { exactMatch: client, similarMatches: [] };
+    }
+    const alts = client.alternativeNames
+      .split(/[,;]/)
+      .map((a) => a.trim().toLowerCase())
+      .filter(Boolean);
+    if (alts.includes(candidate)) {
+      return { exactMatch: client, similarMatches: [] };
+    }
+  }
+  const similar: ArgClient[] = [];
+  for (const client of clients) {
+    const candidates = [
+      client.name,
+      ...client.alternativeNames
+        .split(/[,;]/)
+        .map((a) => a.trim())
+        .filter(Boolean),
+    ];
+    let maxSim = 0;
+    for (const c of candidates) {
+      const s = argClientNameSimilarity(name, c);
+      if (s > maxSim) maxSim = s;
+    }
+    if (maxSim >= ARG_NAME_SIMILARITY_THRESHOLD) similar.push(client);
+  }
+  return { exactMatch: null, similarMatches: similar };
+}
+
 // True when the BL's shipper text matches any ARG client. Match is bidirectional
 // (the shipper contains the client name OR the client name contains the
 // shipper) and case-insensitive — covers both "Trapiche" coming in shorter

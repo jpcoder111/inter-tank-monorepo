@@ -11,6 +11,7 @@ import {
   ArgClient,
   ArgClientTipo,
   SEED_ARG_CLIENTS,
+  findSimilarClient,
   uid,
 } from "./constants";
 
@@ -79,6 +80,14 @@ export default function ArgClientsTab({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Omit<ArgClient, "id">>(emptyDraft);
   const [showForm, setShowForm] = useState(false);
+  // When findSimilarClient finds near-matches for a new candidate, we hold
+  // the candidate + matches here and render a modal so the user can decide
+  // per-row whether to merge as alternative or create a new client.
+  const [pendingSimilar, setPendingSimilar] = useState<{
+    candidate: Omit<ArgClient, "id">;
+    matches: ArgClient[];
+    selectedParentId: string | null; // null = create new
+  } | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -125,11 +134,60 @@ export default function ArgClientsTab({
       toast.error("El nombre es obligatorio");
       return;
     }
+    // Edits skip the dedup pipeline — the user is intentionally modifying
+    // an existing record. Only new additions get checked.
     if (editingId) {
       update(editingId, draft);
-    } else {
-      add({ ...draft, id: uid("arg") });
+      setShowForm(false);
+      setEditingId(null);
+      return;
     }
+    const { exactMatch, similarMatches } = findSimilarClient(draft.name, items);
+    if (exactMatch) {
+      toast(
+        `"${draft.name.trim()}" ya existe como ${exactMatch.name === draft.name.trim() ? "cliente" : `marca de "${exactMatch.name}"`} — se descartó.`,
+        { icon: "ℹ️", duration: 5000 }
+      );
+      setShowForm(false);
+      return;
+    }
+    if (similarMatches.length > 0) {
+      setPendingSimilar({
+        candidate: draft,
+        matches: similarMatches,
+        selectedParentId: similarMatches[0]!.id,
+      });
+      return;
+    }
+    add({ ...draft, id: uid("arg") });
+    setShowForm(false);
+    setEditingId(null);
+  };
+
+  const confirmPendingSimilar = () => {
+    if (!pendingSimilar) return;
+    const { candidate, selectedParentId, matches } = pendingSimilar;
+    const newName = candidate.name.trim();
+    if (selectedParentId === null) {
+      add({ ...candidate, id: uid("arg") });
+      toast.success(`"${newName}" creado como cliente nuevo`);
+    } else {
+      const parent = matches.find((m) => m.id === selectedParentId);
+      if (!parent) {
+        // Defensive: if the selected match disappeared between render and
+        // confirm, just create a new client.
+        add({ ...candidate, id: uid("arg") });
+        toast.success(`"${newName}" creado como cliente nuevo`);
+      } else {
+        const existing = parent.alternativeNames.trim();
+        const merged = existing ? `${existing}, ${newName}` : newName;
+        update(parent.id, { alternativeNames: merged });
+        toast.success(
+          `"${newName}" agregado como marca alternativa de "${parent.name}"`
+        );
+      }
+    }
+    setPendingSimilar(null);
     setShowForm(false);
     setEditingId(null);
   };
@@ -342,6 +400,89 @@ export default function ArgClientsTab({
           <div className="text-center py-8 text-gray-500">No hay clientes</div>
         )}
       </div>
+
+      {pendingSimilar && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-lg p-5 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <h3 className="font-semibold mb-2">Cliente similar encontrado</h3>
+            <p className="text-sm text-gray-700 mb-4">
+              El nombre <strong>&quot;{pendingSimilar.candidate.name}&quot;</strong> se
+              parece a clientes ya existentes. ¿Cómo querés guardarlo? Por
+              defecto se agrega como marca alternativa.
+            </p>
+            <div className="flex flex-col gap-2">
+              {pendingSimilar.matches.map((m) => {
+                const isChecked = pendingSimilar.selectedParentId === m.id;
+                return (
+                  <label
+                    key={m.id}
+                    className={`flex items-start gap-3 p-3 border rounded cursor-pointer ${
+                      isChecked
+                        ? "border-blue-300 bg-blue-50/40"
+                        : "border-gray-200 hover:bg-gray-50"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="arg-similar-parent"
+                      checked={isChecked}
+                      onChange={() =>
+                        setPendingSimilar({
+                          ...pendingSimilar,
+                          selectedParentId: m.id,
+                        })
+                      }
+                      className="mt-1"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium">
+                        Agregar como marca alternativa de &quot;{m.name}&quot;
+                      </div>
+                      {m.alternativeNames.trim() && (
+                        <div className="text-xs text-gray-500 mt-0.5 truncate">
+                          Marcas actuales: {m.alternativeNames}
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+              <label
+                className={`flex items-start gap-3 p-3 border rounded cursor-pointer ${
+                  pendingSimilar.selectedParentId === null
+                    ? "border-blue-300 bg-blue-50/40"
+                    : "border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="arg-similar-parent"
+                  checked={pendingSimilar.selectedParentId === null}
+                  onChange={() =>
+                    setPendingSimilar({
+                      ...pendingSimilar,
+                      selectedParentId: null,
+                    })
+                  }
+                  className="mt-1"
+                />
+                <div className="text-sm font-medium">
+                  Crear cliente nuevo de todas formas
+                </div>
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <Button
+                variant="outline"
+                onClick={() => setPendingSimilar(null)}
+              >
+                Cancelar
+              </Button>
+              <Button onClick={confirmPendingSimilar}>Confirmar</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

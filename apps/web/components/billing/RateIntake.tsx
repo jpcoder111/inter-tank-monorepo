@@ -27,17 +27,34 @@ Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings fal
 }`;
 
 const EBS_SYSTEM = `Sos un extractor de EBS (Emergency Bunker Surcharge) para fletes marítimos.
-El EBS se expresa SIEMPRE por TEU (20' = 1 TEU, 40' = 2 TEU). Si el input da el valor por container de 40', dividilo por 2 para obtener el valor por TEU.
-Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
 
-{
-  "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, etc.)
-  "traffic": string,       // tráfico o ruta (ej: "Chile - Norte de Europa", "Chile - Grangemouth")
-  "amountPerTEU": number,  // monto en USD por TEU
-  "validFrom": string,     // YYYY-MM-DD
-  "validTo": string,       // YYYY-MM-DD
-  "notes": string          // cualquier observación (unidad original si fue /ctr, exclusiones, etc.)
-}`;
+CONTEXTO IMPORTANTE:
+- El EBS se expresa SIEMPRE por TEU (20' = 1 TEU, 40' = 2 TEU). Si el input da el valor por contenedor de 40', dividilo por 2.
+- El EBS aplica por REGIÓN/TRÁFICO, no por puerto específico. Mapeá nombres de zona a regiones canónicas tipo "Chile - Norte de Europa", "Chile - Mediterráneo", "Chile - Asia", "Chile - Sudamérica", "Chile - Norteamérica", "Chile - Centroamérica", "Chile - África", "Chile - Oceanía".
+- Ejemplos de mapeo: "Europa", "NEUR", "Norte EU" → "Chile - Norte de Europa"; "USA", "NA" → "Chile - Norteamérica"; "Asia", "FE", "Far East" → "Chile - Asia".
+- Las fechas suelen estar en formato dd/mm o dd-mm. Si no hay año explícito, asumí el año actual. "onwards" o similar significa que validTo queda vacío ("").
+
+FORMATO TÍPICO (Excel agrupado por naviera):
+El input puede venir con BLOQUES separados por líneas en blanco. Cada bloque suele contener:
+1. Una línea con el nombre de la NAVIERA y posiblemente un periodo de vigencia (ej: "OOCL | 15/4 al 1/5").
+2. Una o más líneas con REGIÓN + monto por TEU (ej: "Europa | US$ 266 teu").
+
+Por cada combinación naviera+región generá UN ITEM. La naviera y la vigencia se heredan del bloque correspondiente.
+
+Devolvé SOLO un ARRAY JSON con uno o más objetos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
+
+[
+  {
+    "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, etc.)
+    "traffic": string,       // región/tráfico canónico (ej: "Chile - Norte de Europa")
+    "amountPerTEU": number,  // monto en USD por TEU
+    "validFrom": string,     // YYYY-MM-DD
+    "validTo": string,       // YYYY-MM-DD ("" si dice "onwards" o no tiene fin)
+    "notes": string          // observación (unidad original si fue /ctr, exclusiones, etc.)
+  }
+]
+
+Si solo hay un EBS en el input, devolvé un array con un único elemento. NUNCA devuelvas un objeto suelto.`;
 
 const LOCAL_STD_SYSTEM = `Sos un extractor de TARIFAS ESTÁNDAR de gastos locales portuarios (OTHC, sello, AMS, BL Fee, Gate Out).
 Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
@@ -92,13 +109,26 @@ function readAsBase64(file: File): Promise<{ base64: string; mediaType: string }
   });
 }
 
+// Strips trailing empty cells, drops all-empty (comma-only) rows by emptying them,
+// and collapses runs of blank lines into a single blank — preserving block separators
+// for grouped formats while removing CSV noise.
+function cleanCsvText(raw: string): string {
+  const lines = raw.split(/\r?\n/).map((line) => {
+    const trimmed = line.replace(/,+\s*$/, "").trimEnd();
+    return /^[,\s]*$/.test(trimmed) ? "" : trimmed;
+  });
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 async function readExcelAsText(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array" });
   return wb.SheetNames.map((name) => {
     const ws = wb.Sheets[name];
     if (!ws) return "";
-    return `Hoja: ${name}\n${XLSX.utils.sheet_to_csv(ws)}`;
+    const csv = XLSX.utils.sheet_to_csv(ws);
+    const cleaned = cleanCsvText(csv);
+    return cleaned ? `Hoja: ${name}\n${cleaned}` : "";
   })
     .filter(Boolean)
     .join("\n\n");
@@ -119,28 +149,56 @@ async function readDocxAsText(file: File): Promise<string> {
   return result.value;
 }
 
-function parseExtractedJson(raw: string): Record<string, unknown> {
+function parseExtractedJson(
+  raw: string
+): Record<string, unknown> | Record<string, unknown>[] {
   const cleaned = raw
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
+  const firstBracket = cleaned.indexOf("[");
+  const lastBracket = cleaned.lastIndexOf("]");
   const firstBrace = cleaned.indexOf("{");
   const lastBrace = cleaned.lastIndexOf("}");
-  const candidate =
-    firstBrace !== -1 && lastBrace !== -1
+  // Prefer array form when an array fully contains the brace span — covers cases
+  // where Claude wraps multiple objects in []. Fall back to object form otherwise.
+  const arrayLooksOuter =
+    firstBracket !== -1 &&
+    lastBracket !== -1 &&
+    (firstBrace === -1 || firstBracket < firstBrace) &&
+    (lastBrace === -1 || lastBracket > lastBrace);
+  const candidate = arrayLooksOuter
+    ? cleaned.slice(firstBracket, lastBracket + 1)
+    : firstBrace !== -1 && lastBrace !== -1
       ? cleaned.slice(firstBrace, lastBrace + 1)
       : cleaned;
-  return JSON.parse(candidate) as Record<string, unknown>;
+  return JSON.parse(candidate) as
+    | Record<string, unknown>
+    | Record<string, unknown>[];
+}
+
+function toRecordArray(
+  parsed: Record<string, unknown> | Record<string, unknown>[]
+): Record<string, unknown>[] {
+  if (Array.isArray(parsed)) return parsed;
+  // tolerate { items: [...] } / { results: [...] } envelopes
+  for (const key of ["items", "results", "ebs", "rates"]) {
+    const v = (parsed as Record<string, unknown>)[key];
+    if (Array.isArray(v)) return v as Record<string, unknown>[];
+  }
+  return [parsed];
 }
 
 export default function RateIntake({
   type,
   onExtracted,
+  onExtractedMany,
   onCancel,
 }: {
   type: IntakeType;
   onExtracted: (data: Record<string, unknown>) => void;
+  onExtractedMany?: (rows: Record<string, unknown>[]) => void;
   onCancel: () => void;
 }) {
   const [mode, setMode] = useState<Mode>("choose");
@@ -154,6 +212,13 @@ export default function RateIntake({
   const [sizeWarning, setSizeWarning] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Multi-result preview (currently used for EBS where one upload yields N rows)
+  const [previewRows, setPreviewRows] = useState<Record<string, unknown>[] | null>(
+    null
+  );
+  const [previewSelected, setPreviewSelected] = useState<Set<number>>(new Set());
+  // Raw Claude response when JSON parse fails — user can edit and retry
+  const [rawResponse, setRawResponse] = useState<string | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const excelInput = useRef<HTMLInputElement>(null);
 
@@ -175,6 +240,28 @@ export default function RateIntake({
     setExcelText("");
     setSizeWarning(null);
     setError(null);
+    setPreviewRows(null);
+    setPreviewSelected(new Set());
+    setRawResponse(null);
+  };
+
+  // Multi-row mode is enabled when the parent passed onExtractedMany. EBS uploads
+  // can describe several carrier+region rows in one document, so we never want
+  // those rolled up into a single form.
+  const supportsMany = Boolean(onExtractedMany);
+
+  const consumeParsed = (
+    parsed: Record<string, unknown> | Record<string, unknown>[]
+  ) => {
+    const rows = toRecordArray(parsed);
+    if (supportsMany) {
+      setPreviewRows(rows);
+      setPreviewSelected(new Set(rows.map((_, i) => i)));
+      setRawResponse(null);
+      return;
+    }
+    // Single-row consumers: hand them the first object.
+    onExtracted((rows[0] ?? {}) as Record<string, unknown>);
   };
 
   const handleImage = async (file: File) => {
@@ -280,14 +367,102 @@ export default function RateIntake({
       }
 
       const { text: responseText } = (await res.json()) as { text: string };
-      const parsed = parseExtractedJson(responseText);
-      onExtracted(parsed);
+      try {
+        const parsed = parseExtractedJson(responseText);
+        consumeParsed(parsed);
+      } catch (parseErr) {
+        // Surface the raw response so the user can read what Claude returned and
+        // either fix it inline (and retry parse) or fall back to the manual form.
+        setRawResponse(responseText);
+        setError(
+          parseErr instanceof Error
+            ? `No pude parsear la respuesta como JSON: ${parseErr.message}`
+            : "No pude parsear la respuesta como JSON"
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al extraer datos");
     } finally {
       setLoading(false);
     }
   };
+
+  const retryParse = (text: string) => {
+    try {
+      const parsed = parseExtractedJson(text);
+      setRawResponse(null);
+      setError(null);
+      consumeParsed(parsed);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Sigue sin parsear: ${err.message}`
+          : "Sigue sin parsear"
+      );
+    }
+  };
+
+  const togglePreview = (idx: number) => {
+    setPreviewSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
+
+  const updatePreviewField = (idx: number, field: string, value: unknown) => {
+    setPreviewRows((prev) => {
+      if (!prev) return prev;
+      const next = prev.slice();
+      next[idx] = { ...next[idx], [field]: value };
+      return next;
+    });
+  };
+
+  const confirmPreview = () => {
+    if (!previewRows || !onExtractedMany) return;
+    const selected = previewRows.filter((_, i) => previewSelected.has(i));
+    if (selected.length === 0) {
+      setError("Seleccioná al menos una fila para guardar.");
+      return;
+    }
+    onExtractedMany(selected);
+  };
+
+  if (previewRows && supportsMany) {
+    return (
+      <MultiResultPreview
+        rows={previewRows}
+        selected={previewSelected}
+        onToggle={togglePreview}
+        onUpdateField={updatePreviewField}
+        onConfirm={confirmPreview}
+        onBack={() => {
+          setPreviewRows(null);
+          setPreviewSelected(new Set());
+          setError(null);
+        }}
+        onCancel={onCancel}
+        error={error}
+      />
+    );
+  }
+
+  if (rawResponse !== null) {
+    return (
+      <RawResponseEditor
+        initial={rawResponse}
+        onRetry={retryParse}
+        onBack={() => {
+          setRawResponse(null);
+          setError(null);
+        }}
+        onCancel={onCancel}
+        error={error}
+      />
+    );
+  }
 
   if (mode === "choose") {
     return (
@@ -453,5 +628,202 @@ function IntakeCard({
       <span className="font-medium">{title}</span>
       <span className="text-xs text-gray-500 text-center">{desc}</span>
     </button>
+  );
+}
+
+function strField(row: Record<string, unknown>, key: string): string {
+  const v = row[key];
+  return v === null || v === undefined ? "" : String(v);
+}
+
+function numField(row: Record<string, unknown>, key: string): number {
+  const v = row[key];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim()) {
+    const n = Number(v.replace(/[^0-9.-]/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function MultiResultPreview({
+  rows,
+  selected,
+  onToggle,
+  onUpdateField,
+  onConfirm,
+  onBack,
+  onCancel,
+  error,
+}: {
+  rows: Record<string, unknown>[];
+  selected: Set<number>;
+  onToggle: (idx: number) => void;
+  onUpdateField: (idx: number, field: string, value: unknown) => void;
+  onConfirm: () => void;
+  onBack: () => void;
+  onCancel: () => void;
+  error: string | null;
+}) {
+  return (
+    <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="font-semibold">
+          Resultados extraídos ({rows.length}) — seleccioná y editá lo que quieras guardar
+        </h3>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onBack}>
+            Volver
+          </Button>
+          <Button variant="outline" size="sm" onClick={onCancel}>
+            Cancelar
+          </Button>
+        </div>
+      </div>
+
+      <p className="text-xs text-gray-500 mb-3">
+        Los items marcados se guardarán como nuevos EBS. Podés editar cualquier campo antes de confirmar.
+      </p>
+
+      <div className="flex flex-col gap-2 max-h-[60vh] overflow-y-auto pr-1">
+        {rows.map((row, idx) => {
+          const isOn = selected.has(idx);
+          return (
+            <div
+              key={idx}
+              className={`border rounded-md p-3 ${
+                isOn ? "border-blue-300 bg-blue-50/40" : "border-gray-200 bg-gray-50"
+              }`}
+            >
+              <label className="flex items-start gap-2 cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={isOn}
+                  onChange={() => onToggle(idx)}
+                  className="mt-1"
+                />
+                <span className="text-sm font-medium">
+                  {strField(row, "carrier") || "(sin naviera)"} —{" "}
+                  {strField(row, "traffic") || "(sin tráfico)"} — $
+                  {numField(row, "amountPerTEU")}/TEU
+                </span>
+              </label>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                <label className="flex flex-col gap-1">
+                  Naviera
+                  <input
+                    type="text"
+                    value={strField(row, "carrier")}
+                    onChange={(e) => onUpdateField(idx, "carrier", e.target.value)}
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  Tráfico
+                  <input
+                    type="text"
+                    value={strField(row, "traffic")}
+                    onChange={(e) => onUpdateField(idx, "traffic", e.target.value)}
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  USD por TEU
+                  <input
+                    type="number"
+                    value={numField(row, "amountPerTEU")}
+                    onChange={(e) =>
+                      onUpdateField(idx, "amountPerTEU", Number(e.target.value))
+                    }
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  Vigente desde
+                  <input
+                    type="date"
+                    value={strField(row, "validFrom")}
+                    onChange={(e) => onUpdateField(idx, "validFrom", e.target.value)}
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  Vigente hasta
+                  <input
+                    type="date"
+                    value={strField(row, "validTo")}
+                    onChange={(e) => onUpdateField(idx, "validTo", e.target.value)}
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  Notas
+                  <input
+                    type="text"
+                    value={strField(row, "notes")}
+                    onChange={(e) => onUpdateField(idx, "notes", e.target.value)}
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  />
+                </label>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
+
+      <div className="flex justify-end gap-2 mt-4">
+        <Button onClick={onConfirm} disabled={selected.size === 0}>
+          Guardar {selected.size} de {rows.length}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function RawResponseEditor({
+  initial,
+  onRetry,
+  onBack,
+  onCancel,
+  error,
+}: {
+  initial: string;
+  onRetry: (text: string) => void;
+  onBack: () => void;
+  onCancel: () => void;
+  error: string | null;
+}) {
+  const [text, setText] = useState(initial);
+  return (
+    <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="font-semibold">Respuesta cruda de Claude</h3>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onBack}>
+            Volver
+          </Button>
+          <Button variant="outline" size="sm" onClick={onCancel}>
+            Cancelar y completar manualmente
+          </Button>
+        </div>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        El JSON devuelto no se pudo parsear. Revisá el texto, corregí lo que falte (por
+        ejemplo cerrá un corchete o quitá texto extra) y reintentá. Si preferís, cerrá este
+        diálogo y completá el formulario a mano.
+      </p>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={16}
+        className="w-full border border-gray-200 rounded-md p-2 text-xs font-mono"
+      />
+      {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
+      <div className="flex justify-end gap-2 mt-4">
+        <Button onClick={() => onRetry(text)}>Reintentar parse</Button>
+      </div>
+    </div>
   );
 }

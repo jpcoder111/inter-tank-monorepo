@@ -66,7 +66,7 @@ export class AiService {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 1024,
+        max_tokens: 4096,
         system,
         messages: [{ role: 'user', content: userContent }],
       }),

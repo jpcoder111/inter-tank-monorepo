@@ -142,6 +142,23 @@ export default function EbsTab() {
     setShowForm(true);
   };
 
+  const handleExtractedMany = (rows: Record<string, unknown>[]) => {
+    for (const row of rows) {
+      add({
+        id: uid("ebs"),
+        carrier: toStr(row.carrier),
+        traffic: toStr(row.traffic),
+        amountPerTEU: toNumber(row.amountPerTEU),
+        validFrom: toStr(row.validFrom),
+        validTo: toStr(row.validTo),
+        notes: toStr(row.notes),
+      });
+    }
+    setShowIntake(false);
+    setShowForm(false);
+    setEditingId(null);
+  };
+
   const skipIntake = () => {
     setDraft(emptyDraft);
     setShowIntake(false);
@@ -200,6 +217,7 @@ export default function EbsTab() {
           <RateIntake
             type="ebs"
             onExtracted={handleExtracted}
+            onExtractedMany={handleExtractedMany}
             onCancel={cancelAll}
           />
           <button

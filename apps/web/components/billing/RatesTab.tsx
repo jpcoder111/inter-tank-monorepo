@@ -319,6 +319,10 @@ export default function RatesTab() {
   };
 
   const handleExtractedMany = (rows: Record<string, unknown>[]) => {
+    console.log(
+      "[debug-save] handleExtractedMany ENTRY, rows.length =",
+      rows.length
+    );
     // Pre-generate IDs OUTSIDE the setState updater so React StrictMode's
     // double-invocation can't produce different IDs on the two runs (which
     // could mask itself as "duplicates collapsed"). The index suffix also

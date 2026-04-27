@@ -1323,8 +1323,25 @@ export default function RateIntake({
   };
 
   const confirmPreview = () => {
-    if (!previewRows || !onExtractedMany) return;
+    console.log(
+      "[debug-save] confirmPreview entry, previewRows =",
+      previewRows?.length,
+      "previewSelected.size =",
+      previewSelected.size,
+      "onExtractedMany =",
+      typeof onExtractedMany
+    );
+    if (!previewRows || !onExtractedMany) {
+      console.warn(
+        "[debug-save] confirmPreview EARLY RETURN: previewRows or onExtractedMany missing"
+      );
+      return;
+    }
     const selected = previewRows.filter((_, i) => previewSelected.has(i));
+    console.log(
+      "[debug-save] confirmPreview filtered selected =",
+      selected.length
+    );
     if (selected.length === 0) {
       setError("Seleccioná al menos una fila para guardar.");
       return;
@@ -2202,7 +2219,18 @@ function RateMultiPreview({
       {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
 
       <div className="flex justify-end gap-2 mt-4">
-        <Button onClick={onConfirm} disabled={selected.size === 0}>
+        <Button
+          onClick={() => {
+            console.log(
+              "[debug-save] RateMultiPreview button click, selected.size =",
+              selected.size,
+              "rows.length =",
+              rows.length
+            );
+            onConfirm();
+          }}
+          disabled={selected.size === 0}
+        >
           Guardar seleccionadas ({selected.size} de {rows.length})
         </Button>
       </div>

@@ -31,7 +31,9 @@ import {
   SEED_LOCAL_STANDARDS,
   SEED_RATES,
   carrierColor,
+  carriersMatch,
   computeLocalCharges,
+  effective40ReeferRate,
   formatDateCl,
   invoiceHistoryKey,
   uid,
@@ -133,12 +135,23 @@ function findRate(
   );
 }
 
+// Picks the EBS row with the most recent validFrom for the given carrier —
+// matching the "vigente = newest validFrom per slot" rule used in EbsTab.
+// Falls back to undefined when no carrier matches.
 function findEbs(ebs: Ebs[], carrier: string): Ebs | undefined {
-  return ebs.find((e) => e.carrier.toLowerCase() === carrier.toLowerCase());
+  const matches = ebs.filter((e) => carriersMatch(e.carrier, carrier));
+  if (matches.length === 0) return undefined;
+  return matches
+    .slice()
+    .sort((a, b) => b.validFrom.localeCompare(a.validFrom))[0];
 }
 
-function teuMultiplier(tipo: string): number {
-  return tipo.startsWith("40") ? 2 : 1;
+function isReefer(tipo: string): boolean {
+  return tipo.toUpperCase().includes("RF");
+}
+
+function isFortyFoot(tipo: string): boolean {
+  return tipo.startsWith("40");
 }
 
 function processRows(
@@ -201,7 +214,15 @@ function processRows(
     }
 
     if (ebsRow) {
-      ebsAmount = ebsRow.amountPerTEU * teuMultiplier(tipo) * (ctrs || 0);
+      // Per-container EBS: 20'/Flexi = 1× per-TEU, 40' Dry = 2× per-TEU,
+      // 40' Reefer = effective40ReeferRate (custom override or 2× per-TEU).
+      const fortyReefer = isFortyFoot(tipo) && isReefer(tipo);
+      const perCtr = fortyReefer
+        ? effective40ReeferRate(ebsRow)
+        : isFortyFoot(tipo)
+          ? ebsRow.amountPerTEU * 2
+          : ebsRow.amountPerTEU;
+      ebsAmount = perCtr * (ctrs || 0);
     } else {
       pending.add("ebs");
     }
@@ -341,13 +362,9 @@ function loadInvoicedBls(): InvoicedBLsRegistry {
 }
 
 function formatDuplicateDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("es-CL", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
+  // formatDateCl extracts and reformats the yyyy-mm-dd prefix of an ISO
+  // timestamp so we get dd/mm/yyyy regardless of the runtime locale.
+  return formatDateCl(iso);
 }
 
 export default function InvoicingTab() {

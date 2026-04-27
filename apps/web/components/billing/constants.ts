@@ -147,6 +147,10 @@ export type Ebs = {
   carrier: string;
   traffic: string;
   amountPerTEU: number;
+  // Custom 40' Reefer rate. 0 means "same as 40' Dry" (= amountPerTEU * 2).
+  // Optional in the type because legacy localStorage records may lack the
+  // field; readers should treat undefined and 0 the same way.
+  amountPer40Reefer?: number;
   validFrom: string;
   validTo: string;
   notes: string;
@@ -326,6 +330,7 @@ export const SEED_EBS: Ebs[] = [
     carrier: "OOCL",
     traffic: "Chile - Norte de Europa",
     amountPerTEU: 126,
+    amountPer40Reefer: 0,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "Cubre Rotterdam, Hamburg, Antwerp, London, Copenhagen, Klaipeda, etc.",
@@ -335,6 +340,7 @@ export const SEED_EBS: Ebs[] = [
     carrier: "HAPAG",
     traffic: "Chile - Norte de Europa",
     amountPerTEU: 160,
+    amountPer40Reefer: 0,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "Cubre Grangemouth, Rotterdam, Hamburg, etc.",
@@ -344,11 +350,75 @@ export const SEED_EBS: Ebs[] = [
     carrier: "CMA-CGM",
     traffic: "Chile - Norte de Europa",
     amountPerTEU: 160,
+    amountPer40Reefer: 0,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "Incluido en all-in HCL",
   },
 ];
+
+// ===== EBS row helpers =====
+
+// Effective 40' Reefer rate per TEU. amountPer40Reefer overrides when > 0;
+// otherwise the row uses 2× the per-TEU rate (i.e., regular 40' Dry).
+export function effective40ReeferRate(ebs: Ebs): number {
+  const custom = ebs.amountPer40Reefer;
+  if (typeof custom === "number" && custom > 0) return custom;
+  return ebs.amountPerTEU * 2;
+}
+
+export type EbsRowStatus = "vigente" | "reemplazado";
+
+export type EbsRowMeta = {
+  status: EbsRowStatus;
+  hasOverlap: boolean;
+};
+
+function ebsSlotKey(e: Pick<Ebs, "carrier" | "traffic">): string {
+  return `${e.carrier.trim().toLowerCase().replace(/[\s-]+/g, "")}|${e.traffic.trim().toLowerCase()}`;
+}
+
+// True if two date ranges overlap (treating empty validTo as +infinity and
+// empty validFrom as -infinity). validFrom/validTo are ISO yyyy-mm-dd strings,
+// so lexicographic comparison matches chronological order.
+function rangesOverlap(a: Ebs, b: Ebs): boolean {
+  const aStart = a.validFrom || "";
+  const aEnd = a.validTo || "9999-12-31";
+  const bStart = b.validFrom || "";
+  const bEnd = b.validTo || "9999-12-31";
+  return aStart <= bEnd && bStart <= aEnd;
+}
+
+// For each EBS row, computes whether it is the currently-vigente record for
+// its (carrier, traffic) slot — defined as the row with the most recent
+// validFrom — and whether it overlaps in time with any other row in the
+// same slot. Returns a Map keyed by row id.
+export function computeEbsRowMeta(items: Ebs[]): Map<string, EbsRowMeta> {
+  const groups = new Map<string, Ebs[]>();
+  for (const e of items) {
+    const key = ebsSlotKey(e);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(e);
+  }
+  const out = new Map<string, EbsRowMeta>();
+  for (const group of groups.values()) {
+    const sorted = group
+      .slice()
+      .sort((a, b) => b.validFrom.localeCompare(a.validFrom));
+    sorted.forEach((e, idx) => {
+      out.set(e.id, { status: idx === 0 ? "vigente" : "reemplazado", hasOverlap: false });
+    });
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        if (rangesOverlap(group[i]!, group[j]!)) {
+          out.get(group[i]!.id)!.hasOverlap = true;
+          out.get(group[j]!.id)!.hasOverlap = true;
+        }
+      }
+    }
+  }
+  return out;
+}
 
 export type ValidityStatus = "expired" | "soon" | "active";
 

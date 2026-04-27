@@ -10,12 +10,14 @@ import {
   EBS_STORAGE_KEY,
   EBS_TRAFFIC_SUGGESTIONS,
   Ebs,
+  EbsRowMeta,
+  EbsRowStatus,
   SEED_EBS,
-  ValidityStatus,
   carrierColor,
   carriersMatch,
+  computeEbsRowMeta,
+  effective40ReeferRate,
   formatDateCl,
-  getValidityStatus,
   uid,
   uniqueSuggestions,
 } from "./constants";
@@ -24,34 +26,28 @@ const emptyDraft: Omit<Ebs, "id"> = {
   carrier: "",
   traffic: "",
   amountPerTEU: 0,
+  amountPer40Reefer: 0,
   validFrom: "",
   validTo: "",
   notes: "",
 };
 
-const STATUS_ORDER: Record<ValidityStatus, number> = {
-  active: 0,
-  soon: 1,
-  expired: 2,
+const STATUS_ORDER: Record<EbsRowStatus, number> = {
+  vigente: 0,
+  reemplazado: 1,
 };
 
-function VigenciaBadge({ validTo }: { validTo: string }) {
-  const status = getValidityStatus(validTo);
-  const styles: Record<ValidityStatus, string> = {
-    active: "bg-green-100 text-green-800 border-green-300",
-    soon: "bg-yellow-100 text-yellow-800 border-yellow-300",
-    expired: "bg-red-100 text-red-800 border-red-300",
-  };
-  const labels: Record<ValidityStatus, string> = {
-    active: "Vigente",
-    soon: "Vence <30d",
-    expired: "Expirada",
-  };
+function VigenciaBadge({ meta }: { meta: EbsRowMeta | undefined }) {
+  if (!meta || meta.status === "vigente") {
+    return (
+      <span className="inline-block px-3 py-1 rounded-full text-sm font-semibold border bg-green-100 text-green-800 border-green-300">
+        Vigente
+      </span>
+    );
+  }
   return (
-    <span
-      className={`inline-block px-3 py-1 rounded-full text-sm font-semibold border ${styles[status]}`}
-    >
-      {labels[status]}
+    <span className="inline-block px-3 py-1 rounded-full text-sm font-semibold border bg-gray-100 text-gray-700 border-gray-300">
+      Reemplazado
     </span>
   );
 }
@@ -107,6 +103,11 @@ export default function EbsTab() {
     [items]
   );
 
+  // Vigente/reemplazado + overlap is derived from the *full* item set (not the
+  // filtered view) so a search that hides the newer record doesn't make an
+  // older one look vigente.
+  const rowMeta = useMemo(() => computeEbsRowMeta(items), [items]);
+
   const sortedFiltered = useMemo(() => {
     const q = search.toLowerCase().trim();
     const cf = carrierFilter.toLowerCase().trim();
@@ -120,16 +121,18 @@ export default function EbsTab() {
       );
     });
     return filtered.slice().sort((a, b) => {
-      const sa = STATUS_ORDER[getValidityStatus(a.validTo)];
-      const sb = STATUS_ORDER[getValidityStatus(b.validTo)];
+      // Carrier alphabetical, then traffic, then vigente before reemplazado,
+      // then most recent validFrom first within ties.
+      const carrierCmp = a.carrier.localeCompare(b.carrier);
+      if (carrierCmp !== 0) return carrierCmp;
+      const trafficCmp = a.traffic.localeCompare(b.traffic);
+      if (trafficCmp !== 0) return trafficCmp;
+      const sa = STATUS_ORDER[rowMeta.get(a.id)?.status ?? "vigente"];
+      const sb = STATUS_ORDER[rowMeta.get(b.id)?.status ?? "vigente"];
       if (sa !== sb) return sa - sb;
-      // Within same status: sooner validTo first for active/soon, later first for expired
-      if (a.validTo && b.validTo) {
-        return a.validTo.localeCompare(b.validTo);
-      }
-      return 0;
+      return b.validFrom.localeCompare(a.validFrom);
     });
-  }, [items, search, carrierFilter]);
+  }, [items, search, carrierFilter, rowMeta]);
 
   const openNew = () => {
     setDraft(emptyDraft);
@@ -141,7 +144,7 @@ export default function EbsTab() {
   const openEdit = (ebs: Ebs) => {
     const { id: _id, ...rest } = ebs;
     void _id;
-    setDraft(rest);
+    setDraft({ ...rest, amountPer40Reefer: rest.amountPer40Reefer ?? 0 });
     setEditingId(ebs.id);
     setShowIntake(false);
     setShowForm(true);
@@ -152,6 +155,7 @@ export default function EbsTab() {
       carrier: toStr(data.carrier),
       traffic: toStr(data.traffic),
       amountPerTEU: toNumber(data.amountPerTEU),
+      amountPer40Reefer: toNumber(data.amountPer40Reefer),
       validFrom: toStr(data.validFrom),
       validTo: toStr(data.validTo),
       notes: toStr(data.notes),
@@ -175,6 +179,7 @@ export default function EbsTab() {
           carrier: toStr(row.carrier),
           traffic: toStr(row.traffic),
           amountPerTEU: toNumber(row.amountPerTEU),
+          amountPer40Reefer: toNumber(row.amountPer40Reefer),
           validFrom: toStr(row.validFrom),
           validTo: toStr(row.validTo),
           notes: toStr(row.notes),
@@ -369,6 +374,44 @@ export default function EbsTab() {
               />
             </label>
             <label className="flex flex-col gap-1 text-sm">
+              40&apos; Reefer (USD)
+              <input
+                type="number"
+                value={
+                  (draft.amountPer40Reefer ?? 0) > 0
+                    ? draft.amountPer40Reefer
+                    : draft.amountPerTEU * 2
+                }
+                disabled={(draft.amountPer40Reefer ?? 0) === 0}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    amountPer40Reefer: Number(e.target.value),
+                  })
+                }
+                className={`border rounded-md p-2 h-10 ${
+                  (draft.amountPer40Reefer ?? 0) === 0
+                    ? "bg-gray-50 text-gray-500 border-gray-200"
+                    : "border-gray-200"
+                }`}
+              />
+              <label className="flex items-center gap-1 text-xs text-gray-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={(draft.amountPer40Reefer ?? 0) === 0}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      amountPer40Reefer: e.target.checked
+                        ? 0
+                        : draft.amountPerTEU * 2,
+                    })
+                  }
+                />
+                Mismo valor que 40&apos; Dry
+              </label>
+            </label>
+            <label className="flex flex-col gap-1 text-sm">
               Vigente desde
               <input
                 type="date"
@@ -415,6 +458,7 @@ export default function EbsTab() {
                 "USD/TEU",
                 "20' equiv.",
                 "40' equiv.",
+                "40' Reefer",
                 "Válido desde",
                 "Válido hasta",
                 "Vigencia",
@@ -431,14 +475,29 @@ export default function EbsTab() {
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {sortedFiltered.map((r) => (
+            {sortedFiltered.map((r) => {
+              const meta = rowMeta.get(r.id);
+              const reefer40 = effective40ReeferRate(r);
+              const reeferIsCustom =
+                typeof r.amountPer40Reefer === "number" && r.amountPer40Reefer > 0;
+              return (
               <tr
                 key={r.id}
                 className="text-sm"
                 style={{ backgroundColor: carrierColor(r.carrier) }}
               >
                 <td className="px-4 py-3 font-medium whitespace-nowrap">
-                  {r.carrier}
+                  <div className="flex items-center gap-2">
+                    {meta?.hasOverlap && (
+                      <span
+                        title="Esta vigencia se solapa con otra del mismo tráfico — revisar"
+                        className="text-yellow-700"
+                      >
+                        ⚠️
+                      </span>
+                    )}
+                    {r.carrier}
+                  </div>
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">{r.traffic}</td>
                 <td className="px-4 py-3 whitespace-nowrap font-medium">
@@ -448,6 +507,19 @@ export default function EbsTab() {
                 <td className="px-4 py-3 whitespace-nowrap">
                   ${r.amountPerTEU * 2}
                 </td>
+                <td
+                  className="px-4 py-3 whitespace-nowrap"
+                  title={
+                    reeferIsCustom
+                      ? "Valor custom para 40' Reefer"
+                      : "Igual al 40' Dry (sin tarifa custom)"
+                  }
+                >
+                  ${reefer40}
+                  {reeferIsCustom && (
+                    <span className="ml-1 text-xs text-blue-700">●</span>
+                  )}
+                </td>
                 <td className="px-4 py-3 whitespace-nowrap text-gray-600">
                   {formatDateCl(r.validFrom)}
                 </td>
@@ -455,7 +527,7 @@ export default function EbsTab() {
                   {formatDateCl(r.validTo)}
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">
-                  <VigenciaBadge validTo={r.validTo} />
+                  <VigenciaBadge meta={meta} />
                 </td>
                 <td className="px-4 py-3 max-w-xs truncate text-gray-600">
                   {r.notes}
@@ -477,7 +549,8 @@ export default function EbsTab() {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         {sortedFiltered.length === 0 && (

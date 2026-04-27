@@ -45,12 +45,13 @@ Devolvé SOLO un ARRAY JSON con uno o más objetos. Usá "" para strings faltant
 
 [
   {
-    "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, etc.)
-    "traffic": string,       // región/tráfico canónico (ej: "Chile - Norte de Europa")
-    "amountPerTEU": number,  // monto en USD por TEU
-    "validFrom": string,     // YYYY-MM-DD
-    "validTo": string,       // YYYY-MM-DD ("" si dice "onwards" o no tiene fin)
-    "notes": string          // observación (unidad original si fue /ctr, exclusiones, etc.)
+    "carrier": string,            // naviera (OOCL, HAPAG, CMA-CGM, etc.)
+    "traffic": string,            // región/tráfico canónico (ej: "Chile - Norte de Europa")
+    "amountPerTEU": number,       // monto en USD por TEU (= 40' Dry / 2)
+    "amountPer40Reefer": number,  // monto USD por contenedor 40' Reefer. 0 si NO hay tarifa específica de reefer (se usa 2× amountPerTEU). Solo poné un valor distinto a 0 cuando el input declare explícitamente un valor distinto para reefer 40'.
+    "validFrom": string,          // YYYY-MM-DD
+    "validTo": string,            // YYYY-MM-DD ("" si dice "onwards" o no tiene fin)
+    "notes": string               // observación (unidad original si fue /ctr, exclusiones, etc.)
   }
 ]
 
@@ -734,6 +735,17 @@ function MultiResultPreview({
                     value={numField(row, "amountPerTEU")}
                     onChange={(e) =>
                       onUpdateField(idx, "amountPerTEU", Number(e.target.value))
+                    }
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  40&apos; Reefer (0 = igual 40&apos; Dry)
+                  <input
+                    type="number"
+                    value={numField(row, "amountPer40Reefer")}
+                    onChange={(e) =>
+                      onUpdateField(idx, "amountPer40Reefer", Number(e.target.value))
                     }
                     className="border border-gray-200 rounded p-1.5 h-8 bg-white"
                   />

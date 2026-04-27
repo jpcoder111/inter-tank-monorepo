@@ -9,6 +9,8 @@ import { useLocalStore } from "./useLocalStore";
 import InvoicingHistory from "./InvoicingHistory";
 import {
   AGENT_SUGGESTIONS,
+  ARG_CLIENTS_STORAGE_KEY,
+  ArgClient,
   CARRIER_SUGGESTIONS,
   CONTAINER_TYPE_SUGGESTIONS,
   EBS_STORAGE_KEY,
@@ -25,6 +27,7 @@ import {
   LocalStandardRate,
   RATES_STORAGE_KEY,
   Rate,
+  SEED_ARG_CLIENTS,
   SEED_EBS,
   SEED_LOCAL_EXCEPTIONS,
   SEED_LOCAL_STANDARDS,
@@ -35,6 +38,8 @@ import {
   findEbsForBilling,
   formatDateCl,
   invoiceHistoryKey,
+  isArgShipper,
+  normalizeRate,
   uid,
 } from "./constants";
 
@@ -56,6 +61,9 @@ type ProcessedRow = {
   ebs: number | string;
   locals: number | string;
   localBreakdown: LocalChargeBreakdown | null;
+  thermal: number;
+  haulage: number;
+  isArgClient: boolean;
   total: number | string;
   notes: string;
   pending: Set<string>;
@@ -147,7 +155,8 @@ function processRows(
   rates: Rate[],
   ebs: Ebs[],
   standards: LocalStandardRate[],
-  exceptions: LocalException[]
+  exceptions: LocalException[],
+  argClients: ArgClient[]
 ): ProcessedRow[] {
   return rows.map((row) => {
     const blNumber = String(
@@ -243,6 +252,28 @@ function processRows(
       pending.add("locals");
     }
 
+    // Argentinean shippers receive the Mendoza variants of thermal liner +
+    // FCA haulage; everyone else gets the Chile thermal liner (no haulage).
+    const isArg = isArgShipper(shipper, argClients);
+    let thermal = 0;
+    let haulage = 0;
+    if (rate) {
+      if (cargoIsForty) {
+        thermal = isArg
+          ? rate.thermalLinerMendoza40 ?? 0
+          : rate.thermalLinerChile40 ?? 0;
+        haulage = isArg ? rate.fcaHaulageMendoza40 ?? 0 : 0;
+      } else {
+        thermal = isArg
+          ? rate.thermalLinerMendoza20 ?? 0
+          : rate.thermalLinerChile20 ?? 0;
+        haulage = isArg ? rate.fcaHaulageMendoza20 ?? 0 : 0;
+      }
+      // Per container.
+      thermal = thermal * (ctrs || 0);
+      haulage = haulage * (ctrs || 0);
+    }
+
     let total: number | string = "TBD";
     if (
       typeof sf === "number" &&
@@ -251,7 +282,7 @@ function processRows(
       typeof ebsAmount === "number" &&
       typeof locals === "number"
     ) {
-      total = sf + blFee + af + ebsAmount + locals;
+      total = sf + blFee + af + ebsAmount + locals + thermal + haulage;
     } else {
       pending.add("total");
     }
@@ -272,6 +303,9 @@ function processRows(
       ebs: ebsAmount,
       locals,
       localBreakdown,
+      thermal,
+      haulage,
+      isArgClient: isArg,
       total,
       notes,
       pending,
@@ -368,10 +402,12 @@ export default function InvoicingTab() {
         session.user.id
       : "anónimo";
 
-  const { items: rates, hydrated: ratesHydrated } = useLocalStore<Rate>(
+  const { items: rawRates, hydrated: ratesHydrated } = useLocalStore<Rate>(
     RATES_STORAGE_KEY,
     SEED_RATES
   );
+  // Coerce legacy single-thermal records to the Chile/Mendoza-split fields.
+  const rates = useMemo(() => rawRates.map(normalizeRate), [rawRates]);
   const { items: ebs, hydrated: ebsHydrated } = useLocalStore<Ebs>(
     EBS_STORAGE_KEY,
     SEED_EBS
@@ -383,6 +419,10 @@ export default function InvoicingTab() {
       LOCAL_EXCEPTIONS_STORAGE_KEY,
       SEED_LOCAL_EXCEPTIONS
     );
+  const { items: argClients, hydrated: argHydrated } = useLocalStore<ArgClient>(
+    ARG_CLIENTS_STORAGE_KEY,
+    SEED_ARG_CLIENTS
+  );
 
   const [fileName, setFileName] = useState<string>("");
   const [rawRows, setRawRows] = useState<Row[]>([]);
@@ -477,7 +517,8 @@ export default function InvoicingTab() {
       rates,
       ebs,
       standards,
-      exceptions
+      exceptions,
+      argClients
     ).map((r) => {
       if (r.blNumber && currentBls[r.blNumber]) {
         return { ...r, duplicate: currentBls[r.blNumber] };
@@ -645,7 +686,13 @@ export default function InvoicingTab() {
     );
   };
 
-  if (!ratesHydrated || !ebsHydrated || !stdHydrated || !excHydrated) {
+  if (
+    !ratesHydrated ||
+    !ebsHydrated ||
+    !stdHydrated ||
+    !excHydrated ||
+    !argHydrated
+  ) {
     return <div className="text-gray-500 py-8 text-center">Cargando...</div>;
   }
 

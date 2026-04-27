@@ -19,6 +19,7 @@ import {
   carrierColor,
   formatDateCl,
   getValidityStatus,
+  normalizeRate,
   uid,
   uniqueSuggestions,
 } from "./constants";
@@ -33,10 +34,12 @@ const emptyDraft: Omit<Rate, "id"> = {
   af: 0,
   afMax: 0,
   flexiArg: 0,
-  thermalLiner20: 0,
-  thermalLiner40: 0,
-  fcaHaulage20: 0,
-  fcaHaulage40: 0,
+  thermalLinerChile20: 0,
+  thermalLinerChile40: 0,
+  thermalLinerMendoza20: 0,
+  thermalLinerMendoza40: 0,
+  fcaHaulageMendoza20: 0,
+  fcaHaulageMendoza40: 0,
   discountInsulated: 0,
   additionalNotes: "",
   validFrom: "",
@@ -48,10 +51,12 @@ const emptyDraft: Omit<Rate, "id"> = {
 // hide those columns in tables/forms when nobody in the dataset cares.
 function hasAdditionalCosts(r: Rate): boolean {
   return (
-    (r.thermalLiner20 ?? 0) > 0 ||
-    (r.thermalLiner40 ?? 0) > 0 ||
-    (r.fcaHaulage20 ?? 0) > 0 ||
-    (r.fcaHaulage40 ?? 0) > 0 ||
+    (r.thermalLinerChile20 ?? 0) > 0 ||
+    (r.thermalLinerChile40 ?? 0) > 0 ||
+    (r.thermalLinerMendoza20 ?? 0) > 0 ||
+    (r.thermalLinerMendoza40 ?? 0) > 0 ||
+    (r.fcaHaulageMendoza20 ?? 0) > 0 ||
+    (r.fcaHaulageMendoza40 ?? 0) > 0 ||
     (r.discountInsulated ?? 0) > 0 ||
     (r.additionalNotes ?? "").trim() !== ""
   );
@@ -130,8 +135,20 @@ function summarizeAgent(agent: string, rates: Rate[]): AgentSummary {
 }
 
 export default function RatesTab() {
-  const { items, setItems, add, update, remove, removeMany, hydrated } =
-    useLocalStore<Rate>(RATES_STORAGE_KEY, SEED_RATES);
+  const {
+    items: rawItems,
+    setItems,
+    add,
+    update,
+    remove,
+    removeMany,
+    hydrated,
+  } = useLocalStore<Rate>(RATES_STORAGE_KEY, SEED_RATES);
+
+  // Migrate legacy single-thermal/haulage records to the new
+  // Chile/Mendoza-split fields on every read so downstream code can rely on
+  // the new keys without repeating the fallback logic everywhere.
+  const items = useMemo(() => rawItems.map(normalizeRate), [rawItems]);
 
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState("");
@@ -277,10 +294,20 @@ export default function RatesTab() {
       af: toNumber(data.af),
       afMax: toNumber(data.afMax),
       flexiArg: toNumber(data.flexiArg),
-      thermalLiner20: toNumber(data.thermalLiner20),
-      thermalLiner40: toNumber(data.thermalLiner40),
-      fcaHaulage20: toNumber(data.fcaHaulage20),
-      fcaHaulage40: toNumber(data.fcaHaulage40),
+      thermalLinerChile20: toNumber(
+        data.thermalLinerChile20 ?? data.thermalLiner20
+      ),
+      thermalLinerChile40: toNumber(
+        data.thermalLinerChile40 ?? data.thermalLiner40
+      ),
+      thermalLinerMendoza20: toNumber(data.thermalLinerMendoza20),
+      thermalLinerMendoza40: toNumber(data.thermalLinerMendoza40),
+      fcaHaulageMendoza20: toNumber(
+        data.fcaHaulageMendoza20 ?? data.fcaHaulage20
+      ),
+      fcaHaulageMendoza40: toNumber(
+        data.fcaHaulageMendoza40 ?? data.fcaHaulage40
+      ),
       discountInsulated: toNumber(data.discountInsulated),
       additionalNotes: toString(data.additionalNotes),
       validFrom: toString(data.validFrom),
@@ -308,10 +335,20 @@ export default function RatesTab() {
           af: toNumber(row.af),
           afMax: toNumber(row.afMax),
           flexiArg: toNumber(row.flexiArg),
-          thermalLiner20: toNumber(row.thermalLiner20),
-          thermalLiner40: toNumber(row.thermalLiner40),
-          fcaHaulage20: toNumber(row.fcaHaulage20),
-          fcaHaulage40: toNumber(row.fcaHaulage40),
+          thermalLinerChile20: toNumber(
+            row.thermalLinerChile20 ?? row.thermalLiner20
+          ),
+          thermalLinerChile40: toNumber(
+            row.thermalLinerChile40 ?? row.thermalLiner40
+          ),
+          thermalLinerMendoza20: toNumber(row.thermalLinerMendoza20),
+          thermalLinerMendoza40: toNumber(row.thermalLinerMendoza40),
+          fcaHaulageMendoza20: toNumber(
+            row.fcaHaulageMendoza20 ?? row.fcaHaulage20
+          ),
+          fcaHaulageMendoza40: toNumber(
+            row.fcaHaulageMendoza40 ?? row.fcaHaulage40
+          ),
           discountInsulated: toNumber(row.discountInsulated),
           additionalNotes: toString(row.additionalNotes),
           validFrom: toString(row.validFrom),
@@ -588,56 +625,84 @@ export default function RatesTab() {
             {showAdditional && (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
                 <label className="flex flex-col gap-1 text-sm">
-                  Thermal Liner 20&apos; (USD)
+                  Thermal Chile 20&apos; (USD)
                   <input
                     type="number"
-                    value={draft.thermalLiner20 ?? 0}
+                    value={draft.thermalLinerChile20 ?? 0}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
-                        thermalLiner20: Number(e.target.value),
+                        thermalLinerChile20: Number(e.target.value),
                       })
                     }
                     className="border border-gray-200 rounded-md p-2 h-10"
                   />
                 </label>
                 <label className="flex flex-col gap-1 text-sm">
-                  Thermal Liner 40&apos; (USD)
+                  Thermal Chile 40&apos; (USD)
                   <input
                     type="number"
-                    value={draft.thermalLiner40 ?? 0}
+                    value={draft.thermalLinerChile40 ?? 0}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
-                        thermalLiner40: Number(e.target.value),
+                        thermalLinerChile40: Number(e.target.value),
                       })
                     }
                     className="border border-gray-200 rounded-md p-2 h-10"
                   />
                 </label>
                 <label className="flex flex-col gap-1 text-sm">
-                  FCA Haulage 20&apos; (USD)
+                  Thermal Mendoza 20&apos; (USD)
                   <input
                     type="number"
-                    value={draft.fcaHaulage20 ?? 0}
+                    value={draft.thermalLinerMendoza20 ?? 0}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
-                        fcaHaulage20: Number(e.target.value),
+                        thermalLinerMendoza20: Number(e.target.value),
                       })
                     }
                     className="border border-gray-200 rounded-md p-2 h-10"
                   />
                 </label>
                 <label className="flex flex-col gap-1 text-sm">
-                  FCA Haulage 40&apos; (USD)
+                  Thermal Mendoza 40&apos; (USD)
                   <input
                     type="number"
-                    value={draft.fcaHaulage40 ?? 0}
+                    value={draft.thermalLinerMendoza40 ?? 0}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
-                        fcaHaulage40: Number(e.target.value),
+                        thermalLinerMendoza40: Number(e.target.value),
+                      })
+                    }
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm">
+                  Haulage Mendoza 20&apos; (USD)
+                  <input
+                    type="number"
+                    value={draft.fcaHaulageMendoza20 ?? 0}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        fcaHaulageMendoza20: Number(e.target.value),
+                      })
+                    }
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm">
+                  Haulage Mendoza 40&apos; (USD)
+                  <input
+                    type="number"
+                    value={draft.fcaHaulageMendoza40 ?? 0}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        fcaHaulageMendoza40: Number(e.target.value),
                       })
                     }
                     className="border border-gray-200 rounded-md p-2 h-10"
@@ -795,10 +860,12 @@ export default function RatesTab() {
                             "Flexi ARG",
                             ...(showExtra
                               ? [
-                                  "Thermal 20'",
-                                  "Thermal 40'",
-                                  "Haulage 20'",
-                                  "Haulage 40'",
+                                  "Thermal Chile 20'",
+                                  "Thermal Chile 40'",
+                                  "Thermal Mza 20'",
+                                  "Thermal Mza 40'",
+                                  "Haulage Mza 20'",
+                                  "Haulage Mza 40'",
                                   "Desc. Insulado",
                                 ]
                               : []),
@@ -849,16 +916,22 @@ export default function RatesTab() {
                             {showExtra && (
                               <>
                                 <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.thermalLiner20 ?? 0}
+                                  ${r.thermalLinerChile20 ?? 0}
                                 </td>
                                 <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.thermalLiner40 ?? 0}
+                                  ${r.thermalLinerChile40 ?? 0}
                                 </td>
                                 <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.fcaHaulage20 ?? 0}
+                                  ${r.thermalLinerMendoza20 ?? 0}
                                 </td>
                                 <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.fcaHaulage40 ?? 0}
+                                  ${r.thermalLinerMendoza40 ?? 0}
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap">
+                                  ${r.fcaHaulageMendoza20 ?? 0}
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap">
+                                  ${r.fcaHaulageMendoza40 ?? 0}
                                 </td>
                                 <td className="px-4 py-2 whitespace-nowrap">
                                   {(r.discountInsulated ?? 0) > 0 ? (

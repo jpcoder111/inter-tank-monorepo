@@ -160,6 +160,7 @@ export const RATES_STORAGE_KEY = "it_rates_v2";
 export const EBS_STORAGE_KEY = "it_ebs_v4";
 export const LOCAL_STD_STORAGE_KEY = "it_local_std";
 export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions_v2";
+export const ARG_CLIENTS_STORAGE_KEY = "it_arg_clients";
 export const INVOICED_BLS_KEY = "it_invoiced_bls";
 export const INVOICE_HISTORY_PREFIX = "it_invoiced_history_";
 
@@ -209,19 +210,49 @@ export type Rate = {
   af: number;
   afMax: number;
   flexiArg: number;
-  // Optional additional costs that some agent quotes (e.g., Balguerie) include
-  // alongside the seafreight. Kept optional so legacy localStorage records
-  // without these fields read as 0/"" without a key bump.
+  // Per-origin Thermal Liner / Insulado costs and FCA Haulage from Mendoza.
+  // Filled per-row regardless of the row's container size — the invoicing
+  // logic picks Chile-vs-Mendoza based on the BL's shipper.
+  thermalLinerChile20?: number;
+  thermalLinerChile40?: number;
+  thermalLinerMendoza20?: number;
+  thermalLinerMendoza40?: number;
+  fcaHaulageMendoza20?: number;
+  fcaHaulageMendoza40?: number;
+  discountInsulated?: number;
+  additionalNotes?: string;
+  // Legacy fields (single Thermal Liner pair, single Haulage pair). Kept on
+  // the type so older localStorage records still validate; normalizeRate
+  // copies them into the new Chile/Mendoza-split fields on read.
   thermalLiner20?: number;
   thermalLiner40?: number;
   fcaHaulage20?: number;
   fcaHaulage40?: number;
-  discountInsulated?: number;
-  additionalNotes?: string;
   validFrom: string;
   validTo: string;
   notes: string;
 };
+
+// Normalizes legacy rate records to the new schema. Idempotent: rates that
+// already have the *Chile/Mendoza fields are returned unchanged. The legacy
+// thermalLiner20/40 are mapped to thermalLinerChile20/40 because the original
+// schema described "Thermal Liner from Chile origin".
+export function normalizeRate(r: Rate): Rate {
+  const out: Rate = { ...r };
+  if (out.thermalLinerChile20 == null && out.thermalLiner20 != null) {
+    out.thermalLinerChile20 = out.thermalLiner20;
+  }
+  if (out.thermalLinerChile40 == null && out.thermalLiner40 != null) {
+    out.thermalLinerChile40 = out.thermalLiner40;
+  }
+  if (out.fcaHaulageMendoza20 == null && out.fcaHaulage20 != null) {
+    out.fcaHaulageMendoza20 = out.fcaHaulage20;
+  }
+  if (out.fcaHaulageMendoza40 == null && out.fcaHaulage40 != null) {
+    out.fcaHaulageMendoza40 = out.fcaHaulage40;
+  }
+  return out;
+}
 
 export type EbsTipo = "Dry" | "Reefer";
 
@@ -1010,4 +1041,63 @@ export function computeLocalCharges(args: {
     conditional: [],
     unresolved: [],
   };
+}
+
+// ===== ARG clients (origin Mendoza) =====
+//
+// Argentinean shippers that pick up the Mendoza thermal/haulage variants in
+// invoicing instead of Chile. Stored as a simple list with optional comma-
+// separated alternative names so a single client (e.g., Grupo Peñaflor) can
+// match multiple shipper labels on incoming BLs.
+export type ArgClient = {
+  id: string;
+  name: string;
+  // Comma- or semicolon-separated alternative names / brands.
+  alternativeNames: string;
+  notes: string;
+};
+
+export const SEED_ARG_CLIENTS: ArgClient[] = [
+  {
+    id: "seed-arg-bodegas-fabre",
+    name: "Bodegas Fabre",
+    alternativeNames: "",
+    notes: "",
+  },
+  {
+    id: "seed-arg-grupo-penaflor",
+    name: "Grupo Peñaflor",
+    alternativeNames: "Peñaflor, Trapiche, Finca Las Moras, Andean Vineyards",
+    notes: "",
+  },
+  {
+    id: "seed-arg-10int-goyenechea",
+    name: "10 Int + Goyenechea",
+    alternativeNames: "Goyenechea, 10 Int",
+    notes: "",
+  },
+];
+
+// True when the BL's shipper text matches any ARG client. Match is bidirectional
+// (the shipper contains the client name OR the client name contains the
+// shipper) and case-insensitive — covers both "Trapiche" coming in shorter
+// than the canonical brand and longer brand-line variants.
+export function isArgShipper(
+  shipper: string,
+  argClients: ArgClient[]
+): boolean {
+  const s = shipper.trim().toLowerCase();
+  if (!s) return false;
+  for (const client of argClients) {
+    const candidates = [
+      client.name,
+      ...client.alternativeNames.split(/[,;]/).map((b) => b.trim()),
+    ]
+      .map((c) => c.trim().toLowerCase())
+      .filter(Boolean);
+    for (const c of candidates) {
+      if (c.includes(s) || s.includes(c)) return true;
+    }
+  }
+  return false;
 }

@@ -1,0 +1,261 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import toast from "react-hot-toast";
+import { Button } from "@/components/ui/Button";
+import { useLocalStore } from "./useLocalStore";
+import { useBulkSelection } from "./useBulkSelection";
+import BulkActionsBar from "./BulkActionsBar";
+import {
+  ARG_CLIENTS_STORAGE_KEY,
+  ArgClient,
+  SEED_ARG_CLIENTS,
+  uid,
+} from "./constants";
+
+const emptyDraft: Omit<ArgClient, "id"> = {
+  name: "",
+  alternativeNames: "",
+  notes: "",
+};
+
+function Chips({ value }: { value: string }) {
+  if (!value.trim()) return <span className="text-gray-400">—</span>;
+  const parts = value
+    .split(/[,;]/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return <span className="text-gray-400">—</span>;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {parts.map((p, i) => (
+        <span
+          key={i}
+          className="inline-block px-2 py-0.5 rounded-full text-xs bg-gray-100 border border-gray-200 text-gray-700"
+        >
+          {p}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export default function ArgClientsTab() {
+  const { items, add, update, remove, removeMany, hydrated } =
+    useLocalStore<ArgClient>(ARG_CLIENTS_STORAGE_KEY, SEED_ARG_CLIENTS);
+
+  const [search, setSearch] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Omit<ArgClient, "id">>(emptyDraft);
+  const [showForm, setShowForm] = useState(false);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return items;
+    return items.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.alternativeNames.toLowerCase().includes(q) ||
+        c.notes.toLowerCase().includes(q)
+    );
+  }, [items, search]);
+
+  const visibleIds = useMemo(() => filtered.map((c) => c.id), [filtered]);
+  const { selected, toggleOne, toggleAllVisible, clear, allVisibleSelected } =
+    useBulkSelection(visibleIds);
+
+  const handleBulkDelete = () => {
+    const ids = Array.from(selected);
+    removeMany(ids);
+    clear();
+    toast.success(
+      `${ids.length} cliente${ids.length === 1 ? "" : "s"} eliminado${ids.length === 1 ? "" : "s"}`
+    );
+  };
+
+  const openNew = () => {
+    setDraft(emptyDraft);
+    setEditingId(null);
+    setShowForm(true);
+  };
+
+  const openEdit = (client: ArgClient) => {
+    const { id: _id, ...rest } = client;
+    void _id;
+    setDraft(rest);
+    setEditingId(client.id);
+    setShowForm(true);
+  };
+
+  const handleSave = () => {
+    if (!draft.name.trim()) {
+      toast.error("El nombre es obligatorio");
+      return;
+    }
+    if (editingId) {
+      update(editingId, draft);
+    } else {
+      add({ ...draft, id: uid("arg") });
+    }
+    setShowForm(false);
+    setEditingId(null);
+  };
+
+  const cancel = () => {
+    setShowForm(false);
+    setEditingId(null);
+  };
+
+  if (!hydrated) {
+    return (
+      <div className="text-gray-500 py-8 text-center">Cargando clientes...</div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          type="text"
+          placeholder="Buscar..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="border border-gray-200 rounded-md p-2 h-10 min-w-48"
+        />
+        <div className="flex-1" />
+        <Button onClick={openNew}>Nuevo cliente</Button>
+      </div>
+
+      {showForm && (
+        <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
+          <h3 className="font-semibold mb-3">
+            {editingId ? "Editar cliente" : "Nuevo cliente"}
+          </h3>
+          <p className="text-xs text-gray-500 mb-3">
+            Los clientes argentinos reciben los costos de Mendoza (Thermal Liner
+            Mendoza, FCA Haulage Mendoza) en lugar de los de Chile cuando se
+            facturan sus BLs. Las marcas alternativas amplían el match — si el
+            shipper del BL coincide con cualquiera de ellas, se aplica el cliente.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1 text-sm">
+              Nombre
+              <input
+                type="text"
+                value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                className="border border-gray-200 rounded-md p-2 h-10"
+                placeholder="Bodegas Fabre"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-sm">
+              Marcas / nombres alternativos
+              <input
+                type="text"
+                value={draft.alternativeNames}
+                onChange={(e) =>
+                  setDraft({ ...draft, alternativeNames: e.target.value })
+                }
+                className="border border-gray-200 rounded-md p-2 h-10"
+                placeholder="Trapiche, Finca Las Moras"
+              />
+              <span className="text-xs text-gray-500">
+                Separadas por coma. El match con el shipper es case-insensitive
+                y bidireccional.
+              </span>
+            </label>
+            <label className="flex flex-col gap-1 text-sm md:col-span-2">
+              Notas
+              <input
+                type="text"
+                value={draft.notes}
+                onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
+                className="border border-gray-200 rounded-md p-2 h-10"
+              />
+            </label>
+          </div>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={cancel}>
+              Cancelar
+            </Button>
+            <Button onClick={handleSave}>Guardar</Button>
+          </div>
+        </div>
+      )}
+
+      <BulkActionsBar
+        count={selected.size}
+        onDelete={handleBulkDelete}
+        onClear={clear}
+        itemLabel="cliente"
+      />
+
+      <div className="bg-white rounded-lg shadow overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-3 w-10">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleAllVisible}
+                  aria-label="Seleccionar todos"
+                />
+              </th>
+              {["Cliente", "Marcas alternativas", "Notas", "Acciones"].map((h) => (
+                <th
+                  key={h}
+                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {filtered.map((c) => (
+              <tr key={c.id} className="text-sm">
+                <td className="px-3 py-2 w-10">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(c.id)}
+                    onChange={() => toggleOne(c.id)}
+                    aria-label={`Seleccionar ${c.name}`}
+                  />
+                </td>
+                <td className="px-4 py-3 font-medium whitespace-nowrap">
+                  {c.name}
+                </td>
+                <td className="px-4 py-3 max-w-md">
+                  <Chips value={c.alternativeNames} />
+                </td>
+                <td className="px-4 py-3 max-w-xs truncate text-gray-600">
+                  {c.notes || "—"}
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => openEdit(c)}>
+                      Editar
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (confirm(`¿Eliminar cliente "${c.name}"?`)) remove(c.id);
+                      }}
+                    >
+                      Eliminar
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filtered.length === 0 && (
+          <div className="text-center py-8 text-gray-500">No hay clientes</div>
+        )}
+      </div>
+    </div>
+  );
+}

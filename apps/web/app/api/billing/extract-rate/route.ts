@@ -46,7 +46,7 @@ async function callAnthropicDirect(
     },
     body: JSON.stringify({
       model,
-      max_tokens: 16384,
+      max_tokens: 24576,
       system,
       messages: [{ role: "user", content: userContent }],
     }),

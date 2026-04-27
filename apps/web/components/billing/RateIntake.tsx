@@ -24,36 +24,41 @@ Si solo hay una tarifa, devolvé un array con un único elemento. Usá "" para s
 
 [
   {
-    "agent": string,            // nombre del agente (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
-    "carrier": string,          // naviera (OOCL, HAPAG, CMA-CGM, PIL, COSCO, Evergreen, MSC u otra)
-    "route": string,            // ruta o puerto de destino
-    "tipo": string,             // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
-    "sf": number,               // Sea Freight en USD por contenedor
-    "blFee": number,            // BL fee en USD por BL
-    "af": number,               // Agency fee por contenedor
-    "afMax": number,            // AF máximo por BL/operación
-    "flexiArg": number,         // cargo adicional Flexi ARG
-    "thermalLiner20": number,   // costo USD del Thermal Liner / Insulado para 20' (0 si no aplica)
-    "thermalLiner40": number,   // costo USD del Thermal Liner / Insulado para 40' (0 si no aplica)
-    "fcaHaulage20": number,     // transporte terrestre FCA / haulage para 20' (0 si no aplica)
-    "fcaHaulage40": number,     // transporte terrestre FCA / haulage para 40' (0 si no aplica)
-    "discountInsulated": number, // descuento USD si la carga va insulada (0 si no aplica)
-    "additionalNotes": string,  // condiciones extra como "descuento aplica solo si carga insulada" ("" si no hay)
-    "validFrom": string,        // YYYY-MM-DD
-    "validTo": string,          // YYYY-MM-DD
-    "notes": string             // cualquier observación relevante (incluido all-in, EBS variable, etc.)
+    "agent": string,                   // nombre del agente (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
+    "carrier": string,                 // naviera (OOCL, HAPAG, CMA-CGM, PIL, COSCO, Evergreen, MSC u otra)
+    "route": string,                   // ruta o puerto de destino
+    "tipo": string,                    // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
+    "sf": number,                      // Sea Freight en USD por contenedor
+    "blFee": number,                   // BL fee en USD por BL
+    "af": number,                      // Agency fee por contenedor
+    "afMax": number,                   // AF máximo por BL/operación
+    "flexiArg": number,                // cargo adicional Flexi ARG
+    "thermalLinerChile20": number,     // Thermal Liner / Insulado para 20' desde Chile (0 si el agente no cobra)
+    "thermalLinerChile40": number,     // Thermal Liner / Insulado para 40' desde Chile (0 si el agente no cobra)
+    "thermalLinerMendoza20": number,   // Thermal Liner / Insulado para 20' desde Mendoza (0 si el agente no cobra)
+    "thermalLinerMendoza40": number,   // Thermal Liner / Insulado para 40' desde Mendoza (0 si el agente no cobra)
+    "fcaHaulageMendoza20": number,     // FCA Haulage / trucking desde Mendoza para 20' (0 si no aplica)
+    "fcaHaulageMendoza40": number,     // FCA Haulage / trucking desde Mendoza para 40' (0 si no aplica)
+    "discountInsulated": number,       // descuento USD si la carga va insulada (0 si no aplica)
+    "additionalNotes": string,         // condiciones extra como "descuento aplica solo si carga insulada" ("" si no hay)
+    "validFrom": string,               // YYYY-MM-DD
+    "validTo": string,                 // YYYY-MM-DD
+    "notes": string                    // cualquier observación relevante (incluido all-in, EBS variable, etc.)
   }
 ]
 
-CÓMO APLICAR LOS COSTOS ADICIONALES (thermalLiner20/40, fcaHaulage20/40, discountInsulated, additionalNotes):
+CÓMO APLICAR LOS COSTOS ADICIONALES (CRÍTICO):
 
-Estos costos son GENERALES del agente y deben repetirse en CADA objeto del array según las siguientes reglas — NO los pongas solo en una fila:
+Estos costos son GENERALES del agente y deben repetirse en CADA objeto del array. Si el agente cobra Thermal Liner, AMBOS valores (20' y 40') tienen que llenarse en CADA tarifa, sin importar si la tarifa específica es 20' o 40'. Por ejemplo si el agente tiene Thermal Chile 200/300, TODAS las tarifas del agente deben tener thermalLinerChile20=200 y thermalLinerChile40=300 — incluso una tarifa que es solo 40' debe tener thermalLinerChile20=200 (porque podría facturarse en 20' después). Lo mismo para Mendoza y para FCA Haulage.
 
-- **Thermal Liner / Insulado**: si el Excel declara un valor de Thermal Liner para origen Chile (ej: 200/300 USD para 20'/40' desde Valparaíso o San Antonio), copiá ese valor en thermalLiner20/40 de TODAS las filas con POL/origen "Valparaíso", "San Antonio" u otro puerto chileno. Si declara un valor distinto para Mendoza (ej: 250/350), aplicá esos valores a TODAS las filas con origen Mendoza.
-- **FCA Haulage**: si el Excel declara FCA Haulage / transporte terrestre desde Mendoza (ej: 2170/2270 USD para 20'/40'), poné fcaHaulage20/40 SOLO en las filas que sean tarifas FCA desde Mendoza. Las tarifas que NO son FCA o que no salen de Mendoza llevan 0.
-- **Descuento por insulado**: si el Excel menciona "descuento de USD X si la carga va insulada", aplicá discountInsulated en TODAS las tarifas Dry del mismo agente, no solo en una. additionalNotes debe describir la condición ("Descuento aplica solo si carga insulada") en cada fila que tenga el descuento.
+Reglas específicas:
 
-Si una fila no aplica para una regla (por ejemplo una tarifa Reefer no recibe descuento por insulado, una tarifa que sale de Valparaíso no recibe FCA Haulage de Mendoza), poné 0 / "" en esos campos para esa fila. NUNCA dejes una fila con 0 cuando le correspondería el valor del agente.
+- **Thermal Liner Chile**: si el Excel declara un Thermal Liner desde Chile (Valparaíso, San Antonio u otro puerto chileno), poné AMBOS thermalLinerChile20 y thermalLinerChile40 en TODAS las tarifas del agente. NO solo en filas que sean 20' o 40' — en TODAS, con AMBOS valores.
+- **Thermal Liner Mendoza**: si el Excel declara un Thermal Liner desde Mendoza (Argentina), poné AMBOS thermalLinerMendoza20 y thermalLinerMendoza40 en TODAS las tarifas del agente, con AMBOS valores.
+- **FCA Haulage Mendoza**: si el Excel declara FCA Haulage / transporte terrestre desde Mendoza (ej: 2170/2270 para 20'/40'), poné AMBOS fcaHaulageMendoza20 y fcaHaulageMendoza40 en TODAS las tarifas del agente que cubran origen Mendoza, con AMBOS valores. Tarifas que claramente NO admiten origen Mendoza llevan 0.
+- **Descuento por insulado**: si el Excel menciona "descuento de USD X si la carga va insulada", aplicá discountInsulated en TODAS las tarifas Dry del agente. additionalNotes debe describir la condición ("Descuento aplica solo si carga insulada") en cada fila que tenga el descuento.
+
+NUNCA dejes una fila con 0 cuando le correspondería el valor del agente. Si el agente cobra Thermal Liner Chile 200/300, ese par 200/300 va en TODAS las filas del agente — repetido textualmente.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -543,6 +548,11 @@ export default function RateIntake({
   const [chunkProgress, setChunkProgress] = useState<
     { current: number; total: number; retrying?: boolean } | null
   >(null);
+  // Captures the chunks that failed all 3 attempts so the user can manually
+  // retry just those without re-running the successful ones.
+  const [failedChunkInfo, setFailedChunkInfo] = useState<
+    Array<{ index: number; content: string }> | null
+  >(null);
   // Raw Claude response when JSON parse fails — user can edit and retry
   const [rawResponse, setRawResponse] = useState<string | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -571,6 +581,7 @@ export default function RateIntake({
     setPreviewWarning(null);
     setRawResponse(null);
     setChunkProgress(null);
+    setFailedChunkInfo(null);
   };
 
   // Multi-row mode is enabled when the parent passed onExtractedMany. EBS uploads
@@ -691,73 +702,95 @@ export default function RateIntake({
   // Multiple sequential API calls so each chunk fits comfortably in
   // max_tokens. Per-chunk failures are collected into `failedChunks` so the
   // user gets partial results plus a precise list of which blocks to retry.
+  // 3 total attempts per chunk with a 5s backoff between attempts. The
+  // 5s gives rate-limit windows time to reset and reduces overlap with the
+  // platform's request-coalescing.
+  const MAX_CHUNK_ATTEMPTS = 3;
+  const RETRY_DELAY_MS = 5000;
+
+  const stripTruncatedField = (r: Record<string, unknown>) => {
+    if (!("truncated" in r)) return r;
+    const { truncated: _t, ...rest } = r;
+    void _t;
+    return rest;
+  };
+
+  // Runs a list of chunk requests sequentially with the retry policy. Used
+  // by both the initial chunked extraction and the manual "retry failed
+  // chunks" action so retry semantics stay consistent.
+  const processChunks = async (
+    items: Array<{ index: number; content: string }>,
+    totalForUi: number
+  ) => {
+    const rows: Record<string, unknown>[] = [];
+    const failed: Array<{ index: number; content: string }> = [];
+    let partial = false;
+    for (const item of items) {
+      let success = false;
+      for (let attempt = 0; attempt < MAX_CHUNK_ATTEMPTS && !success; attempt++) {
+        setChunkProgress({
+          current: item.index,
+          total: totalForUi,
+          retrying: attempt > 0,
+        });
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        }
+        try {
+          const result = await callExtractApi(item.content);
+          rows.push(...result.rows);
+          if (result.partial) partial = true;
+          success = true;
+        } catch {
+          // fall through and retry until MAX_CHUNK_ATTEMPTS exhausted
+        }
+      }
+      if (!success) failed.push(item);
+    }
+    return { rows, failed, partial };
+  };
+
+  const buildChunkItems = (
+    chunks: string[],
+    preamble: string
+  ): Array<{ index: number; content: string }> =>
+    chunks.map((c, i) => {
+      const dataPart = `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${c}`;
+      return {
+        index: i + 1,
+        content: preamble
+          ? `Contexto general del Excel (aplica a TODAS las filas, no es una fila de tarifa):\n${preamble}\n\n${dataPart}`
+          : dataPart,
+      };
+    });
+
   const submitChunked = async () => {
     if (!excelText) return;
     const chunks = chunkExcelCsv(excelText);
-    // Detect agent-wide additional-cost notes in the original text and
-    // prepend them to every chunk. This way Claude sees "Thermal Liner: …"
-    // even when chunking moved the literal line out of the chunk's own data.
     const preamble = extractContextPreamble(excelText);
+    const items = buildChunkItems(chunks, preamble);
     setChunkProgress({ current: 0, total: chunks.length });
-    const all: Record<string, unknown>[] = [];
-    const failed: number[] = [];
-    let anyPartial = false;
-    for (let i = 0; i < chunks.length; i++) {
-      const dataPart = `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${chunks[i]}`;
-      const content = preamble
-        ? `Contexto general del Excel (aplica a TODAS las filas, no es una fila de tarifa):\n${preamble}\n\n${dataPart}`
-        : dataPart;
-      let success = false;
-      // One automatic retry with a 2s backoff before declaring the chunk lost.
-      // Most chunk failures are transient (rate-limits, network blips, Claude
-      // returning truncated JSON the first time around).
-      for (let attempt = 0; attempt < 2 && !success; attempt++) {
-        if (attempt === 0) {
-          setChunkProgress({ current: i + 1, total: chunks.length });
-        } else {
-          setChunkProgress({
-            current: i + 1,
-            total: chunks.length,
-            retrying: true,
-          });
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-        try {
-          const result = await callExtractApi(content);
-          all.push(...result.rows);
-          if (result.partial) anyPartial = true;
-          success = true;
-        } catch {
-          // fall through to retry (or to the failed list on the second pass)
-        }
-      }
-      if (!success) failed.push(i + 1);
-    }
+    const result = await processChunks(items, chunks.length);
     setChunkProgress(null);
-    if (all.length === 0) {
+
+    if (result.rows.length === 0) {
+      setFailedChunkInfo(result.failed.length > 0 ? result.failed : null);
       setError(
-        failed.length === chunks.length
-          ? `Falló la extracción de los ${chunks.length} bloques. Revisá el Excel e intentá de nuevo.`
+        result.failed.length === chunks.length
+          ? `Falló la extracción de los ${chunks.length} bloques tras ${MAX_CHUNK_ATTEMPTS} intentos cada uno. Revisá el Excel.`
           : "No se pudo extraer ninguna tarifa."
       );
       return;
     }
-    // Strip the per-row truncated metadata flag (it's there to signal
-    // single-call truncation; chunked extraction handles it differently).
-    const cleanRows = all.map((r) => {
-      if ("truncated" in r) {
-        const { truncated: _t, ...rest } = r;
-        void _t;
-        return rest;
-      }
-      return r;
-    });
+    const cleanRows = result.rows.map(stripTruncatedField);
     let warning: string | null = null;
-    if (failed.length > 0) {
-      warning = `Se procesaron ${chunks.length - failed.length} de ${chunks.length} bloques (${cleanRows.length} tarifas). Bloques con error: ${failed.join(", ")} — subí el Excel nuevamente para esos rangos.`;
-    } else if (anyPartial) {
+    if (result.failed.length > 0) {
+      const totalCount = chunks.length;
+      warning = `Se procesaron ${totalCount - result.failed.length} de ${totalCount} bloques (${cleanRows.length} tarifas). Bloques con error: ${result.failed.map((f) => f.index).join(", ")}.`;
+    } else if (result.partial) {
       warning = `Se extrajeron ${cleanRows.length} tarifas. Algún bloque vino truncado — pueden faltar tarifas.`;
     }
+    setFailedChunkInfo(result.failed.length > 0 ? result.failed : null);
     if (supportsMany) {
       setPreviewRows(cleanRows);
       setPreviewSelected(new Set(cleanRows.map((_, i) => i)));
@@ -765,6 +798,42 @@ export default function RateIntake({
       setRawResponse(null);
     } else {
       onExtracted((cleanRows[0] ?? {}) as Record<string, unknown>);
+    }
+  };
+
+  const retryFailedChunks = async () => {
+    if (!failedChunkInfo || failedChunkInfo.length === 0) return;
+    const items = failedChunkInfo;
+    setChunkProgress({ current: 0, total: items.length });
+    setError(null);
+    const result = await processChunks(items, items.length);
+    setChunkProgress(null);
+    const cleanRows = result.rows.map(stripTruncatedField);
+    if (cleanRows.length > 0) {
+      // Append rows to the existing preview and pre-select the new ones so
+      // they get saved alongside the originals.
+      setPreviewRows((prev) => {
+        const base = prev ?? [];
+        return [...base, ...cleanRows];
+      });
+      setPreviewSelected((prev) => {
+        const next = new Set(prev);
+        const startIdx = (previewRows?.length ?? 0);
+        for (let i = 0; i < cleanRows.length; i++) next.add(startIdx + i);
+        return next;
+      });
+    }
+    setFailedChunkInfo(result.failed.length > 0 ? result.failed : null);
+    if (result.failed.length > 0) {
+      setPreviewWarning(
+        `Algunos bloques siguen fallando tras reintentar: ${result.failed.map((f) => f.index).join(", ")}. Subí el Excel nuevamente para esos rangos si querés más tarifas.`
+      );
+    } else {
+      setPreviewWarning(
+        cleanRows.length > 0
+          ? `Recuperación exitosa — se agregaron ${cleanRows.length} tarifas más.`
+          : null
+      );
     }
   };
 
@@ -958,6 +1027,14 @@ export default function RateIntake({
         onCancel={onCancel}
         error={error}
         warning={previewWarning}
+        warningAction={
+          failedChunkInfo && failedChunkInfo.length > 0
+            ? {
+                label: "Reintentar bloques fallidos",
+                onClick: retryFailedChunks,
+              }
+            : undefined
+        }
       />
     );
   }
@@ -1170,6 +1247,7 @@ function MultiResultPreview({
   onCancel,
   error,
   warning,
+  warningAction,
 }: {
   rows: Record<string, unknown>[];
   selected: Set<number>;
@@ -1180,6 +1258,7 @@ function MultiResultPreview({
   onCancel: () => void;
   error: string | null;
   warning?: string | null;
+  warningAction?: { label: string; onClick: () => void };
 }) {
   return (
     <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
@@ -1198,8 +1277,17 @@ function MultiResultPreview({
       </div>
 
       {warning && (
-        <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mb-3">
-          ⚠️ {warning}
+        <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mb-3 flex items-start justify-between gap-3">
+          <span>⚠️ {warning}</span>
+          {warningAction && (
+            <button
+              type="button"
+              onClick={warningAction.onClick}
+              className="shrink-0 bg-yellow-600 text-white px-3 py-1 rounded text-sm font-medium hover:bg-yellow-700 cursor-pointer"
+            >
+              {warningAction.label}
+            </button>
+          )}
         </div>
       )}
 
@@ -1336,6 +1424,7 @@ function RateMultiPreview({
   onCancel,
   error,
   warning,
+  warningAction,
 }: {
   rows: Record<string, unknown>[];
   selected: Set<number>;
@@ -1346,6 +1435,7 @@ function RateMultiPreview({
   onCancel: () => void;
   error: string | null;
   warning?: string | null;
+  warningAction?: { label: string; onClick: () => void };
 }) {
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const allSelected = rows.length > 0 && rows.every((_, i) => selected.has(i));
@@ -1353,12 +1443,20 @@ function RateMultiPreview({
   // row has a meaningful value — typical multi-extract has none.
   const showExtra = rows.some(
     (r) =>
+      numField(r, "thermalLinerChile20") > 0 ||
+      numField(r, "thermalLinerChile40") > 0 ||
+      numField(r, "thermalLinerMendoza20") > 0 ||
+      numField(r, "thermalLinerMendoza40") > 0 ||
+      numField(r, "fcaHaulageMendoza20") > 0 ||
+      numField(r, "fcaHaulageMendoza40") > 0 ||
+      numField(r, "discountInsulated") > 0 ||
+      strField(r, "additionalNotes").trim() !== "" ||
+      // Legacy fallbacks: detect older single-thermal rows so the columns
+      // still appear after a re-extract migration.
       numField(r, "thermalLiner20") > 0 ||
       numField(r, "thermalLiner40") > 0 ||
       numField(r, "fcaHaulage20") > 0 ||
-      numField(r, "fcaHaulage40") > 0 ||
-      numField(r, "discountInsulated") > 0 ||
-      strField(r, "additionalNotes").trim() !== ""
+      numField(r, "fcaHaulage40") > 0
   );
   const toggleAll = () => {
     // Re-emit a toggle for every index whose state needs flipping. Callers
@@ -1392,8 +1490,17 @@ function RateMultiPreview({
       </p>
 
       {warning && (
-        <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mb-3">
-          ⚠️ {warning}
+        <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mb-3 flex items-start justify-between gap-3">
+          <span>⚠️ {warning}</span>
+          {warningAction && (
+            <button
+              type="button"
+              onClick={warningAction.onClick}
+              className="shrink-0 bg-yellow-600 text-white px-3 py-1 rounded text-sm font-medium hover:bg-yellow-700 cursor-pointer"
+            >
+              {warningAction.label}
+            </button>
+          )}
         </div>
       )}
 
@@ -1418,10 +1525,12 @@ function RateMultiPreview({
                 "BL Fee",
                 ...(showExtra
                   ? [
-                      "Thermal 20'",
-                      "Thermal 40'",
-                      "Haulage 20'",
-                      "Haulage 40'",
+                      "Thermal Chile 20'",
+                      "Thermal Chile 40'",
+                      "Thermal Mza 20'",
+                      "Thermal Mza 40'",
+                      "Haulage Mza 20'",
+                      "Haulage Mza 40'",
                       "Desc. Insulado",
                     ]
                   : []),
@@ -1475,16 +1584,30 @@ function RateMultiPreview({
                     {showExtra && (
                       <>
                         <td className="px-3 py-2 whitespace-nowrap">
-                          ${numField(row, "thermalLiner20")}
+                          $
+                          {numField(row, "thermalLinerChile20") ||
+                            numField(row, "thermalLiner20")}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap">
-                          ${numField(row, "thermalLiner40")}
+                          $
+                          {numField(row, "thermalLinerChile40") ||
+                            numField(row, "thermalLiner40")}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap">
-                          ${numField(row, "fcaHaulage20")}
+                          ${numField(row, "thermalLinerMendoza20")}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap">
-                          ${numField(row, "fcaHaulage40")}
+                          ${numField(row, "thermalLinerMendoza40")}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          $
+                          {numField(row, "fcaHaulageMendoza20") ||
+                            numField(row, "fcaHaulage20")}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          $
+                          {numField(row, "fcaHaulageMendoza40") ||
+                            numField(row, "fcaHaulage40")}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap">
                           {numField(row, "discountInsulated") > 0
@@ -1505,7 +1628,7 @@ function RateMultiPreview({
                   </tr>
                   {isEditing && (
                     <tr className="bg-blue-50/40">
-                      <td colSpan={showExtra ? 13 : 8} className="px-4 py-3">
+                      <td colSpan={showExtra ? 15 : 8} className="px-4 py-3">
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                           <RateField
                             label="Agente"
@@ -1595,30 +1718,44 @@ function RateMultiPreview({
                             colSpan="col-span-2 md:col-span-4"
                           />
                           <RateNumField
-                            label="Thermal 20'"
+                            label="Thermal Chile 20'"
                             row={row}
-                            field="thermalLiner20"
+                            field="thermalLinerChile20"
                             onChange={onUpdateField}
                             idx={idx}
                           />
                           <RateNumField
-                            label="Thermal 40'"
+                            label="Thermal Chile 40'"
                             row={row}
-                            field="thermalLiner40"
+                            field="thermalLinerChile40"
                             onChange={onUpdateField}
                             idx={idx}
                           />
                           <RateNumField
-                            label="Haulage 20'"
+                            label="Thermal Mza 20'"
                             row={row}
-                            field="fcaHaulage20"
+                            field="thermalLinerMendoza20"
                             onChange={onUpdateField}
                             idx={idx}
                           />
                           <RateNumField
-                            label="Haulage 40'"
+                            label="Thermal Mza 40'"
                             row={row}
-                            field="fcaHaulage40"
+                            field="thermalLinerMendoza40"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="Haulage Mza 20'"
+                            row={row}
+                            field="fcaHaulageMendoza20"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="Haulage Mza 40'"
+                            row={row}
+                            field="fcaHaulageMendoza40"
                             onChange={onUpdateField}
                             idx={idx}
                           />

@@ -24,20 +24,28 @@ Si solo hay una tarifa, devolvé un array con un único elemento. Usá "" para s
 
 [
   {
-    "agent": string,         // nombre del agente (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
-    "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, PIL, COSCO, Evergreen, MSC u otra)
-    "route": string,         // ruta o puerto de destino
-    "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
-    "sf": number,            // Sea Freight en USD por contenedor
-    "blFee": number,         // BL fee en USD por BL
-    "af": number,            // Agency fee por contenedor
-    "afMax": number,         // AF máximo por BL/operación
-    "flexiArg": number,      // cargo adicional Flexi ARG
-    "validFrom": string,     // YYYY-MM-DD
-    "validTo": string,       // YYYY-MM-DD
-    "notes": string          // cualquier observación relevante (incluido all-in, EBS variable, etc.)
+    "agent": string,            // nombre del agente (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
+    "carrier": string,          // naviera (OOCL, HAPAG, CMA-CGM, PIL, COSCO, Evergreen, MSC u otra)
+    "route": string,            // ruta o puerto de destino
+    "tipo": string,             // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
+    "sf": number,               // Sea Freight en USD por contenedor
+    "blFee": number,            // BL fee en USD por BL
+    "af": number,               // Agency fee por contenedor
+    "afMax": number,            // AF máximo por BL/operación
+    "flexiArg": number,         // cargo adicional Flexi ARG
+    "thermalLiner20": number,   // costo USD del Thermal Liner / Insulado para 20' (0 si no aplica)
+    "thermalLiner40": number,   // costo USD del Thermal Liner / Insulado para 40' (0 si no aplica)
+    "fcaHaulage20": number,     // transporte terrestre FCA / haulage para 20' (0 si no aplica)
+    "fcaHaulage40": number,     // transporte terrestre FCA / haulage para 40' (0 si no aplica)
+    "discountInsulated": number, // descuento USD si la carga va insulada (0 si no aplica)
+    "additionalNotes": string,  // condiciones extra como "descuento aplica solo si carga insulada" ("" si no hay)
+    "validFrom": string,        // YYYY-MM-DD
+    "validTo": string,          // YYYY-MM-DD
+    "notes": string             // cualquier observación relevante (incluido all-in, EBS variable, etc.)
   }
 ]
+
+Los campos thermalLiner20/40, fcaHaulage20/40, discountInsulated y additionalNotes son OPCIONALES: poné 0 (o "" para additionalNotes) cuando el Excel no los mencione. Solo extralos si aparecen explícitamente en el input (columnas tipo "Thermal Liner", "Insulado", "Haulage", "FCA", "Trucking", o notas que mencionen descuentos condicionales).
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -162,6 +170,27 @@ type ExcelReadResult = {
 
 function csvEscapeCell(s: string): string {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// Splits an Excel-derived CSV into chunks of CHUNK_DATA_ROWS data rows each,
+// repeating the header line at the top of every chunk so each independent API
+// call has the same column context. "Hoja: <name>" markers and blank lines are
+// dropped — the returned chunks are pure header + data CSV.
+const CHUNK_DATA_ROWS = 30;
+
+function chunkExcelCsv(text: string, rowsPerChunk = CHUNK_DATA_ROWS): string[] {
+  const meaningful = text
+    .split("\n")
+    .filter((l) => l.trim() !== "" && !l.trim().startsWith("Hoja:"));
+  if (meaningful.length === 0) return [text];
+  const header = meaningful[0]!;
+  const dataRows = meaningful.slice(1);
+  if (dataRows.length === 0) return [meaningful.join("\n")];
+  const chunks: string[] = [];
+  for (let i = 0; i < dataRows.length; i += rowsPerChunk) {
+    chunks.push([header, ...dataRows.slice(i, i + rowsPerChunk)].join("\n"));
+  }
+  return chunks;
 }
 
 async function readExcelAsText(file: File): Promise<ExcelReadResult> {
@@ -475,6 +504,11 @@ export default function RateIntake({
   );
   const [previewSelected, setPreviewSelected] = useState<Set<number>>(new Set());
   const [previewWarning, setPreviewWarning] = useState<string | null>(null);
+  // Set while chunked Excel extraction is in flight: shows the user which
+  // chunk is being processed and lets us hide the form/intake mid-run.
+  const [chunkProgress, setChunkProgress] = useState<
+    { current: number; total: number } | null
+  >(null);
   // Raw Claude response when JSON parse fails — user can edit and retry
   const [rawResponse, setRawResponse] = useState<string | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -502,6 +536,7 @@ export default function RateIntake({
     setPreviewSelected(new Set());
     setPreviewWarning(null);
     setRawResponse(null);
+    setChunkProgress(null);
   };
 
   // Multi-row mode is enabled when the parent passed onExtractedMany. EBS uploads
@@ -602,10 +637,95 @@ export default function RateIntake({
     }
   };
 
+  const callExtractApi = async (
+    content: string | ContentPayload
+  ): Promise<{ rows: Record<string, unknown>[]; partial: boolean }> => {
+    const res = await fetch("/api/billing/extract-rate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ system, content }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `API error ${res.status}`);
+    }
+    const { text: responseText } = (await res.json()) as { text: string };
+    const parsed = parseExtractedJson(responseText);
+    return { rows: toRecordArray(parsed.data), partial: parsed.partial };
+  };
+
+  // Multiple sequential API calls so each chunk fits comfortably in
+  // max_tokens. Per-chunk failures are collected into `failedChunks` so the
+  // user gets partial results plus a precise list of which blocks to retry.
+  const submitChunked = async () => {
+    if (!excelText) return;
+    const chunks = chunkExcelCsv(excelText);
+    setChunkProgress({ current: 0, total: chunks.length });
+    const all: Record<string, unknown>[] = [];
+    const failed: number[] = [];
+    let anyPartial = false;
+    for (let i = 0; i < chunks.length; i++) {
+      setChunkProgress({ current: i + 1, total: chunks.length });
+      try {
+        const content = `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${chunks[i]}`;
+        const result = await callExtractApi(content);
+        all.push(...result.rows);
+        if (result.partial) anyPartial = true;
+      } catch {
+        failed.push(i + 1);
+      }
+    }
+    setChunkProgress(null);
+    if (all.length === 0) {
+      setError(
+        failed.length === chunks.length
+          ? `Falló la extracción de los ${chunks.length} bloques. Revisá el Excel e intentá de nuevo.`
+          : "No se pudo extraer ninguna tarifa."
+      );
+      return;
+    }
+    // Strip the per-row truncated metadata flag (it's there to signal
+    // single-call truncation; chunked extraction handles it differently).
+    const cleanRows = all.map((r) => {
+      if ("truncated" in r) {
+        const { truncated: _t, ...rest } = r;
+        void _t;
+        return rest;
+      }
+      return r;
+    });
+    let warning: string | null = null;
+    if (failed.length > 0) {
+      warning = `Se procesaron ${chunks.length - failed.length} de ${chunks.length} bloques (${cleanRows.length} tarifas). Bloques con error: ${failed.join(", ")} — subí el Excel nuevamente para esos rangos.`;
+    } else if (anyPartial) {
+      warning = `Se extrajeron ${cleanRows.length} tarifas. Algún bloque vino truncado — pueden faltar tarifas.`;
+    }
+    if (supportsMany) {
+      setPreviewRows(cleanRows);
+      setPreviewSelected(new Set(cleanRows.map((_, i) => i)));
+      setPreviewWarning(warning);
+      setRawResponse(null);
+    } else {
+      onExtracted((cleanRows[0] ?? {}) as Record<string, unknown>);
+    }
+  };
+
   const submit = async () => {
     setLoading(true);
     setError(null);
     try {
+      // Excel uploads for rate/ebs go through the chunked pipeline so a single
+      // max_tokens cap can't truncate the result. Image/manual modes and the
+      // local-* types still use the single-call path.
+      const isChunkable =
+        mode === "excel" &&
+        excelText &&
+        (type === "rate" || type === "ebs");
+      if (isChunkable) {
+        await submitChunked();
+        return;
+      }
+
       let content: string | ContentPayload;
       if (mode === "image") {
         if (docxText) {
@@ -737,6 +857,29 @@ export default function RateIntake({
     }
     onExtractedMany(selected);
   };
+
+  if (chunkProgress) {
+    const pct = Math.round(
+      (chunkProgress.current / chunkProgress.total) * 100
+    );
+    return (
+      <div className="bg-white rounded-lg shadow p-6 border border-gray-200">
+        <h3 className="font-semibold mb-2">
+          Procesando bloque {chunkProgress.current} de {chunkProgress.total}...
+        </h3>
+        <p className="text-xs text-gray-500 mb-3">
+          El Excel se está enviando a Claude en bloques de {CHUNK_DATA_ROWS} filas para
+          evitar truncamiento. No cierres esta pestaña.
+        </p>
+        <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+          <div
+            className="bg-blue-600 h-2 transition-all duration-200"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+    );
+  }
 
   if (previewRows && supportsMany) {
     const Preview = type === "rate" ? RateMultiPreview : MultiResultPreview;
@@ -1147,6 +1290,17 @@ function RateMultiPreview({
 }) {
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const allSelected = rows.length > 0 && rows.every((_, i) => selected.has(i));
+  // Only widen the table with the optional cost columns when at least one
+  // row has a meaningful value — typical multi-extract has none.
+  const showExtra = rows.some(
+    (r) =>
+      numField(r, "thermalLiner20") > 0 ||
+      numField(r, "thermalLiner40") > 0 ||
+      numField(r, "fcaHaulage20") > 0 ||
+      numField(r, "fcaHaulage40") > 0 ||
+      numField(r, "discountInsulated") > 0 ||
+      strField(r, "additionalNotes").trim() !== ""
+  );
   const toggleAll = () => {
     // Re-emit a toggle for every index whose state needs flipping. Callers
     // already debounce setState updates so a loop is fine here.
@@ -1203,6 +1357,15 @@ function RateMultiPreview({
                 "Tipo",
                 "SF",
                 "BL Fee",
+                ...(showExtra
+                  ? [
+                      "Thermal 20'",
+                      "Thermal 40'",
+                      "Haulage 20'",
+                      "Haulage 40'",
+                      "Desc. Insulado",
+                    ]
+                  : []),
                 "Acciones",
               ].map((h) => (
                 <th
@@ -1250,6 +1413,27 @@ function RateMultiPreview({
                     <td className="px-3 py-2 whitespace-nowrap">
                       ${numField(row, "blFee")}
                     </td>
+                    {showExtra && (
+                      <>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          ${numField(row, "thermalLiner20")}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          ${numField(row, "thermalLiner40")}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          ${numField(row, "fcaHaulage20")}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          ${numField(row, "fcaHaulage40")}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {numField(row, "discountInsulated") > 0
+                            ? `-$${numField(row, "discountInsulated")}`
+                            : "—"}
+                        </td>
+                      </>
+                    )}
                     <td className="px-3 py-2 whitespace-nowrap">
                       <Button
                         variant="outline"
@@ -1262,7 +1446,7 @@ function RateMultiPreview({
                   </tr>
                   {isEditing && (
                     <tr className="bg-blue-50/40">
-                      <td colSpan={8} className="px-4 py-3">
+                      <td colSpan={showExtra ? 13 : 8} className="px-4 py-3">
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                           <RateField
                             label="Agente"
@@ -1350,6 +1534,49 @@ function RateMultiPreview({
                             onChange={onUpdateField}
                             idx={idx}
                             colSpan="col-span-2 md:col-span-4"
+                          />
+                          <RateNumField
+                            label="Thermal 20'"
+                            row={row}
+                            field="thermalLiner20"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="Thermal 40'"
+                            row={row}
+                            field="thermalLiner40"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="Haulage 20'"
+                            row={row}
+                            field="fcaHaulage20"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="Haulage 40'"
+                            row={row}
+                            field="fcaHaulage40"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateNumField
+                            label="Desc. Insulado"
+                            row={row}
+                            field="discountInsulated"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RateField
+                            label="Notas adicionales"
+                            row={row}
+                            field="additionalNotes"
+                            onChange={onUpdateField}
+                            idx={idx}
+                            colSpan="col-span-2 md:col-span-3"
                           />
                         </div>
                       </td>

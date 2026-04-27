@@ -33,10 +33,29 @@ const emptyDraft: Omit<Rate, "id"> = {
   af: 0,
   afMax: 0,
   flexiArg: 0,
+  thermalLiner20: 0,
+  thermalLiner40: 0,
+  fcaHaulage20: 0,
+  fcaHaulage40: 0,
+  discountInsulated: 0,
+  additionalNotes: "",
   validFrom: "",
   validTo: "",
   notes: "",
 };
+
+// True if any of the optional cost columns has a meaningful value. Used to
+// hide those columns in tables/forms when nobody in the dataset cares.
+function hasAdditionalCosts(r: Rate): boolean {
+  return (
+    (r.thermalLiner20 ?? 0) > 0 ||
+    (r.thermalLiner40 ?? 0) > 0 ||
+    (r.fcaHaulage20 ?? 0) > 0 ||
+    (r.fcaHaulage40 ?? 0) > 0 ||
+    (r.discountInsulated ?? 0) > 0 ||
+    (r.additionalNotes ?? "").trim() !== ""
+  );
+}
 
 function ValidityBadge({ validTo }: { validTo: string }) {
   const status = getValidityStatus(validTo);
@@ -121,6 +140,7 @@ export default function RatesTab() {
   const [draft, setDraft] = useState<Omit<Rate, "id">>(emptyDraft);
   const [showIntake, setShowIntake] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [showAdditional, setShowAdditional] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const agentSuggestions = useMemo(
@@ -205,6 +225,7 @@ export default function RatesTab() {
     setEditingId(null);
     setShowIntake(true);
     setShowForm(false);
+    setShowAdditional(false);
   };
 
   const openEdit = (rate: Rate) => {
@@ -214,6 +235,9 @@ export default function RatesTab() {
     setEditingId(rate.id);
     setShowIntake(false);
     setShowForm(true);
+    // Auto-expand the optional costs section when the edited rate already has
+    // values there — otherwise the user might miss they exist.
+    setShowAdditional(hasAdditionalCosts(rate));
   };
 
   const handleExtracted = (data: Record<string, unknown>) => {
@@ -227,6 +251,12 @@ export default function RatesTab() {
       af: toNumber(data.af),
       afMax: toNumber(data.afMax),
       flexiArg: toNumber(data.flexiArg),
+      thermalLiner20: toNumber(data.thermalLiner20),
+      thermalLiner40: toNumber(data.thermalLiner40),
+      fcaHaulage20: toNumber(data.fcaHaulage20),
+      fcaHaulage40: toNumber(data.fcaHaulage40),
+      discountInsulated: toNumber(data.discountInsulated),
+      additionalNotes: toString(data.additionalNotes),
       validFrom: toString(data.validFrom),
       validTo: toString(data.validTo),
       notes: toString(data.notes),
@@ -252,6 +282,12 @@ export default function RatesTab() {
           af: toNumber(row.af),
           afMax: toNumber(row.afMax),
           flexiArg: toNumber(row.flexiArg),
+          thermalLiner20: toNumber(row.thermalLiner20),
+          thermalLiner40: toNumber(row.thermalLiner40),
+          fcaHaulage20: toNumber(row.fcaHaulage20),
+          fcaHaulage40: toNumber(row.fcaHaulage40),
+          discountInsulated: toNumber(row.discountInsulated),
+          additionalNotes: toString(row.additionalNotes),
           validFrom: toString(row.validFrom),
           validTo: toString(row.validTo),
           notes: toString(row.notes),
@@ -509,6 +545,110 @@ export default function RatesTab() {
               />
             </label>
           </div>
+
+          <div className="mt-4 border-t border-gray-200 pt-3">
+            <button
+              type="button"
+              onClick={() => setShowAdditional((s) => !s)}
+              className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900 cursor-pointer"
+              aria-expanded={showAdditional}
+            >
+              <span className="font-mono text-xs w-4 text-center">
+                {showAdditional ? "▼" : "▶"}
+              </span>
+              Costos adicionales (Thermal Liner, Haulage FCA, descuentos)
+            </button>
+            {showAdditional && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+                <label className="flex flex-col gap-1 text-sm">
+                  Thermal Liner 20&apos; (USD)
+                  <input
+                    type="number"
+                    value={draft.thermalLiner20 ?? 0}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        thermalLiner20: Number(e.target.value),
+                      })
+                    }
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm">
+                  Thermal Liner 40&apos; (USD)
+                  <input
+                    type="number"
+                    value={draft.thermalLiner40 ?? 0}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        thermalLiner40: Number(e.target.value),
+                      })
+                    }
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm">
+                  FCA Haulage 20&apos; (USD)
+                  <input
+                    type="number"
+                    value={draft.fcaHaulage20 ?? 0}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        fcaHaulage20: Number(e.target.value),
+                      })
+                    }
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm">
+                  FCA Haulage 40&apos; (USD)
+                  <input
+                    type="number"
+                    value={draft.fcaHaulage40 ?? 0}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        fcaHaulage40: Number(e.target.value),
+                      })
+                    }
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm">
+                  Descuento si insulado (USD)
+                  <input
+                    type="number"
+                    value={draft.discountInsulated ?? 0}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        discountInsulated: Number(e.target.value),
+                      })
+                    }
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm col-span-2 md:col-span-3">
+                  Notas adicionales (condiciones, aplicación)
+                  <input
+                    type="text"
+                    value={draft.additionalNotes ?? ""}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        additionalNotes: e.target.value,
+                      })
+                    }
+                    placeholder='Ej: "Descuento aplica solo si carga insulada"'
+                    className="border border-gray-200 rounded-md p-2 h-10"
+                  />
+                </label>
+              </div>
+            )}
+          </div>
+
           <div className="flex justify-end gap-2 mt-4">
             <Button variant="outline" onClick={cancelAll}>
               Cancelar
@@ -581,7 +721,9 @@ export default function RatesTab() {
                   </div>
                 </button>
 
-                {isOpen && (
+                {isOpen && (() => {
+                  const showExtra = g.rates.some(hasAdditionalCosts);
+                  return (
                   <div className="overflow-x-auto border-t border-gray-200">
                     <table className="min-w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50">
@@ -596,6 +738,15 @@ export default function RatesTab() {
                             "AF",
                             "AF Max",
                             "Flexi ARG",
+                            ...(showExtra
+                              ? [
+                                  "Thermal 20'",
+                                  "Thermal 40'",
+                                  "Haulage 20'",
+                                  "Haulage 40'",
+                                  "Desc. Insulado",
+                                ]
+                              : []),
                             "Vigencia",
                             "Estado",
                             "Notas",
@@ -640,6 +791,34 @@ export default function RatesTab() {
                             <td className="px-4 py-2 whitespace-nowrap">${r.af}</td>
                             <td className="px-4 py-2 whitespace-nowrap">${r.afMax}</td>
                             <td className="px-4 py-2 whitespace-nowrap">${r.flexiArg}</td>
+                            {showExtra && (
+                              <>
+                                <td className="px-4 py-2 whitespace-nowrap">
+                                  ${r.thermalLiner20 ?? 0}
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap">
+                                  ${r.thermalLiner40 ?? 0}
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap">
+                                  ${r.fcaHaulage20 ?? 0}
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap">
+                                  ${r.fcaHaulage40 ?? 0}
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap">
+                                  {(r.discountInsulated ?? 0) > 0 ? (
+                                    <span
+                                      className="text-green-700"
+                                      title={r.additionalNotes ?? ""}
+                                    >
+                                      -${r.discountInsulated}
+                                    </span>
+                                  ) : (
+                                    "—"
+                                  )}
+                                </td>
+                              </>
+                            )}
                             <td className="px-4 py-2 whitespace-nowrap text-xs">
                               {formatDateCl(r.validFrom)} / {formatDateCl(r.validTo)}
                             </td>
@@ -672,7 +851,8 @@ export default function RatesTab() {
                       </tbody>
                     </table>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             );
           })}

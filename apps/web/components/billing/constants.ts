@@ -137,6 +137,15 @@ export type Rate = {
   af: number;
   afMax: number;
   flexiArg: number;
+  // Optional additional costs that some agent quotes (e.g., Balguerie) include
+  // alongside the seafreight. Kept optional so legacy localStorage records
+  // without these fields read as 0/"" without a key bump.
+  thermalLiner20?: number;
+  thermalLiner40?: number;
+  fcaHaulage20?: number;
+  fcaHaulage40?: number;
+  discountInsulated?: number;
+  additionalNotes?: string;
   validFrom: string;
   validTo: string;
   notes: string;

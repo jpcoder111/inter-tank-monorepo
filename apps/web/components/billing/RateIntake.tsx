@@ -862,16 +862,17 @@ export default function RateIntake({
     discountInsulated: 0,
   };
 
-  // Single upfront call to resolve the agent-wide costs from the preamble
-  // notes. Returns all-zero when there's no preamble or the call fails — in
-  // that case rows just get 0s, same behaviour as the prior flow.
+  // Single upfront call to resolve the agent-wide costs. Caller decides
+  // what context to feed (filtered preamble notes or a slice of the raw
+  // Excel CSV). Returns all-zero on empty input or call failure so the
+  // pipeline never hard-stops on the resolution step.
   const resolvePreambleCosts = async (
-    preamble: string
+    contextText: string
   ): Promise<ResolvedAdditionalCosts> => {
-    if (!preamble.trim()) return ZERO_RESOLVED;
+    if (!contextText.trim()) return ZERO_RESOLVED;
     try {
       const result = await callExtractApi(
-        `Notas del Excel:\n\n${preamble}`,
+        `Contenido del Excel:\n\n${contextText}`,
         PREAMBLE_RESOLUTION_SYSTEM
       );
       const obj = (result.rows[0] ?? {}) as Record<string, unknown>;
@@ -925,12 +926,32 @@ export default function RateIntake({
     const chunks = chunkExcelCsv(excelText);
     const preamble = extractContextPreamble(excelText);
     // Step 1: resolve the agent-wide costs ONCE upfront. Skipped for EBS
-    // (no preamble keywords expected there) but the helper itself bails out
-    // when preamble is empty, so the call is cheap to make either way.
+    // (no preamble keywords expected there). The keyword-based preamble
+    // extraction misses Excels where Thermal/Haulage values live in columns
+    // (data rows have too many commas to pass the threshold), so when the
+    // preamble comes up short we pass the start of the raw CSV instead —
+    // Claude is good at finding "Thermal Liner: X" mentions even in
+    // column-shaped data.
+    const resolveContext =
+      preamble.trim().length > 50 ? preamble : excelText.slice(0, 6000);
     const resolved =
       type === "rate"
-        ? await resolvePreambleCosts(preamble)
+        ? await resolvePreambleCosts(resolveContext)
         : ZERO_RESOLVED;
+    // [debug-rate] temp: confirm what we sent to step 1 and what came back
+    console.log(
+      "[debug-rate] preamble length:",
+      preamble.length,
+      "preamble preview:",
+      preamble.slice(0, 300)
+    );
+    console.log(
+      "[debug-rate] resolveContext used:",
+      resolveContext === preamble ? "preamble" : "excelText slice",
+      "length:",
+      resolveContext.length
+    );
+    console.log("[debug-rate] resolved costs:", resolved);
     // For rate chunks we no longer prepend the preamble — Claude doesn't
     // need it (we're filling those values in code). For EBS we keep the
     // existing preamble-prepended payload.
@@ -959,6 +980,11 @@ export default function RateIntake({
       .map((r) =>
         type === "rate" ? applyAdditionalCosts(r, resolved) : r
       );
+    // [debug-rate] temp: confirm the cost fields are landing on rows
+    console.log(
+      "[debug-rate] first 3 rows after applyAdditionalCosts:",
+      cleanRows.slice(0, 3)
+    );
     let warning: string | null = null;
     if (result.failed.length > 0) {
       const totalCount = chunks.length;

@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/Button";
 type IntakeType = "rate" | "ebs" | "local_std" | "local_exception";
 type Mode = "choose" | "image" | "excel" | "manual";
 
+const STRICT_RESPONSE_RULES = `IMPORTANTE: Respondé SOLO con el JSON, sin backticks de markdown (\`\`\`), sin texto adicional antes o después. Si hay muchas tarifas, limitá la respuesta a las primeras 20.`;
+
 const RATE_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input describe una tarifa (agente logístico, carrier, ruta, tipo de contenedor, costos, vigencia).
 Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
 
@@ -24,7 +26,9 @@ Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings fal
   "validFrom": string,     // YYYY-MM-DD
   "validTo": string,       // YYYY-MM-DD
   "notes": string          // cualquier observación relevante (incluido all-in, EBS variable, etc.)
-}`;
+}
+
+${STRICT_RESPONSE_RULES}`;
 
 const EBS_SYSTEM = `Sos un extractor de EBS (Emergency Bunker Surcharge) para fletes marítimos.
 
@@ -56,7 +60,9 @@ Devolvé SOLO un ARRAY JSON con uno o más objetos. Usá "" para strings faltant
   }
 ]
 
-Si solo hay un EBS en el input, devolvé un array con un único elemento. NUNCA devuelvas un objeto suelto.`;
+Si solo hay un EBS en el input, devolvé un array con un único elemento. NUNCA devuelvas un objeto suelto.
+
+${STRICT_RESPONSE_RULES}`;
 
 const LOCAL_STD_SYSTEM = `Sos un extractor de TARIFAS ESTÁNDAR de gastos locales portuarios (OTHC, sello, AMS, BL Fee, Gate Out).
 Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. No incluyas comentarios, markdown ni texto adicional.
@@ -73,7 +79,9 @@ Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings fal
   "gateOutConditions": string, // condiciones de aplicación de Gate Out (navieras, destinos)
   "validFrom": string,         // YYYY-MM-DD
   "notes": string              // cualquier observación
-}`;
+}
+
+${STRICT_RESPONSE_RULES}`;
 
 const LOCAL_EXCEPTION_SYSTEM = `Sos un extractor de EXCEPCIONES de gastos locales portuarios por cliente/naviera.
 Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings faltantes y 0 para números faltantes. El tipo debe ser "Dry" o "Reefer". No incluyas comentarios, markdown ni texto adicional.
@@ -93,7 +101,9 @@ Devolvé SOLO un objeto JSON con los siguientes campos. Usá "" para strings fal
   "otherChargesDetail": string,  // descripción de los otros cargos (ej: "Security Surcharge 10/unit + TPO TPA 12/unit")
   "notes": string,
   "validFrom": string            // YYYY-MM-DD
-}`;
+}
+
+${STRICT_RESPONSE_RULES}`;
 
 function readAsBase64(file: File): Promise<{ base64: string; mediaType: string }> {
   return new Promise((resolve, reject) => {
@@ -122,18 +132,44 @@ function cleanCsvText(raw: string): string {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-async function readExcelAsText(file: File): Promise<string> {
+// Hard cap so Claude's response stays well under max_tokens. Empirically a
+// row of EBS data parses to ~80 tokens; 50 rows keeps room for the JSON
+// scaffolding plus a safety margin.
+const EXCEL_MAX_ROWS = 50;
+
+type ExcelReadResult = {
+  text: string;
+  totalRows: number;
+  usedRows: number;
+  truncated: boolean;
+};
+
+async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   const buffer = await file.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array" });
-  return wb.SheetNames.map((name) => {
+  const sheets: string[] = [];
+  let totalRows = 0;
+  let usedRows = 0;
+  for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
-    if (!ws) return "";
+    if (!ws) continue;
     const csv = XLSX.utils.sheet_to_csv(ws);
     const cleaned = cleanCsvText(csv);
-    return cleaned ? `Hoja: ${name}\n${cleaned}` : "";
-  })
-    .filter(Boolean)
-    .join("\n\n");
+    if (!cleaned) continue;
+    const lines = cleaned.split("\n");
+    totalRows += lines.length;
+    if (usedRows < EXCEL_MAX_ROWS) {
+      const taken = lines.slice(0, EXCEL_MAX_ROWS - usedRows);
+      sheets.push(`Hoja: ${name}\n${taken.join("\n")}`);
+      usedRows += taken.length;
+    }
+  }
+  return {
+    text: sheets.join("\n\n"),
+    totalRows,
+    usedRows,
+    truncated: totalRows > usedRows,
+  };
 }
 
 const DOCX_MIME =
@@ -151,31 +187,126 @@ async function readDocxAsText(file: File): Promise<string> {
   return result.value;
 }
 
-function parseExtractedJson(
-  raw: string
-): Record<string, unknown> | Record<string, unknown>[] {
-  const cleaned = raw
+// Strips a leading ```json (or ```) fence and a trailing ``` fence, plus any
+// surrounding whitespace. Tolerant of variants like "```JSON\n…```" with or
+// without a newline after the opening fence.
+function stripCodeFences(s: string): string {
+  return s
     .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
+    .replace(/^```(?:json|JSON)?\s*\n?/i, "")
+    .replace(/\s*```\s*$/i, "")
     .trim();
-  const firstBracket = cleaned.indexOf("[");
-  const lastBracket = cleaned.lastIndexOf("]");
-  const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  // Prefer array form when an array fully contains the brace span — covers cases
-  // where Claude wraps multiple objects in []. Fall back to object form otherwise.
+}
+
+// Slice from the first opening bracket/brace to the last matching closer.
+// Drops any prose Claude prepended ("Here's the JSON:") or appended.
+function extractJsonRegion(s: string): string {
+  const firstBracket = s.indexOf("[");
+  const firstBrace = s.indexOf("{");
+  const lastBracket = s.lastIndexOf("]");
+  const lastBrace = s.lastIndexOf("}");
+  // Prefer array form: our extraction prompts return arrays. Treat the array
+  // as the outer container only when its span fully contains the brace span.
   const arrayLooksOuter =
     firstBracket !== -1 &&
     lastBracket !== -1 &&
     (firstBrace === -1 || firstBracket < firstBrace) &&
     (lastBrace === -1 || lastBracket > lastBrace);
-  const candidate = arrayLooksOuter
-    ? cleaned.slice(firstBracket, lastBracket + 1)
-    : firstBrace !== -1 && lastBrace !== -1
-      ? cleaned.slice(firstBrace, lastBrace + 1)
-      : cleaned;
-  return JSON.parse(candidate) as
+  if (arrayLooksOuter) return s.slice(firstBracket, lastBracket + 1);
+  if (firstBrace !== -1 && lastBrace !== -1) {
+    return s.slice(firstBrace, lastBrace + 1);
+  }
+  return s;
+}
+
+// When Claude truncates mid-response (max_tokens hit, network cut, etc.) the
+// JSON ends mid-object with unclosed `{` and `[`. We walk the string, respecting
+// quoted strings and escapes, count unclosed openers, then append the missing
+// closers. Heuristic: close braces before brackets — works for the common case
+// of `[ {…}, { … ` truncation but won't repair every shape.
+function autoCloseJson(s: string): string {
+  let inString = false;
+  let escape = false;
+  let braceCount = 0;
+  let bracketCount = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charAt(i);
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (c === "\\") {
+      escape = true;
+      continue;
+    }
+    if (c === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (c === "{") braceCount++;
+    else if (c === "}") braceCount--;
+    else if (c === "[") bracketCount++;
+    else if (c === "]") bracketCount--;
+  }
+  let out = s;
+  if (inString) out += '"';
+  // A truncation mid-array often leaves a dangling comma; strip it before
+  // closing or JSON.parse will choke on `, ]`.
+  out = out.replace(/,\s*$/, "");
+  while (braceCount > 0) {
+    out += "}";
+    braceCount--;
+  }
+  while (bracketCount > 0) {
+    out += "]";
+    bracketCount--;
+  }
+  return out;
+}
+
+// Aggressive cleanup for the manual retry path: removes JS-style comments
+// and trailing commas before re-running the standard pipeline. Used only when
+// the user asks to retry parsing — we don't want to silently rewrite content
+// on the first attempt.
+function aggressiveClean(s: string): string {
+  let out = stripCodeFences(s);
+  out = extractJsonRegion(out);
+  // Strip // line comments (only outside strings — naive impl, but Claude's
+  // outputs rarely contain "//" inside strings).
+  out = out.replace(/\/\/[^\n\r]*/g, "");
+  // Strip /* ... */ block comments
+  out = out.replace(/\/\*[\s\S]*?\*\//g, "");
+  // Drop trailing commas before } or ]
+  out = out.replace(/,(\s*[}\]])/g, "$1");
+  out = autoCloseJson(out);
+  return out;
+}
+
+function parseExtractedJson(
+  raw: string
+): Record<string, unknown> | Record<string, unknown>[] {
+  const stripped = stripCodeFences(raw);
+  const region = extractJsonRegion(stripped);
+  try {
+    return JSON.parse(region) as
+      | Record<string, unknown>
+      | Record<string, unknown>[];
+  } catch {
+    // First fallback: the response was likely truncated. Try again after
+    // closing dangling brackets/braces.
+    const closed = autoCloseJson(region);
+    return JSON.parse(closed) as
+      | Record<string, unknown>
+      | Record<string, unknown>[];
+  }
+}
+
+function parseExtractedJsonAggressive(
+  raw: string
+): Record<string, unknown> | Record<string, unknown>[] {
+  const cleaned = aggressiveClean(raw);
+  return JSON.parse(cleaned) as
     | Record<string, unknown>
     | Record<string, unknown>[];
 }
@@ -298,14 +429,20 @@ export default function RateIntake({
 
   const handleExcel = async (file: File) => {
     setError(null);
+    setSizeWarning(null);
     setFileName(file.name);
     try {
-      const txt = await readExcelAsText(file);
-      if (!txt.trim()) {
+      const result = await readExcelAsText(file);
+      if (!result.text.trim()) {
         setError("El Excel no contiene datos.");
         return;
       }
-      setExcelText(txt);
+      setExcelText(result.text);
+      if (result.truncated) {
+        setSizeWarning(
+          `Excel tiene ${result.totalRows} filas — se procesarán las primeras ${result.usedRows}. Para el resto, sube el archivo nuevamente seleccionando otro rango.`
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al leer Excel");
     }
@@ -404,6 +541,21 @@ export default function RateIntake({
     }
   };
 
+  const retryParseAggressive = (text: string) => {
+    try {
+      const parsed = parseExtractedJsonAggressive(text);
+      setRawResponse(null);
+      setError(null);
+      consumeParsed(parsed);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Sigue sin parsear (incluso después de limpieza agresiva): ${err.message}`
+          : "Sigue sin parsear"
+      );
+    }
+  };
+
   const togglePreview = (idx: number) => {
     setPreviewSelected((prev) => {
       const next = new Set(prev);
@@ -456,6 +608,7 @@ export default function RateIntake({
       <RawResponseEditor
         initial={rawResponse}
         onRetry={retryParse}
+        onRetryAggressive={retryParseAggressive}
         onBack={() => {
           setRawResponse(null);
           setError(null);
@@ -805,12 +958,14 @@ function MultiResultPreview({
 function RawResponseEditor({
   initial,
   onRetry,
+  onRetryAggressive,
   onBack,
   onCancel,
   error,
 }: {
   initial: string;
   onRetry: (text: string) => void;
+  onRetryAggressive: (text: string) => void;
   onBack: () => void;
   onCancel: () => void;
   error: string | null;
@@ -842,7 +997,15 @@ function RawResponseEditor({
       />
       {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
       <div className="flex justify-end gap-2 mt-4">
-        <Button onClick={() => onRetry(text)}>Reintentar parse</Button>
+        <Button variant="outline" onClick={() => onRetry(text)}>
+          Reintentar parse
+        </Button>
+        <Button
+          onClick={() => onRetryAggressive(text)}
+          title="Quita comentarios, comas finales y cierra brackets/braces incompletos antes de parsear"
+        >
+          Intentar parsear de nuevo
+        </Button>
       </div>
     </div>
   );

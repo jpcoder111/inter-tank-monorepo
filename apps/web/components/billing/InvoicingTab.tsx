@@ -31,9 +31,8 @@ import {
   SEED_LOCAL_STANDARDS,
   SEED_RATES,
   carrierColor,
-  carriersMatch,
   computeLocalCharges,
-  effective40ReeferRate,
+  findEbsForBilling,
   formatDateCl,
   invoiceHistoryKey,
   uid,
@@ -135,18 +134,7 @@ function findRate(
   );
 }
 
-// Picks the EBS row with the most recent validFrom for the given carrier —
-// matching the "vigente = newest validFrom per slot" rule used in EbsTab.
-// Falls back to undefined when no carrier matches.
-function findEbs(ebs: Ebs[], carrier: string): Ebs | undefined {
-  const matches = ebs.filter((e) => carriersMatch(e.carrier, carrier));
-  if (matches.length === 0) return undefined;
-  return matches
-    .slice()
-    .sort((a, b) => b.validFrom.localeCompare(a.validFrom))[0];
-}
-
-function isReefer(tipo: string): boolean {
+function isReeferContainer(tipo: string): boolean {
   return tipo.toUpperCase().includes("RF");
 }
 
@@ -195,7 +183,15 @@ function processRows(
     if (isPending(ctrsRaw)) pending.add("ctrs");
 
     const rate = findRate(rates, agent, carrier, tipo, route);
-    const ebsRow = findEbs(ebs, carrier);
+    // Reefer cargo must match a Reefer EBS row — there is intentionally no Dry
+    // fallback. Reefer 20' doesn't exist in Chile so we leave it as TBD.
+    const cargoIsReefer = isReeferContainer(tipo);
+    const cargoIsForty = isFortyFoot(tipo);
+    const ebsTipo = cargoIsReefer ? "Reefer" : "Dry";
+    const reefer20 = cargoIsReefer && !cargoIsForty;
+    const ebsRow = !reefer20 && carrier && tipo
+      ? findEbsForBilling(ebs, carrier, ebsTipo)
+      : undefined;
 
     let sf: number | string = "TBD";
     let blFee: number | string = "TBD";
@@ -213,16 +209,11 @@ function processRows(
       pending.add("af");
     }
 
-    if (ebsRow) {
-      // Per-container EBS: 20'/Flexi = 1× per-TEU, 40' Dry = 2× per-TEU,
-      // 40' Reefer = effective40ReeferRate (custom override or 2× per-TEU).
-      const fortyReefer = isFortyFoot(tipo) && isReefer(tipo);
-      const perCtr = fortyReefer
-        ? effective40ReeferRate(ebsRow)
-        : isFortyFoot(tipo)
-          ? ebsRow.amountPerTEU * 2
-          : ebsRow.amountPerTEU;
-      ebsAmount = perCtr * (ctrs || 0);
+    if (ebsRow && !reefer20) {
+      // 40' Dry and 40' Reefer both = 2 × amountPerTEU (drawn from their
+      // respective EBS rows). 20'/Flexi (Dry only) = 1 ×.
+      const mult = cargoIsForty ? 2 : 1;
+      ebsAmount = ebsRow.amountPerTEU * mult * (ctrs || 0);
     } else {
       pending.add("ebs");
     }

@@ -1,8 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import toast from "react-hot-toast";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
+import { useBulkSelection } from "./useBulkSelection";
+import BulkActionsBar from "./BulkActionsBar";
 import RateIntake from "./RateIntake";
 import {
   AGENT_COLORS,
@@ -108,7 +111,7 @@ function summarizeAgent(agent: string, rates: Rate[]): AgentSummary {
 }
 
 export default function RatesTab() {
-  const { items, add, update, remove, hydrated } = useLocalStore<Rate>(
+  const { items, add, update, remove, removeMany, hydrated } = useLocalStore<Rate>(
     RATES_STORAGE_KEY,
     SEED_RATES
   );
@@ -170,6 +173,17 @@ export default function RatesTab() {
   }, [filtered]);
 
   const allExpanded = groups.length > 0 && groups.every((g) => expanded.has(g.agent));
+
+  const visibleIds = useMemo(() => filtered.map((r) => r.id), [filtered]);
+  const { selected, toggleOne, toggleAllVisible, clear, allVisibleSelected } =
+    useBulkSelection(visibleIds);
+
+  const handleBulkDelete = () => {
+    const ids = Array.from(selected);
+    removeMany(ids);
+    clear();
+    toast.success(`${ids.length} tarifa${ids.length === 1 ? "" : "s"} eliminada${ids.length === 1 ? "" : "s"}`);
+  };
 
   const toggleAgent = (agent: string) => {
     setExpanded((prev) => {
@@ -286,11 +300,25 @@ export default function RatesTab() {
           ))}
         </datalist>
         <div className="flex-1" />
+        <Button
+          variant="outline"
+          onClick={toggleAllVisible}
+          disabled={visibleIds.length === 0}
+        >
+          {allVisibleSelected ? "Desmarcar todas" : "Seleccionar todas"}
+        </Button>
         <Button variant="outline" onClick={toggleAll} disabled={groups.length === 0}>
           {allExpanded ? "Colapsar todos" : "Expandir todos"}
         </Button>
         <Button onClick={openNew}>Nueva Tarifa</Button>
       </div>
+
+      <BulkActionsBar
+        count={selected.size}
+        onDelete={handleBulkDelete}
+        onClear={clear}
+        itemLabel="tarifa"
+      />
 
       {showIntake && (
         <div className="flex flex-col gap-2">
@@ -527,6 +555,7 @@ export default function RatesTab() {
                     <table className="min-w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
+                          <th className="px-3 py-3 w-10" />
                           {[
                             "Carrier",
                             "Ruta",
@@ -553,6 +582,14 @@ export default function RatesTab() {
                       <tbody className="bg-white divide-y divide-gray-200">
                         {g.rates.map((r) => (
                           <tr key={r.id} className="text-sm">
+                            <td className="px-3 py-2 w-10">
+                              <input
+                                type="checkbox"
+                                checked={selected.has(r.id)}
+                                onChange={() => toggleOne(r.id)}
+                                aria-label={`Seleccionar tarifa ${r.carrier} ${r.route}`}
+                              />
+                            </td>
                             <td className="px-4 py-2 whitespace-nowrap">
                               {r.carrier ? (
                                 <span

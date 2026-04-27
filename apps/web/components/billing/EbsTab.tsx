@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
+import { useBulkSelection } from "./useBulkSelection";
+import BulkActionsBar from "./BulkActionsBar";
 import RateIntake from "./RateIntake";
 import {
   CARRIER_SUGGESTIONS,
@@ -12,12 +14,13 @@ import {
   Ebs,
   EbsRowMeta,
   EbsRowStatus,
+  EbsTipo,
   SEED_EBS,
   carrierColor,
   carriersMatch,
   computeEbsRowMeta,
-  effective40ReeferRate,
   formatDateCl,
+  normalizeEbs,
   uid,
   uniqueSuggestions,
 } from "./constants";
@@ -25,8 +28,8 @@ import {
 const emptyDraft: Omit<Ebs, "id"> = {
   carrier: "",
   traffic: "",
+  tipo: "Dry",
   amountPerTEU: 0,
-  amountPer40Reefer: 0,
   validFrom: "",
   validTo: "",
   notes: "",
@@ -34,20 +37,43 @@ const emptyDraft: Omit<Ebs, "id"> = {
 
 const STATUS_ORDER: Record<EbsRowStatus, number> = {
   vigente: 0,
-  reemplazado: 1,
+  soon: 1,
+  reemplazado: 2,
 };
 
 function VigenciaBadge({ meta }: { meta: EbsRowMeta | undefined }) {
-  if (!meta || meta.status === "vigente") {
+  const status = meta?.status ?? "vigente";
+  if (status === "soon") {
     return (
-      <span className="inline-block px-3 py-1 rounded-full text-sm font-semibold border bg-green-100 text-green-800 border-green-300">
-        Vigente
+      <span className="inline-block px-3 py-1 rounded-full text-sm font-semibold border bg-yellow-100 text-yellow-800 border-yellow-300">
+        Vence &lt;30d
+      </span>
+    );
+  }
+  if (status === "reemplazado") {
+    return (
+      <span className="inline-block px-3 py-1 rounded-full text-sm font-semibold border bg-gray-100 text-gray-700 border-gray-300">
+        Reemplazado
       </span>
     );
   }
   return (
-    <span className="inline-block px-3 py-1 rounded-full text-sm font-semibold border bg-gray-100 text-gray-700 border-gray-300">
-      Reemplazado
+    <span className="inline-block px-3 py-1 rounded-full text-sm font-semibold border bg-green-100 text-green-800 border-green-300">
+      Vigente
+    </span>
+  );
+}
+
+function TipoBadge({ tipo }: { tipo: EbsTipo }) {
+  return (
+    <span
+      className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium border ${
+        tipo === "Reefer"
+          ? "bg-blue-50 text-blue-800 border-blue-200"
+          : "bg-gray-50 text-gray-800 border-gray-200"
+      }`}
+    >
+      {tipo}
     </span>
   );
 }
@@ -70,22 +96,37 @@ function trafficKey(t: string): string {
   return t.trim().toLowerCase();
 }
 
-// Identifies an existing EBS that "shares slot" with the candidate (same carrier
-// + same traffic region). Used to detect duplicates and same-region-different-
-// vigencia overlaps.
-function findSameSlot(items: Ebs[], candidate: Pick<Ebs, "carrier" | "traffic">) {
-  return items.find(
-    (e) =>
-      carriersMatch(e.carrier, candidate.carrier) &&
-      trafficKey(e.traffic) === trafficKey(candidate.traffic)
+// A "slot" is now carrier + traffic + tipo. Reefer and Dry never collide,
+// so a Dry vigente and a Reefer vigente coexist for the same carrier+traffic.
+function sameSlot(
+  a: Pick<Ebs, "carrier" | "traffic" | "tipo">,
+  b: Pick<Ebs, "carrier" | "traffic" | "tipo">
+): boolean {
+  return (
+    carriersMatch(a.carrier, b.carrier) &&
+    trafficKey(a.traffic) === trafficKey(b.traffic) &&
+    (a.tipo ?? "Dry") === (b.tipo ?? "Dry")
   );
 }
 
+function findSameSlot(items: Ebs[], candidate: Pick<Ebs, "carrier" | "traffic" | "tipo">) {
+  return items.find((e) => sameSlot(e, candidate));
+}
+
 export default function EbsTab() {
-  const { items, setItems, add, update, remove, hydrated } = useLocalStore<Ebs>(
-    EBS_STORAGE_KEY,
-    SEED_EBS
-  );
+  const {
+    items: rawItems,
+    setItems,
+    add,
+    update,
+    remove,
+    removeMany,
+    hydrated,
+  } = useLocalStore<Ebs>(EBS_STORAGE_KEY, SEED_EBS);
+
+  // Coerce legacy records (added before `tipo` existed) so all downstream
+  // code can rely on tipo being present.
+  const items = useMemo(() => rawItems.map(normalizeEbs), [rawItems]);
 
   const [search, setSearch] = useState("");
   const [carrierFilter, setCarrierFilter] = useState("");
@@ -121,18 +162,34 @@ export default function EbsTab() {
       );
     });
     return filtered.slice().sort((a, b) => {
-      // Carrier alphabetical, then traffic, then vigente before reemplazado,
-      // then most recent validFrom first within ties.
+      // Carrier alphabetical, then traffic, then Dry before Reefer, then
+      // vigente before soon before reemplazado, then most recent validFrom.
       const carrierCmp = a.carrier.localeCompare(b.carrier);
       if (carrierCmp !== 0) return carrierCmp;
       const trafficCmp = a.traffic.localeCompare(b.traffic);
       if (trafficCmp !== 0) return trafficCmp;
+      const tipoCmp = a.tipo.localeCompare(b.tipo);
+      if (tipoCmp !== 0) return tipoCmp;
       const sa = STATUS_ORDER[rowMeta.get(a.id)?.status ?? "vigente"];
       const sb = STATUS_ORDER[rowMeta.get(b.id)?.status ?? "vigente"];
       if (sa !== sb) return sa - sb;
       return b.validFrom.localeCompare(a.validFrom);
     });
   }, [items, search, carrierFilter, rowMeta]);
+
+  const visibleIds = useMemo(
+    () => sortedFiltered.map((r) => r.id),
+    [sortedFiltered]
+  );
+  const { selected, toggleOne, toggleAllVisible, clear, allVisibleSelected } =
+    useBulkSelection(visibleIds);
+
+  const handleBulkDelete = () => {
+    const ids = Array.from(selected);
+    removeMany(ids);
+    clear();
+    toast.success(`${ids.length} EBS eliminado${ids.length === 1 ? "" : "s"}`);
+  };
 
   const openNew = () => {
     setDraft(emptyDraft);
@@ -144,18 +201,20 @@ export default function EbsTab() {
   const openEdit = (ebs: Ebs) => {
     const { id: _id, ...rest } = ebs;
     void _id;
-    setDraft({ ...rest, amountPer40Reefer: rest.amountPer40Reefer ?? 0 });
+    setDraft({ ...rest, tipo: rest.tipo ?? "Dry" });
     setEditingId(ebs.id);
     setShowIntake(false);
     setShowForm(true);
   };
 
   const handleExtracted = (data: Record<string, unknown>) => {
+    const tipoRaw = toStr(data.tipo).trim().toLowerCase();
+    const tipo: EbsTipo = tipoRaw === "reefer" ? "Reefer" : "Dry";
     setDraft({
       carrier: toStr(data.carrier),
       traffic: toStr(data.traffic),
+      tipo,
       amountPerTEU: toNumber(data.amountPerTEU),
-      amountPer40Reefer: toNumber(data.amountPer40Reefer),
       validFrom: toStr(data.validFrom),
       validTo: toStr(data.validTo),
       notes: toStr(data.notes),
@@ -174,39 +233,32 @@ export default function EbsTab() {
     setItems((prev) => {
       const next = prev.slice();
       for (const row of rows) {
+        const tipoRaw = toStr(row.tipo).trim().toLowerCase();
         const candidate: Ebs = {
           id: uid("ebs"),
           carrier: toStr(row.carrier),
           traffic: toStr(row.traffic),
+          tipo: tipoRaw === "reefer" ? "Reefer" : "Dry",
           amountPerTEU: toNumber(row.amountPerTEU),
-          amountPer40Reefer: toNumber(row.amountPer40Reefer),
           validFrom: toStr(row.validFrom),
           validTo: toStr(row.validTo),
           notes: toStr(row.notes),
         };
         if (!candidate.carrier || !candidate.traffic) {
-          // skip rows without enough info to slot
           next.push(candidate);
           added++;
           continue;
         }
         const sameSlotIdx = next.findIndex(
-          (e) =>
-            carriersMatch(e.carrier, candidate.carrier) &&
-            trafficKey(e.traffic) === trafficKey(candidate.traffic) &&
-            e.validFrom === candidate.validFrom
+          (e) => sameSlot(e, candidate) && e.validFrom === candidate.validFrom
         );
         if (sameSlotIdx >= 0) {
-          // Same carrier+traffic+validFrom → real duplicate, refresh in place
+          // Same slot AND same validFrom → duplicate, refresh in place
           next[sameSlotIdx] = { ...candidate, id: next[sameSlotIdx]!.id };
           updated++;
           continue;
         }
-        const differentVigencia = next.find(
-          (e) =>
-            carriersMatch(e.carrier, candidate.carrier) &&
-            trafficKey(e.traffic) === trafficKey(candidate.traffic)
-        );
+        const differentVigencia = next.find((e) => sameSlot(e, candidate));
         if (differentVigencia) newPeriod++;
         next.push(candidate);
         added++;
@@ -242,20 +294,18 @@ export default function EbsTab() {
     const slot = findSameSlot(items, draft);
     if (slot) {
       if (slot.validFrom === draft.validFrom) {
-        // Real duplicate — same carrier+traffic+validFrom
         const ok = confirm(
-          `Ya existe un EBS de ${slot.carrier} para "${slot.traffic}" con la misma vigencia (${formatDateCl(slot.validFrom) || "sin fecha"}). ¿Querés actualizar el existente con estos valores?`
+          `Ya existe un EBS ${slot.tipo} de ${slot.carrier} para "${slot.traffic}" con la misma vigencia (${formatDateCl(slot.validFrom) || "sin fecha"}). ¿Querés actualizar el existente con estos valores?`
         );
-        if (!ok) return; // user wants to keep editing — do not save
+        if (!ok) return;
         update(slot.id, draft);
         toast.success("EBS existente actualizado");
         setShowForm(false);
         setEditingId(null);
         return;
       }
-      // Same carrier+traffic, distinct validFrom → new period, save with notice
       toast(
-        `Ya existe un EBS de ${slot.carrier} para "${slot.traffic}" vigente desde ${formatDateCl(slot.validFrom) || "sin fecha"}. Se creará un nuevo registro con la vigencia indicada.`,
+        `Ya existe un EBS ${slot.tipo} de ${slot.carrier} para "${slot.traffic}" vigente desde ${formatDateCl(slot.validFrom) || "sin fecha"}. Se creará un nuevo registro con la vigencia indicada.`,
         { duration: 6000, icon: "ℹ️" }
       );
     }
@@ -363,6 +413,19 @@ export default function EbsTab() {
               </datalist>
             </label>
             <label className="flex flex-col gap-1 text-sm">
+              Tipo
+              <select
+                value={draft.tipo}
+                onChange={(e) =>
+                  setDraft({ ...draft, tipo: e.target.value as EbsTipo })
+                }
+                className="border border-gray-200 rounded-md p-2 h-10 bg-white"
+              >
+                <option value="Dry">Dry</option>
+                <option value="Reefer">Reefer</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-sm">
               USD por TEU
               <input
                 type="number"
@@ -372,44 +435,6 @@ export default function EbsTab() {
                 }
                 className="border border-gray-200 rounded-md p-2 h-10"
               />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              40&apos; Reefer (USD)
-              <input
-                type="number"
-                value={
-                  (draft.amountPer40Reefer ?? 0) > 0
-                    ? draft.amountPer40Reefer
-                    : draft.amountPerTEU * 2
-                }
-                disabled={(draft.amountPer40Reefer ?? 0) === 0}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    amountPer40Reefer: Number(e.target.value),
-                  })
-                }
-                className={`border rounded-md p-2 h-10 ${
-                  (draft.amountPer40Reefer ?? 0) === 0
-                    ? "bg-gray-50 text-gray-500 border-gray-200"
-                    : "border-gray-200"
-                }`}
-              />
-              <label className="flex items-center gap-1 text-xs text-gray-600 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={(draft.amountPer40Reefer ?? 0) === 0}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      amountPer40Reefer: e.target.checked
-                        ? 0
-                        : draft.amountPerTEU * 2,
-                    })
-                  }
-                />
-                Mismo valor que 40&apos; Dry
-              </label>
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Vigente desde
@@ -448,17 +473,32 @@ export default function EbsTab() {
         </div>
       )}
 
+      <BulkActionsBar
+        count={selected.size}
+        onDelete={handleBulkDelete}
+        onClear={clear}
+        itemLabel="EBS"
+      />
+
       <div className="bg-white rounded-lg shadow overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
+              <th className="px-3 py-3 w-10">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleAllVisible}
+                  aria-label="Seleccionar todos"
+                />
+              </th>
               {[
                 "Naviera",
                 "Tráfico",
+                "Tipo",
                 "USD/TEU",
                 "20' equiv.",
                 "40' equiv.",
-                "40' Reefer",
                 "Válido desde",
                 "Válido hasta",
                 "Vigencia",
@@ -477,15 +517,21 @@ export default function EbsTab() {
           <tbody className="bg-white divide-y divide-gray-200">
             {sortedFiltered.map((r) => {
               const meta = rowMeta.get(r.id);
-              const reefer40 = effective40ReeferRate(r);
-              const reeferIsCustom =
-                typeof r.amountPer40Reefer === "number" && r.amountPer40Reefer > 0;
+              const isReefer = r.tipo === "Reefer";
               return (
               <tr
                 key={r.id}
                 className="text-sm"
                 style={{ backgroundColor: carrierColor(r.carrier) }}
               >
+                <td className="px-3 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(r.id)}
+                    onChange={() => toggleOne(r.id)}
+                    aria-label={`Seleccionar ${r.carrier} ${r.traffic} ${r.tipo}`}
+                  />
+                </td>
                 <td className="px-4 py-3 font-medium whitespace-nowrap">
                   <div className="flex items-center gap-2">
                     {meta?.hasOverlap && (
@@ -500,25 +546,26 @@ export default function EbsTab() {
                   </div>
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">{r.traffic}</td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  <TipoBadge tipo={r.tipo} />
+                </td>
                 <td className="px-4 py-3 whitespace-nowrap font-medium">
                   ${r.amountPerTEU}/TEU
                 </td>
-                <td className="px-4 py-3 whitespace-nowrap">${r.amountPerTEU}</td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  {isReefer ? (
+                    <span
+                      className="text-gray-400"
+                      title="Reefer 20' no existe en Chile"
+                    >
+                      —
+                    </span>
+                  ) : (
+                    `$${r.amountPerTEU}`
+                  )}
+                </td>
                 <td className="px-4 py-3 whitespace-nowrap">
                   ${r.amountPerTEU * 2}
-                </td>
-                <td
-                  className="px-4 py-3 whitespace-nowrap"
-                  title={
-                    reeferIsCustom
-                      ? "Valor custom para 40' Reefer"
-                      : "Igual al 40' Dry (sin tarifa custom)"
-                  }
-                >
-                  ${reefer40}
-                  {reeferIsCustom && (
-                    <span className="ml-1 text-xs text-blue-700">●</span>
-                  )}
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap text-gray-600">
                   {formatDateCl(r.validFrom)}

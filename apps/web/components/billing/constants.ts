@@ -142,19 +142,27 @@ export type Rate = {
   notes: string;
 };
 
+export type EbsTipo = "Dry" | "Reefer";
+
 export type Ebs = {
   id: string;
   carrier: string;
   traffic: string;
+  // Reefer EBS rates often differ from Dry — they live in separate rows so
+  // each can have its own validity window and amount. Legacy records (added
+  // before this field existed) should be coerced to "Dry" by the reader.
+  tipo: EbsTipo;
   amountPerTEU: number;
-  // Custom 40' Reefer rate. 0 means "same as 40' Dry" (= amountPerTEU * 2).
-  // Optional in the type because legacy localStorage records may lack the
-  // field; readers should treat undefined and 0 the same way.
-  amountPer40Reefer?: number;
   validFrom: string;
   validTo: string;
   notes: string;
 };
+
+// Coerces legacy Ebs records (saved before `tipo` existed) so reads always
+// produce a fully-typed value. New seeds and saves include `tipo` explicitly.
+export function normalizeEbs(e: Ebs): Ebs {
+  return { ...e, tipo: e.tipo ?? "Dry" };
+}
 
 export const SEED_RATES: Rate[] = [
   {
@@ -329,8 +337,8 @@ export const SEED_EBS: Ebs[] = [
     id: "seed-ebs-oocl-cl-neu",
     carrier: "OOCL",
     traffic: "Chile - Norte de Europa",
+    tipo: "Dry",
     amountPerTEU: 126,
-    amountPer40Reefer: 0,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "Cubre Rotterdam, Hamburg, Antwerp, London, Copenhagen, Klaipeda, etc.",
@@ -339,8 +347,8 @@ export const SEED_EBS: Ebs[] = [
     id: "seed-ebs-hapag-cl-neu",
     carrier: "HAPAG",
     traffic: "Chile - Norte de Europa",
+    tipo: "Dry",
     amountPerTEU: 160,
-    amountPer40Reefer: 0,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "Cubre Grangemouth, Rotterdam, Hamburg, etc.",
@@ -349,8 +357,8 @@ export const SEED_EBS: Ebs[] = [
     id: "seed-ebs-cma-cl-neu",
     carrier: "CMA-CGM",
     traffic: "Chile - Norte de Europa",
+    tipo: "Dry",
     amountPerTEU: 160,
-    amountPer40Reefer: 0,
     validFrom: "2026-04-01",
     validTo: "2026-06-30",
     notes: "Incluido en all-in HCL",
@@ -359,28 +367,24 @@ export const SEED_EBS: Ebs[] = [
 
 // ===== EBS row helpers =====
 
-// Effective 40' Reefer rate per TEU. amountPer40Reefer overrides when > 0;
-// otherwise the row uses 2× the per-TEU rate (i.e., regular 40' Dry).
-export function effective40ReeferRate(ebs: Ebs): number {
-  const custom = ebs.amountPer40Reefer;
-  if (typeof custom === "number" && custom > 0) return custom;
-  return ebs.amountPerTEU * 2;
-}
-
-export type EbsRowStatus = "vigente" | "reemplazado";
+// vigente   = row is the most recent (newest validFrom) for its slot
+//             and either has no validTo or validTo is more than 30 days away
+// soon      = row is the most recent for its slot but expires within 30 days
+// reemplazado = there exists a newer record for the same slot
+export type EbsRowStatus = "vigente" | "soon" | "reemplazado";
 
 export type EbsRowMeta = {
   status: EbsRowStatus;
   hasOverlap: boolean;
 };
 
-function ebsSlotKey(e: Pick<Ebs, "carrier" | "traffic">): string {
-  return `${e.carrier.trim().toLowerCase().replace(/[\s-]+/g, "")}|${e.traffic.trim().toLowerCase()}`;
+// A "slot" is the unique combination an invoicing lookup can target:
+// carrier + traffic + tipo. Reefer and Dry are independent slots so a
+// vigente Dry and a vigente Reefer can coexist for the same carrier+traffic.
+function ebsSlotKey(e: Pick<Ebs, "carrier" | "traffic" | "tipo">): string {
+  return `${e.carrier.trim().toLowerCase().replace(/[\s-]+/g, "")}|${e.traffic.trim().toLowerCase()}|${e.tipo ?? "Dry"}`;
 }
 
-// True if two date ranges overlap (treating empty validTo as +infinity and
-// empty validFrom as -infinity). validFrom/validTo are ISO yyyy-mm-dd strings,
-// so lexicographic comparison matches chronological order.
 function rangesOverlap(a: Ebs, b: Ebs): boolean {
   const aStart = a.validFrom || "";
   const aEnd = a.validTo || "9999-12-31";
@@ -389,10 +393,22 @@ function rangesOverlap(a: Ebs, b: Ebs): boolean {
   return aStart <= bEnd && bStart <= aEnd;
 }
 
+// Days between today (00:00 local) and an ISO yyyy-mm-dd string. Negative if
+// the date is in the past. Returns Infinity for empty/unparseable inputs so
+// the caller can treat "no validTo" as "very far away".
+function daysUntil(iso: string): number {
+  if (!iso) return Number.POSITIVE_INFINITY;
+  const end = new Date(iso);
+  if (Number.isNaN(end.getTime())) return Number.POSITIVE_INFINITY;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.floor((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
+
 // For each EBS row, computes whether it is the currently-vigente record for
-// its (carrier, traffic) slot — defined as the row with the most recent
-// validFrom — and whether it overlaps in time with any other row in the
-// same slot. Returns a Map keyed by row id.
+// its (carrier, traffic, tipo) slot — defined as the row with the most recent
+// validFrom — and whether it overlaps in time with any other row in the same
+// slot. Returns a Map keyed by row id.
 export function computeEbsRowMeta(items: Ebs[]): Map<string, EbsRowMeta> {
   const groups = new Map<string, Ebs[]>();
   for (const e of items) {
@@ -406,7 +422,14 @@ export function computeEbsRowMeta(items: Ebs[]): Map<string, EbsRowMeta> {
       .slice()
       .sort((a, b) => b.validFrom.localeCompare(a.validFrom));
     sorted.forEach((e, idx) => {
-      out.set(e.id, { status: idx === 0 ? "vigente" : "reemplazado", hasOverlap: false });
+      let status: EbsRowStatus;
+      if (idx !== 0) {
+        status = "reemplazado";
+      } else {
+        const days = daysUntil(e.validTo);
+        status = days < 30 ? "soon" : "vigente";
+      }
+      out.set(e.id, { status, hasOverlap: false });
     });
     for (let i = 0; i < group.length; i++) {
       for (let j = i + 1; j < group.length; j++) {
@@ -418,6 +441,25 @@ export function computeEbsRowMeta(items: Ebs[]): Map<string, EbsRowMeta> {
     }
   }
   return out;
+}
+
+// Resolves the EBS row that should price a specific carrier + tipo
+// combination. Returns the most recent matching row (validFrom desc) or
+// undefined when no match exists. NOTE: there is intentionally no Dry-fallback
+// for Reefer cargo — if the user hasn't entered a Reefer EBS for the slot,
+// invoicing should leave it as TBD.
+export function findEbsForBilling(
+  items: Ebs[],
+  carrier: string,
+  tipo: EbsTipo
+): Ebs | undefined {
+  const matches = items.filter(
+    (e) => carriersMatch(e.carrier, carrier) && (e.tipo ?? "Dry") === tipo
+  );
+  if (matches.length === 0) return undefined;
+  return matches
+    .slice()
+    .sort((a, b) => b.validFrom.localeCompare(a.validFrom))[0];
 }
 
 export type ValidityStatus = "expired" | "soon" | "active";

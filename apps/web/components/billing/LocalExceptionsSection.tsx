@@ -1,8 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import toast from "react-hot-toast";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
+import { useBulkSelection } from "./useBulkSelection";
+import BulkActionsBar from "./BulkActionsBar";
 import RateIntake from "./RateIntake";
 import {
   CUSTOMER_COLORS,
@@ -78,10 +81,11 @@ function Chips({ value }: { value: string }) {
 }
 
 export default function LocalExceptionsSection() {
-  const { items, add, update, remove, hydrated } = useLocalStore<LocalException>(
-    LOCAL_EXCEPTIONS_STORAGE_KEY,
-    SEED_LOCAL_EXCEPTIONS
-  );
+  const { items, add, update, remove, removeMany, hydrated } =
+    useLocalStore<LocalException>(
+      LOCAL_EXCEPTIONS_STORAGE_KEY,
+      SEED_LOCAL_EXCEPTIONS
+    );
 
   const [search, setSearch] = useState("");
   const [customerFilter, setCustomerFilter] = useState("");
@@ -117,6 +121,19 @@ export default function LocalExceptionsSection() {
       );
     });
   }, [items, search, customerFilter, carrierFilter]);
+
+  const visibleIds = useMemo(() => filtered.map((r) => r.id), [filtered]);
+  const { selected, toggleOne, toggleAllVisible, clear, allVisibleSelected } =
+    useBulkSelection(visibleIds);
+
+  const handleBulkDelete = () => {
+    const ids = Array.from(selected);
+    removeMany(ids);
+    clear();
+    toast.success(
+      `${ids.length} excepción${ids.length === 1 ? "" : "es"} eliminada${ids.length === 1 ? "" : "s"}`
+    );
+  };
 
   const openNew = () => {
     setDraft(emptyDraft);
@@ -449,10 +466,25 @@ export default function LocalExceptionsSection() {
         </div>
       )}
 
+      <BulkActionsBar
+        count={selected.size}
+        onDelete={handleBulkDelete}
+        onClear={clear}
+        itemLabel="excepción"
+      />
+
       <div className="bg-white rounded-lg shadow overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
+              <th className="px-3 py-3 w-10">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleAllVisible}
+                  aria-label="Seleccionar todas"
+                />
+              </th>
               {[
                 "Cliente",
                 "Naviera",
@@ -489,6 +521,14 @@ export default function LocalExceptionsSection() {
                   style={bg ? { backgroundColor: bg } : undefined}
                   className="text-sm"
                 >
+                  <td className="px-3 py-2 w-10 align-top">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(r.id)}
+                      onChange={() => toggleOne(r.id)}
+                      aria-label={`Seleccionar excepción ${r.customer} ${r.carrier}`}
+                    />
+                  </td>
                   <td className="px-4 py-2 align-top">
                     <div className="font-medium whitespace-nowrap">{r.customer}</div>
                     {r.includedBrands.trim() && (

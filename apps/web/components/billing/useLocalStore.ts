@@ -11,6 +11,7 @@ export function useLocalStore<T>(key: string, seed: T[]): {
   addMany: (items: T[]) => void;
   update: (id: string, patch: Partial<T>) => void;
   remove: (id: string) => void;
+  removeMany: (ids: string[]) => void;
   hydrated: boolean;
 } {
   const [items, setItemsState] = useState<T[]>(seed);
@@ -68,5 +69,13 @@ export function useLocalStore<T>(key: string, seed: T[]): {
       prev.filter((it) => (it as unknown as { id: string }).id !== id)
     );
 
-  return { items, setItems, add, addMany, update, remove, hydrated };
+  const removeMany = (ids: string[]) => {
+    if (ids.length === 0) return;
+    const set = new Set(ids);
+    persist((prev) =>
+      prev.filter((it) => !set.has((it as unknown as { id: string }).id))
+    );
+  };
+
+  return { items, setItems, add, addMany, update, remove, removeMany, hydrated };
 }

@@ -30,6 +30,7 @@ const EBS_SYSTEM = `Sos un extractor de EBS (Emergency Bunker Surcharge) para fl
 
 CONTEXTO IMPORTANTE:
 - El EBS se expresa SIEMPRE por TEU (20' = 1 TEU, 40' = 2 TEU). Si el input da el valor por contenedor de 40', dividilo por 2.
+- Cada item tiene un TIPO: "Dry" o "Reefer". Si el input distingue tarifas distintas para Dry y Reefer (ej: "Reefer +20%" o columnas separadas), generá DOS items separados — uno por cada tipo, con su propio amountPerTEU. Si el input no menciona reefer, asumí "Dry".
 - El EBS aplica por REGIÓN/TRÁFICO, no por puerto específico. La lista CANÓNICA de regiones es: "Chile - Norte de Europa", "Chile - USA", "Chile - Canadá", "Chile - Asia", "Chile - Intraamérica", "Chile - Mediterráneo", "Chile - Oceanía". Mapeá siempre al valor canónico — no inventes regiones nuevas.
 - Ejemplos de mapeo: "Europa", "NEUR", "Norte EU", "Rotterdam/Hamburg" → "Chile - Norte de Europa"; "USA", "NA", "USEC", "USWC" → "Chile - USA"; "Canadá", "Vancouver", "Montreal" → "Chile - Canadá"; "Asia", "FE", "Far East", "Shanghai", "Busan" → "Chile - Asia"; "Sudamérica", "Brasil", "Perú", "Colombia" → "Chile - Intraamérica"; "Med", "Mediterráneo", "Italia", "España" → "Chile - Mediterráneo"; "Oceanía", "Australia", "NZ" → "Chile - Oceanía".
 - Las fechas suelen estar en formato dd/mm o dd-mm. Si no hay año explícito, asumí el año actual. "onwards" o similar significa que validTo queda vacío ("").
@@ -45,13 +46,13 @@ Devolvé SOLO un ARRAY JSON con uno o más objetos. Usá "" para strings faltant
 
 [
   {
-    "carrier": string,            // naviera (OOCL, HAPAG, CMA-CGM, etc.)
-    "traffic": string,            // región/tráfico canónico (ej: "Chile - Norte de Europa")
-    "amountPerTEU": number,       // monto en USD por TEU (= 40' Dry / 2)
-    "amountPer40Reefer": number,  // monto USD por contenedor 40' Reefer. 0 si NO hay tarifa específica de reefer (se usa 2× amountPerTEU). Solo poné un valor distinto a 0 cuando el input declare explícitamente un valor distinto para reefer 40'.
-    "validFrom": string,          // YYYY-MM-DD
-    "validTo": string,            // YYYY-MM-DD ("" si dice "onwards" o no tiene fin)
-    "notes": string               // observación (unidad original si fue /ctr, exclusiones, etc.)
+    "carrier": string,         // naviera (OOCL, HAPAG, CMA-CGM, etc.)
+    "traffic": string,         // región/tráfico canónico (ej: "Chile - Norte de Europa")
+    "tipo": "Dry" | "Reefer",  // tipo de carga al que aplica esta tarifa
+    "amountPerTEU": number,    // monto en USD por TEU (= valor 40' / 2)
+    "validFrom": string,       // YYYY-MM-DD
+    "validTo": string,         // YYYY-MM-DD ("" si dice "onwards" o no tiene fin)
+    "notes": string            // observación (unidad original si fue /ctr, exclusiones, etc.)
   }
 ]
 
@@ -705,8 +706,11 @@ function MultiResultPreview({
                 />
                 <span className="text-sm font-medium">
                   {strField(row, "carrier") || "(sin naviera)"} —{" "}
-                  {strField(row, "traffic") || "(sin tráfico)"} — $
-                  {numField(row, "amountPerTEU")}/TEU
+                  {strField(row, "traffic") || "(sin tráfico)"} —{" "}
+                  {strField(row, "tipo").toLowerCase() === "reefer"
+                    ? "Reefer"
+                    : "Dry"}{" "}
+                  — ${numField(row, "amountPerTEU")}/TEU
                 </span>
               </label>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
@@ -729,23 +733,27 @@ function MultiResultPreview({
                   />
                 </label>
                 <label className="flex flex-col gap-1">
+                  Tipo
+                  <select
+                    value={
+                      strField(row, "tipo").toLowerCase() === "reefer"
+                        ? "Reefer"
+                        : "Dry"
+                    }
+                    onChange={(e) => onUpdateField(idx, "tipo", e.target.value)}
+                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                  >
+                    <option value="Dry">Dry</option>
+                    <option value="Reefer">Reefer</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1">
                   USD por TEU
                   <input
                     type="number"
                     value={numField(row, "amountPerTEU")}
                     onChange={(e) =>
                       onUpdateField(idx, "amountPerTEU", Number(e.target.value))
-                    }
-                    className="border border-gray-200 rounded p-1.5 h-8 bg-white"
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  40&apos; Reefer (0 = igual 40&apos; Dry)
-                  <input
-                    type="number"
-                    value={numField(row, "amountPer40Reefer")}
-                    onChange={(e) =>
-                      onUpdateField(idx, "amountPer40Reefer", Number(e.target.value))
                     }
                     className="border border-gray-200 rounded p-1.5 h-8 bg-white"
                   />

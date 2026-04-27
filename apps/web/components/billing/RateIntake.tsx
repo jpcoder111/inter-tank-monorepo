@@ -133,9 +133,9 @@ function cleanCsvText(raw: string): string {
 }
 
 // Hard cap so Claude's response stays well under max_tokens. Empirically a
-// row of EBS data parses to ~80 tokens; 50 rows keeps room for the JSON
-// scaffolding plus a safety margin.
-const EXCEL_MAX_ROWS = 50;
+// row of EBS data parses to ~80 tokens; 150 rows leaves headroom under the
+// 4096 max_tokens cap on the API route.
+const EXCEL_MAX_ROWS = 150;
 
 type ExcelReadResult = {
   text: string;

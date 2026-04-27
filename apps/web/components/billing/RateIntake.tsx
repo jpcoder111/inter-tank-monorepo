@@ -4,6 +4,7 @@ import { Fragment, useRef, useState } from "react";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
+import { isArgentinianOrigin } from "./constants";
 
 type IntakeType = "rate" | "ebs" | "local_std" | "local_exception";
 type Mode = "choose" | "image" | "excel" | "manual";
@@ -59,6 +60,59 @@ Reglas específicas:
 - **Descuento por insulado**: si el Excel menciona "descuento de USD X si la carga va insulada", aplicá discountInsulated en TODAS las tarifas Dry del agente. additionalNotes debe describir la condición ("Descuento aplica solo si carga insulada") en cada fila que tenga el descuento.
 
 NUNCA dejes una fila con 0 cuando le correspondería el valor del agente. Si el agente cobra Thermal Liner Chile 200/300, ese par 200/300 va en TODAS las filas del agente — repetido textualmente.
+
+${STRICT_RESPONSE_RULES_NO_LIMIT}`;
+
+// One-shot prompt that resolves the agent-wide additional costs from a notes
+// blob. The chunked extraction calls this ONCE upfront (not per chunk) and
+// then applies the resolved values per row in code based on each row's POL.
+// Mendoza values stay 0 if the input only mentions Chile — we don't infer.
+const PREAMBLE_RESOLUTION_SYSTEM = `Sos un extractor de costos adicionales de tarifas de fletes marítimos. El input contiene notas sobre Thermal Liner / Insulado, FCA Haulage / transporte terrestre desde Mendoza, y descuento por carga insulada.
+
+Devolvé SOLO un objeto JSON con los 7 campos siguientes. Si el input NO menciona un valor específico, devolvé 0 — NO inventes ni copies entre Chile y Mendoza.
+
+{
+  "thermalLinerChile20": number,    // USD para Thermal Liner desde Chile, 20'
+  "thermalLinerChile40": number,    // mismo para 40'
+  "thermalLinerMendoza20": number,  // USD para Thermal Liner desde Mendoza, 20'
+  "thermalLinerMendoza40": number,  // mismo para 40'
+  "fcaHaulageMendoza20": number,    // FCA Haulage / trucking desde Mendoza, 20'
+  "fcaHaulageMendoza40": number,    // mismo para 40'
+  "discountInsulated": number       // descuento USD si la carga va insulada (aplica a tarifas dry)
+}
+
+Si el input solo menciona Thermal Liner Chile y nada para Mendoza, los Mendoza quedan en 0 (NO asumir igual a Chile). Mismo principio inverso.
+
+IMPORTANTE: Respondé SOLO con el objeto JSON, sin backticks de markdown, sin texto adicional.`;
+
+// Slim per-chunk prompt: NO menciona thermal/haulage/discount. El frontend
+// los rellena después usando los valores ya resueltos por
+// PREAMBLE_RESOLUTION_SYSTEM y la detección de origen por POL. Esta versión
+// pide explícitamente el campo POL para que el código pueda elegir
+// Chile vs Mendoza.
+const RATE_CHUNK_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input contiene una tabla con tarifas (una por fila).
+
+Extrae las tarifas. Devolvé un JSON ARRAY con un objeto por cada tarifa/fila. Si el input no es una tabla o no contiene tarifas, devolvé un array vacío.
+
+[
+  {
+    "agent": string,         // agente logístico (IWS, Van Moer, Asstra, HCL, Scan, CCL, BULLET u otro)
+    "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, etc.)
+    "route": string,         // ruta o puerto de destino
+    "pol": string,           // puerto de origen / Port Of Loading. Mirá columnas tipo POL/Origin/Origen/Loading. Devolvé el nombre tal cual aparece en el input ("Mendoza", "Valparaíso", "San Antonio", "Buenos Aires", etc.). Vacío si no se puede determinar de la fila.
+    "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
+    "sf": number,            // Sea Freight USD por contenedor
+    "blFee": number,         // BL fee USD por BL
+    "af": number,            // Agency fee por contenedor
+    "afMax": number,         // AF máximo
+    "flexiArg": number,      // cargo Flexi ARG
+    "validFrom": string,     // YYYY-MM-DD
+    "validTo": string,       // YYYY-MM-DD
+    "notes": string          // observación relevante
+  }
+]
+
+Usá "" para strings faltantes y 0 para números faltantes. NO incluyas thermalLiner, fcaHaulage ni discountInsulated — el frontend rellena esos campos después.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -189,7 +243,10 @@ function csvEscapeCell(s: string): string {
 // repeating the header line at the top of every chunk so each independent API
 // call has the same column context. "Hoja: <name>" markers and blank lines are
 // dropped — the returned chunks are pure header + data CSV.
-const CHUNK_DATA_ROWS = 30;
+// 15 keeps each Claude call short enough that single-call truncation is
+// rare even on rate-heavy formats. Lower than this just multiplies API
+// round-trips for negligible gain.
+const CHUNK_DATA_ROWS = 15;
 
 // Lines mentioning these keywords typically describe agent-wide additional
 // costs (Thermal Liner, FCA Haulage, insulated discount, etc.) that live in
@@ -553,6 +610,18 @@ export default function RateIntake({
   const [failedChunkInfo, setFailedChunkInfo] = useState<
     Array<{ index: number; content: string }> | null
   >(null);
+  // Cached resolved additional costs from the most recent submitChunked run.
+  // retryFailedChunks reuses these so recovered rows pick the same
+  // Chile/Mendoza values that the originally-successful chunks did.
+  const [retryResolvedCosts, setRetryResolvedCosts] = useState<{
+    thermalLinerChile20: number;
+    thermalLinerChile40: number;
+    thermalLinerMendoza20: number;
+    thermalLinerMendoza40: number;
+    fcaHaulageMendoza20: number;
+    fcaHaulageMendoza40: number;
+    discountInsulated: number;
+  } | null>(null);
   // Raw Claude response when JSON parse fails — user can edit and retry
   const [rawResponse, setRawResponse] = useState<string | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -582,6 +651,7 @@ export default function RateIntake({
     setRawResponse(null);
     setChunkProgress(null);
     setFailedChunkInfo(null);
+    setRetryResolvedCosts(null);
   };
 
   // Multi-row mode is enabled when the parent passed onExtractedMany. EBS uploads
@@ -683,12 +753,13 @@ export default function RateIntake({
   };
 
   const callExtractApi = async (
-    content: string | ContentPayload
+    content: string | ContentPayload,
+    systemOverride?: string
   ): Promise<{ rows: Record<string, unknown>[]; partial: boolean }> => {
     const res = await fetch("/api/billing/extract-rate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ system, content }),
+      body: JSON.stringify({ system: systemOverride ?? system, content }),
     });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
@@ -720,7 +791,8 @@ export default function RateIntake({
   // chunks" action so retry semantics stay consistent.
   const processChunks = async (
     items: Array<{ index: number; content: string }>,
-    totalForUi: number
+    totalForUi: number,
+    systemOverride?: string
   ) => {
     const rows: Record<string, unknown>[] = [];
     const failed: Array<{ index: number; content: string }> = [];
@@ -737,7 +809,7 @@ export default function RateIntake({
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
         }
         try {
-          const result = await callExtractApi(item.content);
+          const result = await callExtractApi(item.content, systemOverride);
           rows.push(...result.rows);
           if (result.partial) partial = true;
           success = true;
@@ -764,13 +836,113 @@ export default function RateIntake({
       };
     });
 
+  // Type-aware system override for chunked calls. Rate Excels go through the
+  // slim per-chunk prompt (no thermal/haulage fields — code applies them);
+  // EBS chunks keep the regular EBS_SYSTEM.
+  const chunkSystemOverride: string | undefined =
+    type === "rate" ? RATE_CHUNK_SYSTEM : undefined;
+
+  type ResolvedAdditionalCosts = {
+    thermalLinerChile20: number;
+    thermalLinerChile40: number;
+    thermalLinerMendoza20: number;
+    thermalLinerMendoza40: number;
+    fcaHaulageMendoza20: number;
+    fcaHaulageMendoza40: number;
+    discountInsulated: number;
+  };
+
+  const ZERO_RESOLVED: ResolvedAdditionalCosts = {
+    thermalLinerChile20: 0,
+    thermalLinerChile40: 0,
+    thermalLinerMendoza20: 0,
+    thermalLinerMendoza40: 0,
+    fcaHaulageMendoza20: 0,
+    fcaHaulageMendoza40: 0,
+    discountInsulated: 0,
+  };
+
+  // Single upfront call to resolve the agent-wide costs from the preamble
+  // notes. Returns all-zero when there's no preamble or the call fails — in
+  // that case rows just get 0s, same behaviour as the prior flow.
+  const resolvePreambleCosts = async (
+    preamble: string
+  ): Promise<ResolvedAdditionalCosts> => {
+    if (!preamble.trim()) return ZERO_RESOLVED;
+    try {
+      const result = await callExtractApi(
+        `Notas del Excel:\n\n${preamble}`,
+        PREAMBLE_RESOLUTION_SYSTEM
+      );
+      const obj = (result.rows[0] ?? {}) as Record<string, unknown>;
+      const num = (k: string) => {
+        const v = obj[k];
+        return typeof v === "number" && Number.isFinite(v)
+          ? v
+          : typeof v === "string" && v.trim()
+            ? Number(v.replace(/[^0-9.-]/g, "")) || 0
+            : 0;
+      };
+      return {
+        thermalLinerChile20: num("thermalLinerChile20"),
+        thermalLinerChile40: num("thermalLinerChile40"),
+        thermalLinerMendoza20: num("thermalLinerMendoza20"),
+        thermalLinerMendoza40: num("thermalLinerMendoza40"),
+        fcaHaulageMendoza20: num("fcaHaulageMendoza20"),
+        fcaHaulageMendoza40: num("fcaHaulageMendoza40"),
+        discountInsulated: num("discountInsulated"),
+      };
+    } catch {
+      return ZERO_RESOLVED;
+    }
+  };
+
+  // Fills the additional-cost fields on a row based on the row's POL (or
+  // route as fallback). Mendoza-origin rows get the Mendoza values and
+  // Chile slots stay 0; Chile-origin rows get the Chile values and Mendoza
+  // slots stay 0. discountInsulated applies to every row.
+  const applyAdditionalCosts = (
+    row: Record<string, unknown>,
+    resolved: ResolvedAdditionalCosts
+  ): Record<string, unknown> => {
+    const pol = String(row.pol ?? "");
+    const route = String(row.route ?? "");
+    const isMendoza = isArgentinianOrigin(pol) || isArgentinianOrigin(route);
+    return {
+      ...row,
+      thermalLinerChile20: isMendoza ? 0 : resolved.thermalLinerChile20,
+      thermalLinerChile40: isMendoza ? 0 : resolved.thermalLinerChile40,
+      thermalLinerMendoza20: isMendoza ? resolved.thermalLinerMendoza20 : 0,
+      thermalLinerMendoza40: isMendoza ? resolved.thermalLinerMendoza40 : 0,
+      fcaHaulageMendoza20: isMendoza ? resolved.fcaHaulageMendoza20 : 0,
+      fcaHaulageMendoza40: isMendoza ? resolved.fcaHaulageMendoza40 : 0,
+      discountInsulated: resolved.discountInsulated,
+    };
+  };
+
   const submitChunked = async () => {
     if (!excelText) return;
     const chunks = chunkExcelCsv(excelText);
     const preamble = extractContextPreamble(excelText);
-    const items = buildChunkItems(chunks, preamble);
+    // Step 1: resolve the agent-wide costs ONCE upfront. Skipped for EBS
+    // (no preamble keywords expected there) but the helper itself bails out
+    // when preamble is empty, so the call is cheap to make either way.
+    const resolved =
+      type === "rate"
+        ? await resolvePreambleCosts(preamble)
+        : ZERO_RESOLVED;
+    // For rate chunks we no longer prepend the preamble — Claude doesn't
+    // need it (we're filling those values in code). For EBS we keep the
+    // existing preamble-prepended payload.
+    const items =
+      type === "rate"
+        ? chunks.map((c, i) => ({
+            index: i + 1,
+            content: `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${c}`,
+          }))
+        : buildChunkItems(chunks, preamble);
     setChunkProgress({ current: 0, total: chunks.length });
-    const result = await processChunks(items, chunks.length);
+    const result = await processChunks(items, chunks.length, chunkSystemOverride);
     setChunkProgress(null);
 
     if (result.rows.length === 0) {
@@ -782,7 +954,11 @@ export default function RateIntake({
       );
       return;
     }
-    const cleanRows = result.rows.map(stripTruncatedField);
+    const cleanRows = result.rows
+      .map(stripTruncatedField)
+      .map((r) =>
+        type === "rate" ? applyAdditionalCosts(r, resolved) : r
+      );
     let warning: string | null = null;
     if (result.failed.length > 0) {
       const totalCount = chunks.length;
@@ -791,6 +967,9 @@ export default function RateIntake({
       warning = `Se extrajeron ${cleanRows.length} tarifas. Algún bloque vino truncado — pueden faltar tarifas.`;
     }
     setFailedChunkInfo(result.failed.length > 0 ? result.failed : null);
+    // Stash resolved costs so retryFailedChunks can apply them to recovered
+    // rows without re-running the upfront resolution call.
+    setRetryResolvedCosts(type === "rate" ? resolved : null);
     if (supportsMany) {
       setPreviewRows(cleanRows);
       setPreviewSelected(new Set(cleanRows.map((_, i) => i)));
@@ -806,9 +985,19 @@ export default function RateIntake({
     const items = failedChunkInfo;
     setChunkProgress({ current: 0, total: items.length });
     setError(null);
-    const result = await processChunks(items, items.length);
+    const result = await processChunks(
+      items,
+      items.length,
+      chunkSystemOverride
+    );
     setChunkProgress(null);
-    const cleanRows = result.rows.map(stripTruncatedField);
+    const cleanRows = result.rows
+      .map(stripTruncatedField)
+      .map((r) =>
+        type === "rate" && retryResolvedCosts
+          ? applyAdditionalCosts(r, retryResolvedCosts)
+          : r
+      );
     if (cleanRows.length > 0) {
       // Append rows to the existing preview and pre-select the new ones so
       // they get saved alongside the originals.

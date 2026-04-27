@@ -455,6 +455,51 @@ function aggressiveClean(s: string): string {
 // braces). This is the most robust path for max_tokens-truncated responses —
 // it never invents content, just keeps what's intact. Returns undefined if no
 // `[` was found or no complete objects could be extracted.
+// Token signature for fuzzy CSV-row vs extracted-rate matching. Used by
+// findUnmatchedInputRows to surface input data lines that no extracted
+// rate seems to cover. Returns lower-case alphanumeric tokens of length
+// >= 4 (ignores short connectors and pure-numeric cells).
+function lineSignatureTokens(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[\s,;|/\\()[\]]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 4 && !/^\d+(\.\d+)?$/.test(t))
+  );
+}
+
+// Approximate diff: a CSV input line is "matched" when there exists an
+// extracted rate whose carrier+route token signature is fully contained in
+// the line's tokens. This is a containment check (rate ⊆ line) so a line
+// like "OOCL,Rotterdam,2024-01-15,..." matches a rate
+// {carrier:"OOCL", route:"Rotterdam"}. Lines with no matching rate are
+// returned as "lost" so the user can review them manually.
+function findUnmatchedInputRows(
+  inputDataLines: string[],
+  extracted: Record<string, unknown>[]
+): string[] {
+  const rateSigs = extracted
+    .map((r) =>
+      lineSignatureTokens(`${r.carrier ?? ""} ${r.route ?? ""}`)
+    )
+    .filter((s) => s.size > 0);
+  if (rateSigs.length === 0) return inputDataLines.slice();
+  const unmatched: string[] = [];
+  for (const line of inputDataLines) {
+    const lineTokens = lineSignatureTokens(line);
+    if (lineTokens.size === 0) continue; // pure-noise rows aren't worth flagging
+    const isMatched = rateSigs.some((sig) => {
+      for (const t of sig) {
+        if (!lineTokens.has(t)) return false;
+      }
+      return true;
+    });
+    if (!isMatched) unmatched.push(line);
+  }
+  return unmatched;
+}
+
 function recoverJsonArray(s: string): Record<string, unknown>[] | undefined {
   const start = s.indexOf("[");
   if (start === -1) return undefined;
@@ -622,6 +667,17 @@ export default function RateIntake({
   } | null>(null);
   // Raw Claude response when JSON parse fails — user can edit and retry
   const [rawResponse, setRawResponse] = useState<string | null>(null);
+  // Per-extraction diagnostics: total input rows, chunk breakdown, count
+  // gap, and any input data lines we couldn't match to an extracted rate.
+  // Surfaced in the preview UI when there's a discrepancy so the user can
+  // review the missing rows manually.
+  const [extractionStats, setExtractionStats] = useState<{
+    totalInputRows: number;
+    chunkCount: number;
+    perChunk: Array<{ index: number; inputRows: number; extracted: number }>;
+    totalExtracted: number;
+    unmatchedLines: string[];
+  } | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const excelInput = useRef<HTMLInputElement>(null);
 
@@ -650,6 +706,7 @@ export default function RateIntake({
     setChunkProgress(null);
     setFailedChunkInfo(null);
     setRetryResolvedCosts(null);
+    setExtractionStats(null);
   };
 
   // Multi-row mode is enabled when the parent passed onExtractedMany. EBS uploads
@@ -795,8 +852,12 @@ export default function RateIntake({
     const rows: Record<string, unknown>[] = [];
     const failed: Array<{ index: number; content: string }> = [];
     let partial = false;
+    // Tracks how many rows each chunk yielded — used downstream to spot
+    // chunks that under-extracted relative to their input size.
+    const perChunkExtracted: Array<{ index: number; extracted: number }> = [];
     for (const item of items) {
       let success = false;
+      let extractedThisChunk = 0;
       for (let attempt = 0; attempt < MAX_CHUNK_ATTEMPTS && !success; attempt++) {
         setChunkProgress({
           current: item.index,
@@ -809,6 +870,7 @@ export default function RateIntake({
         try {
           const result = await callExtractApi(item.content, systemOverride);
           rows.push(...result.rows);
+          extractedThisChunk = result.rows.length;
           if (result.partial) partial = true;
           success = true;
         } catch {
@@ -816,8 +878,9 @@ export default function RateIntake({
         }
       }
       if (!success) failed.push(item);
+      perChunkExtracted.push({ index: item.index, extracted: extractedThisChunk });
     }
-    return { rows, failed, partial };
+    return { rows, failed, partial, perChunkExtracted };
   };
 
   const buildChunkItems = (
@@ -974,10 +1037,28 @@ export default function RateIntake({
       .map((r) =>
         type === "rate" ? applyAdditionalCosts(r, resolved) : r
       );
-    // [debug-rate] temp: confirm the cost fields are landing on rows
+    // [debug-rate] temp: confirm the cost fields are landing on rows.
+    // Per-row haulage values printed explicitly so we can see whether
+    // applyAdditionalCosts is actually populating the slot or it's being
+    // overwritten downstream.
     console.log(
       "[debug-rate] first 3 rows after applyAdditionalCosts:",
       cleanRows.slice(0, 3)
+    );
+    console.log(
+      "[debug-rate] haulage Mendoza values on first 5 rows:",
+      cleanRows.slice(0, 5).map((r, i) => ({
+        i,
+        carrier: r.carrier,
+        route: r.route,
+        thermalLinerChile20: r.thermalLinerChile20,
+        thermalLinerChile40: r.thermalLinerChile40,
+        thermalLinerMendoza20: r.thermalLinerMendoza20,
+        thermalLinerMendoza40: r.thermalLinerMendoza40,
+        fcaHaulageMendoza20: r.fcaHaulageMendoza20,
+        fcaHaulageMendoza40: r.fcaHaulageMendoza40,
+        discountInsulated: r.discountInsulated,
+      }))
     );
     let warning: string | null = null;
     if (result.failed.length > 0) {
@@ -990,6 +1071,55 @@ export default function RateIntake({
     // Stash resolved costs so retryFailedChunks can apply them to recovered
     // rows without re-running the upfront resolution call.
     setRetryResolvedCosts(type === "rate" ? resolved : null);
+
+    // Build extraction stats: per-chunk input rows from chunkExcelCsv vs
+    // what each chunk actually returned. Then run a token-based diff
+    // against the original CSV data lines to surface rows Claude appears
+    // to have skipped.
+    const inputDataLines = excelText
+      .split("\n")
+      .filter((l) => l.trim() && !l.trim().startsWith("Hoja:"))
+      .slice(1); // drop header
+    const chunkInputSizes = chunks.map((chunk) => {
+      // Each chunk content = header + N data rows joined by \n. Subtract 1
+      // for the header line.
+      return Math.max(0, chunk.split("\n").length - 1);
+    });
+    const perChunk = result.perChunkExtracted.map((c, i) => ({
+      index: c.index,
+      inputRows: chunkInputSizes[i] ?? 0,
+      extracted: c.extracted,
+    }));
+    const unmatchedLines = findUnmatchedInputRows(inputDataLines, cleanRows);
+    const stats = {
+      totalInputRows: inputDataLines.length,
+      chunkCount: chunks.length,
+      perChunk,
+      totalExtracted: cleanRows.length,
+      unmatchedLines,
+    };
+    setExtractionStats(stats);
+    // [debug-rate] temp: full extraction breakdown for diagnosing missing rows
+    console.log("[debug-rate] extraction stats:", stats);
+    // Compact summary of the missing rows: counts + the actual CSV text
+    // for each line we couldn't match to an extracted rate. The user can
+    // grep this to find what Claude skipped on the source Excel.
+    if (inputDataLines.length !== cleanRows.length) {
+      console.log(
+        `[debug-rate] MISSING ROWS: input=${inputDataLines.length}, extracted=${cleanRows.length}, gap=${inputDataLines.length - cleanRows.length}`
+      );
+      console.log(
+        "[debug-rate] unmatched input lines (full list):",
+        unmatchedLines
+      );
+      console.log(
+        "[debug-rate] extracted routes:",
+        cleanRows.map(
+          (r) => `${String(r.carrier ?? "")} | ${String(r.route ?? "")}`
+        )
+      );
+    }
+
     if (supportsMany) {
       setPreviewRows(cleanRows);
       setPreviewSelected(new Set(cleanRows.map((_, i) => i)));
@@ -1244,6 +1374,7 @@ export default function RateIntake({
               }
             : undefined
         }
+        extractionStats={extractionStats}
       />
     );
   }
@@ -1457,6 +1588,9 @@ function MultiResultPreview({
   error,
   warning,
   warningAction,
+  // EBS preview accepts the prop for symmetry with RateMultiPreview but
+  // doesn't render the stats panel (chunked EBS uses a different shape).
+  extractionStats: _extractionStats,
 }: {
   rows: Record<string, unknown>[];
   selected: Set<number>;
@@ -1468,7 +1602,15 @@ function MultiResultPreview({
   error: string | null;
   warning?: string | null;
   warningAction?: { label: string; onClick: () => void };
+  extractionStats?: {
+    totalInputRows: number;
+    chunkCount: number;
+    perChunk: Array<{ index: number; inputRows: number; extracted: number }>;
+    totalExtracted: number;
+    unmatchedLines: string[];
+  } | null;
 }) {
+  void _extractionStats;
   return (
     <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
       <div className="flex justify-between items-center mb-3">
@@ -1634,6 +1776,7 @@ function RateMultiPreview({
   error,
   warning,
   warningAction,
+  extractionStats,
 }: {
   rows: Record<string, unknown>[];
   selected: Set<number>;
@@ -1645,6 +1788,13 @@ function RateMultiPreview({
   error: string | null;
   warning?: string | null;
   warningAction?: { label: string; onClick: () => void };
+  extractionStats?: {
+    totalInputRows: number;
+    chunkCount: number;
+    perChunk: Array<{ index: number; inputRows: number; extracted: number }>;
+    totalExtracted: number;
+    unmatchedLines: string[];
+  } | null;
 }) {
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const allSelected = rows.length > 0 && rows.every((_, i) => selected.has(i));
@@ -1697,6 +1847,53 @@ function RateMultiPreview({
         Por defecto todas están marcadas. Hacé clic en &quot;Editar&quot; para corregir
         cualquier campo de una fila antes de guardar.
       </p>
+
+      {extractionStats &&
+        (extractionStats.totalInputRows !== extractionStats.totalExtracted ||
+          extractionStats.unmatchedLines.length > 0) && (
+          <div className="text-sm bg-blue-50 border border-blue-200 rounded-md px-3 py-2 mb-3">
+            <div className="text-blue-900">
+              Excel tenía <strong>{extractionStats.totalInputRows}</strong> filas, se
+              extrajeron <strong>{extractionStats.totalExtracted}</strong>. Posibles
+              causas: filas con formato no estándar, filas vacías intermedias, filas
+              resumen.
+            </div>
+            <details className="mt-2 text-xs">
+              <summary className="cursor-pointer text-blue-800 font-medium">
+                Detalle por bloque ({extractionStats.chunkCount})
+              </summary>
+              <ul className="mt-1 list-disc pl-5 text-gray-700">
+                {extractionStats.perChunk.map((c) => (
+                  <li
+                    key={c.index}
+                    className={
+                      c.extracted < c.inputRows ? "text-yellow-800" : ""
+                    }
+                  >
+                    Bloque {c.index}: {c.inputRows} filas → {c.extracted}{" "}
+                    extraídas
+                    {c.extracted < c.inputRows ? " ⚠️" : ""}
+                  </li>
+                ))}
+              </ul>
+            </details>
+            {extractionStats.unmatchedLines.length > 0 && (
+              <details className="mt-2 text-xs" open>
+                <summary className="cursor-pointer text-blue-800 font-medium">
+                  Filas no extraídas ({extractionStats.unmatchedLines.length}) — agregá
+                  manualmente
+                </summary>
+                <ul className="mt-1 max-h-48 overflow-y-auto border border-gray-200 rounded bg-white p-2 font-mono text-[11px]">
+                  {extractionStats.unmatchedLines.map((l, i) => (
+                    <li key={i} className="truncate text-gray-700">
+                      {l}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
 
       {warning && (
         <div className="text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 mb-3 flex items-start justify-between gap-3">

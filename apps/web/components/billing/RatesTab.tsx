@@ -6,11 +6,10 @@ import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
 import { useBulkSelection } from "./useBulkSelection";
 import BulkActionsBar from "./BulkActionsBar";
-import RateIntake from "./RateIntake";
+import NewRateFlow from "./NewRateFlow";
 import {
   AGENT_SUGGESTIONS,
   CARRIER_SUGGESTIONS,
-  CONTAINER_TYPE_SUGGESTIONS,
   RATES_STORAGE_KEY,
   Rate,
   SEED_RATES,
@@ -20,32 +19,8 @@ import {
   formatDateCl,
   getValidityStatus,
   normalizeRate,
-  uid,
   uniqueSuggestions,
 } from "./constants";
-
-const emptyDraft: Omit<Rate, "id"> = {
-  agent: "",
-  carrier: "",
-  route: "",
-  tipo: "",
-  sf: 0,
-  blFee: 0,
-  af: 0,
-  afMax: 0,
-  flexiArg: 0,
-  thermalLinerChile20: 0,
-  thermalLinerChile40: 0,
-  thermalLinerMendoza20: 0,
-  thermalLinerMendoza40: 0,
-  fcaHaulageMendoza20: 0,
-  fcaHaulageMendoza40: 0,
-  discountInsulated: 0,
-  additionalNotes: "",
-  validFrom: "",
-  validTo: "",
-  notes: "",
-};
 
 // True if any of the optional cost columns has a meaningful value. Used to
 // hide those columns in tables/forms when nobody in the dataset cares.
@@ -81,20 +56,6 @@ function ValidityBadge({ validTo }: { validTo: string }) {
       {labels[status]}
     </span>
   );
-}
-
-function toNumber(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const n = Number(value.replace(/[^0-9.-]/g, ""));
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
-
-function toString(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  return String(value);
 }
 
 function topByFrequency(values: string[], limit: number): string[] {
@@ -138,7 +99,6 @@ export default function RatesTab() {
   const {
     items: rawItems,
     setItems,
-    add,
     update,
     remove,
     removeMany,
@@ -153,12 +113,12 @@ export default function RatesTab() {
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState("");
   const [carrierFilter, setCarrierFilter] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Omit<Rate, "id">>(emptyDraft);
-  const [showIntake, setShowIntake] = useState(false);
-  const [showForm, setShowForm] = useState(false);
-  const [showAdditional, setShowAdditional] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Mode: list (default) | create (NewRateFlow open) | edit (NewRateFlow with
+  // a single rate prefilled). Replaces the previous showIntake/showForm/draft
+  // duality.
+  const [mode, setMode] = useState<"list" | "create" | "edit">("list");
+  const [editingRate, setEditingRate] = useState<Rate | null>(null);
 
   const agentSuggestions = useMemo(
     () => uniqueSuggestions(items.map((r) => r.agent), AGENT_SUGGESTIONS),
@@ -166,14 +126,6 @@ export default function RatesTab() {
   );
   const carrierSuggestions = useMemo(
     () => uniqueSuggestions(items.map((r) => r.carrier), CARRIER_SUGGESTIONS),
-    [items]
-  );
-  const routeSuggestions = useMemo(
-    () => uniqueSuggestions(items.map((r) => r.route)),
-    [items]
-  );
-  const tipoSuggestions = useMemo(
-    () => uniqueSuggestions(items.map((r) => r.tipo), CONTAINER_TYPE_SUGGESTIONS),
     [items]
   );
 
@@ -272,134 +224,38 @@ export default function RatesTab() {
   };
 
   const openNew = () => {
-    setDraft(emptyDraft);
-    setEditingId(null);
-    setShowIntake(true);
-    setShowForm(false);
-    setShowAdditional(false);
+    setEditingRate(null);
+    setMode("create");
   };
 
   const openEdit = (rate: Rate) => {
-    const { id: _id, ...rest } = rate;
-    void _id;
-    setDraft(rest);
-    setEditingId(rate.id);
-    setShowIntake(false);
-    setShowForm(true);
-    // Auto-expand the optional costs section when the edited rate already has
-    // values there — otherwise the user might miss they exist.
-    setShowAdditional(hasAdditionalCosts(rate));
+    setEditingRate(rate);
+    setMode("edit");
   };
 
-  const handleExtracted = (data: Record<string, unknown>) => {
-    setDraft({
-      agent: toString(data.agent),
-      carrier: toString(data.carrier),
-      route: toString(data.route),
-      tipo: toString(data.tipo),
-      sf: toNumber(data.sf),
-      blFee: toNumber(data.blFee),
-      af: toNumber(data.af),
-      afMax: toNumber(data.afMax),
-      flexiArg: toNumber(data.flexiArg),
-      thermalLinerChile20: toNumber(
-        data.thermalLinerChile20 ?? data.thermalLiner20
-      ),
-      thermalLinerChile40: toNumber(
-        data.thermalLinerChile40 ?? data.thermalLiner40
-      ),
-      thermalLinerMendoza20: toNumber(data.thermalLinerMendoza20),
-      thermalLinerMendoza40: toNumber(data.thermalLinerMendoza40),
-      fcaHaulageMendoza20: toNumber(
-        data.fcaHaulageMendoza20 ?? data.fcaHaulage20
-      ),
-      fcaHaulageMendoza40: toNumber(
-        data.fcaHaulageMendoza40 ?? data.fcaHaulage40
-      ),
-      discountInsulated: toNumber(data.discountInsulated),
-      additionalNotes: toString(data.additionalNotes),
-      validFrom: toString(data.validFrom),
-      validTo: toString(data.validTo),
-      notes: toString(data.notes),
-    });
-    setShowIntake(false);
-    setShowForm(true);
-  };
-
-  const handleExtractedMany = (rows: Record<string, unknown>[]) => {
-    // Pre-generate IDs OUTSIDE the setState updater so React StrictMode's
-    // double-invocation can't produce different IDs on the two runs (which
-    // could mask itself as "duplicates collapsed"). The index suffix also
-    // guarantees uniqueness even if Date.now() and Math.random() happen to
-    // collide for a row.
-    const stamp = Date.now();
-    const rand = Math.random().toString(36).slice(2, 8);
-    const newRates: Rate[] = rows.map((row, idx) => ({
-      id: `rate-${stamp}-${idx}-${rand}`,
-      agent: toString(row.agent),
-      carrier: toString(row.carrier),
-      route: toString(row.route),
-      tipo: toString(row.tipo),
-      sf: toNumber(row.sf),
-      blFee: toNumber(row.blFee),
-      af: toNumber(row.af),
-      afMax: toNumber(row.afMax),
-      flexiArg: toNumber(row.flexiArg),
-      thermalLinerChile20: toNumber(
-        row.thermalLinerChile20 ?? row.thermalLiner20
-      ),
-      thermalLinerChile40: toNumber(
-        row.thermalLinerChile40 ?? row.thermalLiner40
-      ),
-      thermalLinerMendoza20: toNumber(row.thermalLinerMendoza20),
-      thermalLinerMendoza40: toNumber(row.thermalLinerMendoza40),
-      fcaHaulageMendoza20: toNumber(
-        row.fcaHaulageMendoza20 ?? row.fcaHaulage20
-      ),
-      fcaHaulageMendoza40: toNumber(
-        row.fcaHaulageMendoza40 ?? row.fcaHaulage40
-      ),
-      discountInsulated: toNumber(row.discountInsulated),
-      additionalNotes: toString(row.additionalNotes),
-      validFrom: toString(row.validFrom),
-      validTo: toString(row.validTo),
-      notes: toString(row.notes),
-    }));
-
-    // Reference uid here so the linter doesn't flag the unused import — we
-    // intentionally bypass uid() above for the deterministic-id pattern.
-    void uid;
-
+  // Bulk save from NewRateFlow's preview. The component already
+  // pre-generated IDs and applied common defaults (agent, validity, costs),
+  // so all we do here is push.
+  const handleSaveMany = (newRates: Rate[]) => {
     setItems((prev) => [...prev, ...newRates]);
-
     toast.success(
-      `${rows.length} tarifa${rows.length === 1 ? "" : "s"} guardada${rows.length === 1 ? "" : "s"}`
+      `${newRates.length} tarifa${newRates.length === 1 ? "" : "s"} guardada${newRates.length === 1 ? "" : "s"}`
     );
-    setShowIntake(false);
-    setShowForm(false);
-    setEditingId(null);
+    setMode("list");
+    setEditingRate(null);
   };
 
-  const skipIntake = () => {
-    setDraft(emptyDraft);
-    setShowIntake(false);
-    setShowForm(true);
+  // Single-row save when editing an existing rate via NewRateFlow's edit mode.
+  const handleSaveEdit = (updated: Rate) => {
+    update(updated.id, updated);
+    toast.success("Tarifa actualizada");
+    setMode("list");
+    setEditingRate(null);
   };
 
-  const handleSave = () => {
-    if (editingId) {
-      update(editingId, draft);
-    } else {
-      add({ ...draft, id: uid("rate") });
-    }
-    setShowForm(false);
-    setEditingId(null);
-  };
-
-  const cancelAll = () => {
-    setShowIntake(false);
-    setShowForm(false);
-    setEditingId(null);
+  const cancelMode = () => {
+    setMode("list");
+    setEditingRate(null);
   };
 
   if (!hydrated) {
@@ -464,304 +320,14 @@ export default function RatesTab() {
         message={bulkMessage}
       />
 
-      {showIntake && (
-        <div className="flex flex-col gap-2">
-          <RateIntake
-            type="rate"
-            onExtracted={handleExtracted}
-            onExtractedMany={handleExtractedMany}
-            onCancel={cancelAll}
-          />
-          <button
-            type="button"
-            onClick={skipIntake}
-            className="text-sm text-blue-700 hover:underline self-start cursor-pointer"
-          >
-            Prefiero completar manualmente el formulario →
-          </button>
-        </div>
-      )}
-
-      {showForm && (
-        <div className="bg-white rounded-lg shadow p-4 border border-gray-200">
-          <h3 className="font-semibold mb-3">
-            {editingId ? "Editar tarifa" : "Nueva tarifa"}
-          </h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <label className="flex flex-col gap-1 text-sm">
-              Agente
-              <input
-                type="text"
-                list="rates-agent-sugg"
-                value={draft.agent}
-                onChange={(e) => setDraft({ ...draft, agent: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-              <datalist id="rates-agent-sugg">
-                {agentSuggestions.map((a) => (
-                  <option key={a} value={a} />
-                ))}
-              </datalist>
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              Carrier
-              <input
-                type="text"
-                list="rates-carrier-sugg"
-                value={draft.carrier}
-                onChange={(e) => setDraft({ ...draft, carrier: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-              <datalist id="rates-carrier-sugg">
-                {carrierSuggestions.map((c) => (
-                  <option key={c} value={c} />
-                ))}
-              </datalist>
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              Ruta
-              <input
-                type="text"
-                list="rates-route-sugg"
-                value={draft.route}
-                onChange={(e) => setDraft({ ...draft, route: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-              <datalist id="rates-route-sugg">
-                {routeSuggestions.map((r) => (
-                  <option key={r} value={r} />
-                ))}
-              </datalist>
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              Tipo
-              <input
-                type="text"
-                list="rates-tipo-sugg"
-                value={draft.tipo}
-                onChange={(e) => setDraft({ ...draft, tipo: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-              <datalist id="rates-tipo-sugg">
-                {tipoSuggestions.map((t) => (
-                  <option key={t} value={t} />
-                ))}
-              </datalist>
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              SF (USD/ctr)
-              <input
-                type="number"
-                value={draft.sf}
-                onChange={(e) => setDraft({ ...draft, sf: Number(e.target.value) })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              BL Fee (USD/BL)
-              <input
-                type="number"
-                value={draft.blFee}
-                onChange={(e) => setDraft({ ...draft, blFee: Number(e.target.value) })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              AF (agency fee)
-              <input
-                type="number"
-                value={draft.af}
-                onChange={(e) => setDraft({ ...draft, af: Number(e.target.value) })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              AF Max
-              <input
-                type="number"
-                value={draft.afMax}
-                onChange={(e) => setDraft({ ...draft, afMax: Number(e.target.value) })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              Flexi ARG
-              <input
-                type="number"
-                value={draft.flexiArg}
-                onChange={(e) =>
-                  setDraft({ ...draft, flexiArg: Number(e.target.value) })
-                }
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              Vigente desde
-              <input
-                type="date"
-                value={draft.validFrom}
-                onChange={(e) => setDraft({ ...draft, validFrom: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              Vigente hasta
-              <input
-                type="date"
-                value={draft.validTo}
-                onChange={(e) => setDraft({ ...draft, validTo: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm col-span-2 md:col-span-4">
-              Notas
-              <input
-                type="text"
-                value={draft.notes}
-                onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-                className="border border-gray-200 rounded-md p-2 h-10"
-              />
-            </label>
-          </div>
-
-          <div className="mt-4 border-t border-gray-200 pt-3">
-            <button
-              type="button"
-              onClick={() => setShowAdditional((s) => !s)}
-              className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900 cursor-pointer"
-              aria-expanded={showAdditional}
-            >
-              <span className="font-mono text-xs w-4 text-center">
-                {showAdditional ? "▼" : "▶"}
-              </span>
-              Costos adicionales (Thermal Liner, Haulage FCA, descuentos)
-            </button>
-            {showAdditional && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
-                <label className="flex flex-col gap-1 text-sm">
-                  Thermal Chile 20&apos; (USD)
-                  <input
-                    type="number"
-                    value={draft.thermalLinerChile20 ?? 0}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        thermalLinerChile20: Number(e.target.value),
-                      })
-                    }
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-sm">
-                  Thermal Chile 40&apos; (USD)
-                  <input
-                    type="number"
-                    value={draft.thermalLinerChile40 ?? 0}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        thermalLinerChile40: Number(e.target.value),
-                      })
-                    }
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-sm">
-                  Thermal Mendoza 20&apos; (USD)
-                  <input
-                    type="number"
-                    value={draft.thermalLinerMendoza20 ?? 0}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        thermalLinerMendoza20: Number(e.target.value),
-                      })
-                    }
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-sm">
-                  Thermal Mendoza 40&apos; (USD)
-                  <input
-                    type="number"
-                    value={draft.thermalLinerMendoza40 ?? 0}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        thermalLinerMendoza40: Number(e.target.value),
-                      })
-                    }
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-sm">
-                  Haulage Mendoza 20&apos; (USD)
-                  <input
-                    type="number"
-                    value={draft.fcaHaulageMendoza20 ?? 0}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        fcaHaulageMendoza20: Number(e.target.value),
-                      })
-                    }
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-sm">
-                  Haulage Mendoza 40&apos; (USD)
-                  <input
-                    type="number"
-                    value={draft.fcaHaulageMendoza40 ?? 0}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        fcaHaulageMendoza40: Number(e.target.value),
-                      })
-                    }
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-sm">
-                  Descuento si insulado (USD)
-                  <input
-                    type="number"
-                    value={draft.discountInsulated ?? 0}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        discountInsulated: Number(e.target.value),
-                      })
-                    }
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-sm col-span-2 md:col-span-3">
-                  Notas adicionales (condiciones, aplicación)
-                  <input
-                    type="text"
-                    value={draft.additionalNotes ?? ""}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        additionalNotes: e.target.value,
-                      })
-                    }
-                    placeholder='Ej: "Descuento aplica solo si carga insulada"'
-                    className="border border-gray-200 rounded-md p-2 h-10"
-                  />
-                </label>
-              </div>
-            )}
-          </div>
-
-          <div className="flex justify-end gap-2 mt-4">
-            <Button variant="outline" onClick={cancelAll}>
-              Cancelar
-            </Button>
-            <Button onClick={handleSave}>Guardar</Button>
-          </div>
-        </div>
+      {mode !== "list" && (
+        <NewRateFlow
+          existingRates={items}
+          onSaveMany={handleSaveMany}
+          onSaveEdit={handleSaveEdit}
+          editingRate={mode === "edit" ? editingRate : null}
+          onCancel={cancelMode}
+        />
       )}
 
       {groups.length === 0 ? (

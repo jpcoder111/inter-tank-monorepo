@@ -199,6 +199,37 @@ export type InvoiceHistoryEntry = {
   filterSummary: string;
 };
 
+// Where in the BL row does an extra cost apply.
+//   "all"    → every container, no filter
+//   "20"     → only 20' containers
+//   "40"     → only 40' (incl. HC, RF) containers
+//   "dry"    → only dry-cargo containers (excludes RF)
+//   "reefer" → only reefer (RF) containers
+export type AppliesTo = "all" | "20" | "40" | "dry" | "reefer";
+
+// Canonical cost categories — invoicing matches by `kind` to decide
+// shipper-based variants (e.g., thermal_chile vs thermal_mendoza). "other"
+// keeps the door open for free-form labels with no built-in semantics.
+export type AdditionalCostKind =
+  | "thermal_chile"
+  | "thermal_mendoza"
+  | "fca_haulage_mendoza"
+  | "flexitank_chile"
+  | "flexitank_argentina"
+  | "agency_fee"
+  | "agency_fee_max"
+  | "discount_insulated"
+  | "other";
+
+export type AdditionalCost = {
+  // Stable per-row id so the form can edit/remove individual entries.
+  id: string;
+  kind: AdditionalCostKind;
+  label: string;
+  value: number;
+  applies: AppliesTo;
+};
+
 export type Rate = {
   id: string;
   agent: string;
@@ -210,9 +241,13 @@ export type Rate = {
   af: number;
   afMax: number;
   flexiArg: number;
-  // Per-origin Thermal Liner / Insulado costs and FCA Haulage from Mendoza.
-  // Filled per-row regardless of the row's container size — the invoicing
-  // logic picks Chile-vs-Mendoza based on the BL's shipper.
+  // Dynamic, user-extensible cost list. New rates from the unified flow
+  // populate this array exclusively; legacy records get migrated by
+  // normalizeRate. Optional so rate records loaded from localStorage that
+  // pre-date this field still type-check.
+  additionalCosts?: AdditionalCost[];
+  // Legacy fixed-shape fields. Kept so existing localStorage records still
+  // validate; normalizeRate copies them into additionalCosts on read.
   thermalLinerChile20?: number;
   thermalLinerChile40?: number;
   thermalLinerMendoza20?: number;
@@ -221,9 +256,6 @@ export type Rate = {
   fcaHaulageMendoza40?: number;
   discountInsulated?: number;
   additionalNotes?: string;
-  // Legacy fields (single Thermal Liner pair, single Haulage pair). Kept on
-  // the type so older localStorage records still validate; normalizeRate
-  // copies them into the new Chile/Mendoza-split fields on read.
   thermalLiner20?: number;
   thermalLiner40?: number;
   fcaHaulage20?: number;
@@ -233,25 +265,144 @@ export type Rate = {
   notes: string;
 };
 
-// Normalizes legacy rate records to the new schema. Idempotent: rates that
-// already have the *Chile/Mendoza fields are returned unchanged. The legacy
-// thermalLiner20/40 are mapped to thermalLinerChile20/40 because the original
-// schema described "Thermal Liner from Chile origin".
+// Helper used by the migration below and the new flow when persisting.
+function makeCostId(): string {
+  return `cost-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// Builds an AdditionalCost entry. Centralized so the new-flow UI and the
+// migration produce the same shape.
+export function buildAdditionalCost(
+  kind: AdditionalCostKind,
+  label: string,
+  value: number,
+  applies: AppliesTo
+): AdditionalCost {
+  return { id: makeCostId(), kind, label, value, applies };
+}
+
+// Migrates legacy fixed fields into the dynamic additionalCosts array. Idempotent:
+// if `additionalCosts` is already populated we leave it alone. Old single-thermal
+// records (thermalLiner20/40) are interpreted as Chile-origin, matching the
+// previous schema's semantics.
 export function normalizeRate(r: Rate): Rate {
-  const out: Rate = { ...r };
-  if (out.thermalLinerChile20 == null && out.thermalLiner20 != null) {
-    out.thermalLinerChile20 = out.thermalLiner20;
+  if (r.additionalCosts && r.additionalCosts.length > 0) return r;
+  const tl20 = r.thermalLinerChile20 ?? r.thermalLiner20 ?? 0;
+  const tl40 = r.thermalLinerChile40 ?? r.thermalLiner40 ?? 0;
+  const tm20 = r.thermalLinerMendoza20 ?? 0;
+  const tm40 = r.thermalLinerMendoza40 ?? 0;
+  const hm20 = r.fcaHaulageMendoza20 ?? r.fcaHaulage20 ?? 0;
+  const hm40 = r.fcaHaulageMendoza40 ?? r.fcaHaulage40 ?? 0;
+  const ins = r.discountInsulated ?? 0;
+  const costs: AdditionalCost[] = [];
+  if (tl20 > 0)
+    costs.push(buildAdditionalCost("thermal_chile", "Thermal Liner Chile 20'", tl20, "20"));
+  if (tl40 > 0)
+    costs.push(buildAdditionalCost("thermal_chile", "Thermal Liner Chile 40'", tl40, "40"));
+  if (tm20 > 0)
+    costs.push(buildAdditionalCost("thermal_mendoza", "Thermal Liner Mendoza 20'", tm20, "20"));
+  if (tm40 > 0)
+    costs.push(buildAdditionalCost("thermal_mendoza", "Thermal Liner Mendoza 40'", tm40, "40"));
+  if (hm20 > 0)
+    costs.push(buildAdditionalCost("fca_haulage_mendoza", "FCA Haulage Mendoza 20'", hm20, "20"));
+  if (hm40 > 0)
+    costs.push(buildAdditionalCost("fca_haulage_mendoza", "FCA Haulage Mendoza 40'", hm40, "40"));
+  if (ins > 0)
+    costs.push(
+      buildAdditionalCost("discount_insulated", "Descuento insulado", ins, "dry")
+    );
+  return { ...r, additionalCosts: costs };
+}
+
+// True if a rate has a 20'/40' cost of the given kind. Convenience for
+// invoicing logic that needs to fish out a specific value.
+export function findRateCost(
+  rate: Rate,
+  kind: AdditionalCostKind,
+  applies: AppliesTo
+): number {
+  const list = rate.additionalCosts ?? [];
+  const match = list.find(
+    (c) => c.kind === kind && (c.applies === applies || c.applies === "all")
+  );
+  return match?.value ?? 0;
+}
+
+// Looks up an existing rate's agent name (and any rate's agent name in the
+// catalog) by similarity to a candidate string. Reuses the same name-canon
+// + Levenshtein machinery as findSimilarClient. Threshold is shared.
+//
+// Returns:
+//   exactMatch: an agent name that already exists case-insensitively
+//   similar:    distinct agent names with similarity >= 0.75 (sorted desc)
+//
+// "Distinct" means we dedupe within the catalog before scoring — agent names
+// repeat heavily across rates, so passing a Rate[] would otherwise produce
+// noisy duplicates.
+export function findSimilarAgent(
+  name: string,
+  rates: Rate[]
+): { exactMatch: string | null; similar: string[] } {
+  const candidate = name.trim().toLowerCase();
+  if (!candidate) return { exactMatch: null, similar: [] };
+  // Build a unique catalog of agent names, preserving the original casing
+  // of the first occurrence for display.
+  const display = new Map<string, string>();
+  for (const r of rates) {
+    const a = r.agent.trim();
+    if (!a) continue;
+    const key = a.toLowerCase();
+    if (!display.has(key)) display.set(key, a);
   }
-  if (out.thermalLinerChile40 == null && out.thermalLiner40 != null) {
-    out.thermalLinerChile40 = out.thermalLiner40;
+  if (display.has(candidate)) {
+    return { exactMatch: display.get(candidate)!, similar: [] };
   }
-  if (out.fcaHaulageMendoza20 == null && out.fcaHaulage20 != null) {
-    out.fcaHaulageMendoza20 = out.fcaHaulage20;
+  const scored: Array<{ name: string; score: number }> = [];
+  for (const [, displayName] of display) {
+    const s = argClientNameSimilarity(name, displayName);
+    if (s >= 0.75) scored.push({ name: displayName, score: s });
   }
-  if (out.fcaHaulageMendoza40 == null && out.fcaHaulage40 != null) {
-    out.fcaHaulageMendoza40 = out.fcaHaulage40;
-  }
-  return out;
+  scored.sort((a, b) => b.score - a.score);
+  return { exactMatch: null, similar: scored.map((s) => s.name) };
+}
+
+// Quarter helpers. Q1 = 01/01–31/03, Q2 = 01/04–30/06, etc. When the user
+// picks multiple consecutive quarters we span from the first quarter's start
+// to the last quarter's end.
+export type Quarter = "Q1" | "Q2" | "Q3" | "Q4";
+
+export const QUARTER_RANGES: Record<
+  Quarter,
+  { startMonth: number; startDay: number; endMonth: number; endDay: number }
+> = {
+  Q1: { startMonth: 1, startDay: 1, endMonth: 3, endDay: 31 },
+  Q2: { startMonth: 4, startDay: 1, endMonth: 6, endDay: 30 },
+  Q3: { startMonth: 7, startDay: 1, endMonth: 9, endDay: 30 },
+  Q4: { startMonth: 10, startDay: 1, endMonth: 12, endDay: 31 },
+};
+
+const QUARTER_ORDER: Quarter[] = ["Q1", "Q2", "Q3", "Q4"];
+
+function pad(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+// Resolves a year + chosen quarters to an ISO date range. If multiple quarters
+// are picked, the range spans from the earliest quarter's start to the latest
+// quarter's end — works whether they're contiguous or not.
+export function quartersToDateRange(
+  year: number,
+  picked: Set<Quarter>
+): { validFrom: string; validTo: string } | null {
+  if (!year || picked.size === 0) return null;
+  const ordered = QUARTER_ORDER.filter((q) => picked.has(q));
+  if (ordered.length === 0) return null;
+  const first = QUARTER_RANGES[ordered[0]!];
+  const last = QUARTER_RANGES[ordered[ordered.length - 1]!];
+  return {
+    validFrom: `${year}-${pad(first.startMonth)}-${pad(first.startDay)}`,
+    validTo: `${year}-${pad(last.endMonth)}-${pad(last.endDay)}`,
+  };
 }
 
 export type EbsTipo = "Dry" | "Reefer";

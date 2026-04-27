@@ -20,6 +20,22 @@ export function useBulkSelection(visibleIds: string[]) {
       return next;
     });
 
+  // Atomic select/deselect of an arbitrary subset (e.g., all rates of one
+  // agent). If every id is already selected, deselect them; otherwise add the
+  // missing ones.
+  const toggleMany = (ids: string[]) =>
+    setSelected((prev) => {
+      if (ids.length === 0) return prev;
+      const next = new Set(prev);
+      const allSelected = ids.every((id) => next.has(id));
+      if (allSelected) {
+        for (const id of ids) next.delete(id);
+      } else {
+        for (const id of ids) next.add(id);
+      }
+      return next;
+    });
+
   const toggleAllVisible = () =>
     setSelected((prev) => {
       const visible = new Set(visibleIds);
@@ -44,6 +60,7 @@ export function useBulkSelection(visibleIds: string[]) {
   return {
     selected,
     toggleOne,
+    toggleMany,
     toggleAllVisible,
     clear,
     allVisibleSelected,

@@ -8,7 +8,6 @@ import { useBulkSelection } from "./useBulkSelection";
 import BulkActionsBar from "./BulkActionsBar";
 import RateIntake from "./RateIntake";
 import {
-  AGENT_COLORS,
   AGENT_SUGGESTIONS,
   CARRIER_SUGGESTIONS,
   CONTAINER_TYPE_SUGGESTIONS,
@@ -16,6 +15,7 @@ import {
   Rate,
   SEED_RATES,
   ValidityStatus,
+  agentColor,
   carrierColor,
   formatDateCl,
   getValidityStatus,
@@ -193,8 +193,14 @@ export default function RatesTab() {
   const allExpanded = groups.length > 0 && groups.every((g) => expanded.has(g.agent));
 
   const visibleIds = useMemo(() => filtered.map((r) => r.id), [filtered]);
-  const { selected, toggleOne, toggleAllVisible, clear, allVisibleSelected } =
-    useBulkSelection(visibleIds);
+  const {
+    selected,
+    toggleOne,
+    toggleMany,
+    toggleAllVisible,
+    clear,
+    allVisibleSelected,
+  } = useBulkSelection(visibleIds);
 
   const handleBulkDelete = () => {
     const ids = Array.from(selected);
@@ -202,6 +208,26 @@ export default function RatesTab() {
     clear();
     toast.success(`${ids.length} tarifa${ids.length === 1 ? "" : "s"} eliminada${ids.length === 1 ? "" : "s"}`);
   };
+
+  // Builds the BulkActionsBar message: "X tarifas de [agente]" when the
+  // selection lives in a single agent, "X tarifas de Y agentes" when spread.
+  const bulkMessage = useMemo(() => {
+    if (selected.size === 0) return undefined;
+    const idToAgent = new Map(items.map((r) => [r.id, r.agent.trim() || "(sin agente)"]));
+    const agents = new Set<string>();
+    for (const id of selected) {
+      const a = idToAgent.get(id);
+      if (a) agents.add(a);
+    }
+    const n = selected.size;
+    const plural = n === 1 ? "tarifa" : "tarifas";
+    const ending = n === 1 ? "" : "s";
+    if (agents.size === 1) {
+      const a = agents.values().next().value;
+      return `${n} ${plural} de ${a} seleccionada${ending}`;
+    }
+    return `${n} ${plural} de ${agents.size} agentes seleccionada${ending}`;
+  }, [selected, items]);
 
   const toggleAgent = (agent: string) => {
     setExpanded((prev) => {
@@ -384,6 +410,7 @@ export default function RatesTab() {
         onDelete={handleBulkDelete}
         onClear={clear}
         itemLabel="tarifa"
+        message={bulkMessage}
       />
 
       {showIntake && (
@@ -666,17 +693,44 @@ export default function RatesTab() {
         <div className="flex flex-col gap-3">
           {groups.map((g) => {
             const isOpen = expanded.has(g.agent);
-            const bg = AGENT_COLORS[g.agent];
+            const bg = agentColor(g.agent);
+            const groupRateIds = g.rates.map((r) => r.id);
+            const groupAllSelected =
+              groupRateIds.length > 0 &&
+              groupRateIds.every((id) => selected.has(id));
+            const groupSomeSelected =
+              !groupAllSelected &&
+              groupRateIds.some((id) => selected.has(id));
             return (
               <div
                 key={g.agent}
                 className="bg-white rounded-lg shadow border border-gray-200 overflow-hidden"
               >
+                <div
+                  className="flex items-center"
+                  style={{ backgroundColor: bg }}
+                >
+                  <label
+                    className="px-3 self-stretch flex items-center cursor-pointer hover:brightness-95"
+                    title={`Seleccionar todas las tarifas de ${g.agent}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={groupAllSelected}
+                      // Visually hint partial selection — most browsers honor
+                      // `indeterminate` only via DOM property, but the parent
+                      // styling makes intent clear enough without it.
+                      ref={(el) => {
+                        if (el) el.indeterminate = groupSomeSelected;
+                      }}
+                      onChange={() => toggleMany(groupRateIds)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </label>
                 <button
                   type="button"
                   onClick={() => toggleAgent(g.agent)}
-                  style={bg ? { backgroundColor: bg } : undefined}
-                  className="w-full flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-left cursor-pointer hover:brightness-95 transition"
+                  className="flex-1 flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-left cursor-pointer hover:brightness-95 transition"
                   aria-expanded={isOpen}
                 >
                   <div className="flex items-center gap-2 min-w-0">
@@ -720,6 +774,7 @@ export default function RatesTab() {
                     )}
                   </div>
                 </button>
+                </div>
 
                 {isOpen && (() => {
                   const showExtra = g.rates.some(hasAdditionalCosts);

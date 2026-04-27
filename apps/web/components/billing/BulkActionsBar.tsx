@@ -8,22 +8,26 @@ export default function BulkActionsBar({
   onDelete,
   onClear,
   itemLabel = "fila",
+  message,
 }: {
   count: number;
   onDelete: () => void;
   onClear: () => void;
   itemLabel?: string;
+  // Optional override for the count display. Used by callers that want to
+  // include extra context (e.g., "5 tarifas de IWS seleccionadas").
+  message?: string;
 }) {
   if (count === 0) return null;
   const plural = count === 1 ? itemLabel : `${itemLabel}s`;
   const confirmAndDelete = () => {
     if (confirm(`¿Eliminar ${count} ${plural}?`)) onDelete();
   };
+  const displayMessage =
+    message ?? `${count} ${plural} seleccionada${count === 1 ? "" : "s"}`;
   return (
     <div className="sticky top-0 z-10 bg-blue-50 border border-blue-200 rounded-md px-4 py-2 flex items-center justify-between shadow-sm">
-      <span className="text-sm font-medium text-blue-900">
-        {count} {plural} seleccionada{count === 1 ? "" : "s"}
-      </span>
+      <span className="text-sm font-medium text-blue-900">{displayMessage}</span>
       <div className="flex items-center gap-2">
         <button
           type="button"

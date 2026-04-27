@@ -45,7 +45,15 @@ Si solo hay una tarifa, devolvé un array con un único elemento. Usá "" para s
   }
 ]
 
-Los campos thermalLiner20/40, fcaHaulage20/40, discountInsulated y additionalNotes son OPCIONALES: poné 0 (o "" para additionalNotes) cuando el Excel no los mencione. Solo extralos si aparecen explícitamente en el input (columnas tipo "Thermal Liner", "Insulado", "Haulage", "FCA", "Trucking", o notas que mencionen descuentos condicionales).
+CÓMO APLICAR LOS COSTOS ADICIONALES (thermalLiner20/40, fcaHaulage20/40, discountInsulated, additionalNotes):
+
+Estos costos son GENERALES del agente y deben repetirse en CADA objeto del array según las siguientes reglas — NO los pongas solo en una fila:
+
+- **Thermal Liner / Insulado**: si el Excel declara un valor de Thermal Liner para origen Chile (ej: 200/300 USD para 20'/40' desde Valparaíso o San Antonio), copiá ese valor en thermalLiner20/40 de TODAS las filas con POL/origen "Valparaíso", "San Antonio" u otro puerto chileno. Si declara un valor distinto para Mendoza (ej: 250/350), aplicá esos valores a TODAS las filas con origen Mendoza.
+- **FCA Haulage**: si el Excel declara FCA Haulage / transporte terrestre desde Mendoza (ej: 2170/2270 USD para 20'/40'), poné fcaHaulage20/40 SOLO en las filas que sean tarifas FCA desde Mendoza. Las tarifas que NO son FCA o que no salen de Mendoza llevan 0.
+- **Descuento por insulado**: si el Excel menciona "descuento de USD X si la carga va insulada", aplicá discountInsulated en TODAS las tarifas Dry del mismo agente, no solo en una. additionalNotes debe describir la condición ("Descuento aplica solo si carga insulada") en cada fila que tenga el descuento.
+
+Si una fila no aplica para una regla (por ejemplo una tarifa Reefer no recibe descuento por insulado, una tarifa que sale de Valparaíso no recibe FCA Haulage de Mendoza), poné 0 / "" en esos campos para esa fila. NUNCA dejes una fila con 0 cuando le correspondería el valor del agente.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 

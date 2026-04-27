@@ -8,7 +8,6 @@ import { useSession } from "@/providers/SessionProvider";
 import { useLocalStore } from "./useLocalStore";
 import InvoicingHistory from "./InvoicingHistory";
 import {
-  AGENT_COLORS,
   AGENT_SUGGESTIONS,
   CARRIER_SUGGESTIONS,
   CONTAINER_TYPE_SUGGESTIONS,
@@ -30,6 +29,7 @@ import {
   SEED_LOCAL_EXCEPTIONS,
   SEED_LOCAL_STANDARDS,
   SEED_RATES,
+  agentColor,
   carrierColor,
   computeLocalCharges,
   findEbsForBilling,
@@ -847,11 +847,11 @@ export default function InvoicingTab() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {processed.map((r, idx) => {
-                const agentColor = AGENT_COLORS[r.agent];
+                const rowBg = agentColor(r.agent);
                 return (
                   <Fragment key={idx}>
                     <tr
-                      style={agentColor ? { backgroundColor: agentColor } : undefined}
+                      style={{ backgroundColor: rowBg }}
                       className="text-sm"
                     >
                       <td className="px-4 py-2 font-mono whitespace-nowrap">

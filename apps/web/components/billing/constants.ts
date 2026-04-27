@@ -50,6 +50,78 @@ export const AGENT_COLORS: Record<string, string> = {
   BULLET: "#f5eef8",
 };
 
+export const AGENT_COLOR_FALLBACK = "#f3f4f6";
+
+// 20-color pastel palette used to auto-assign a row background to agents the
+// user adds that aren't in AGENT_COLORS. Picked to be visually distinct from
+// the predefined set above — no near-duplicates.
+const PASTEL_PALETTE = [
+  "#ffe4e1", "#e0f7fa", "#fff3e0", "#f3e5f5", "#e8f5e9",
+  "#fff9c4", "#e3f2fd", "#fce4ec", "#f0f4c3", "#e1f5fe",
+  "#ffecb3", "#dcedc8", "#ffe0b2", "#cfd8dc", "#d1c4e9",
+  "#b2dfdb", "#ffccbc", "#c5cae9", "#f8bbd0", "#bbdefb",
+] as const;
+
+const AGENT_COLORS_KEY = "it_agent_colors";
+
+// Module-level cache of dynamically-assigned colors. Loaded lazily on first
+// read from localStorage; mutations write back. Module state is fine because
+// every consumer of this is a "use client" component — there's no server
+// rendering path that needs to coordinate.
+let dynamicAgentColors: Record<string, string> | null = null;
+
+function loadDynamicAgentColors(): Record<string, string> {
+  if (dynamicAgentColors !== null) return dynamicAgentColors;
+  if (typeof window === "undefined") {
+    dynamicAgentColors = {};
+    return dynamicAgentColors;
+  }
+  try {
+    const raw = window.localStorage.getItem(AGENT_COLORS_KEY);
+    dynamicAgentColors = raw
+      ? (JSON.parse(raw) as Record<string, string>)
+      : {};
+  } catch {
+    dynamicAgentColors = {};
+  }
+  return dynamicAgentColors;
+}
+
+function persistDynamicAgentColors() {
+  if (typeof window === "undefined" || !dynamicAgentColors) return;
+  try {
+    window.localStorage.setItem(
+      AGENT_COLORS_KEY,
+      JSON.stringify(dynamicAgentColors)
+    );
+  } catch {
+    // ignore quota / storage disabled
+  }
+}
+
+// Resolves an agent name to a pastel background color. Predefined agents win;
+// previously-seen new agents return their cached assignment; truly new agents
+// pick the next unused color from the palette and persist the mapping so the
+// color is stable across sessions.
+export function agentColor(agent: string): string {
+  if (!agent) return AGENT_COLOR_FALLBACK;
+  if (AGENT_COLORS[agent]) return AGENT_COLORS[agent]!;
+  const cache = loadDynamicAgentColors();
+  if (cache[agent]) return cache[agent]!;
+  const used = new Set<string>([
+    ...Object.values(AGENT_COLORS),
+    ...Object.values(cache),
+  ]);
+  const next =
+    PASTEL_PALETTE.find((c) => !used.has(c)) ??
+    // All distinct colors taken — cycle through the palette deterministically
+    // by agent count.
+    PASTEL_PALETTE[Object.keys(cache).length % PASTEL_PALETTE.length]!;
+  cache[agent] = next;
+  persistDynamicAgentColors();
+  return next;
+}
+
 // Colores institucionales suaves por naviera. Se usan como fondo de fila en
 // EbsTab y como chip/cell highlight en el resto de la app donde aparece la
 // naviera.

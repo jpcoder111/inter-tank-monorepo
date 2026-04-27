@@ -64,8 +64,15 @@ export default function ArgClientsTab({
   // tab itself stays visible so non-admins can browse the catalog.
   readOnly?: boolean;
 }) {
-  const { items: rawItems, add, update, remove, removeMany, hydrated } =
-    useLocalStore<ArgClient>(ARG_CLIENTS_STORAGE_KEY, SEED_ARG_CLIENTS);
+  const {
+    items: rawItems,
+    setItems,
+    add,
+    update,
+    remove,
+    removeMany,
+    hydrated,
+  } = useLocalStore<ArgClient>(ARG_CLIENTS_STORAGE_KEY, SEED_ARG_CLIENTS);
 
   // Coerce legacy records (before `tipo` existed) to "Bodega" so the table
   // and form can rely on the field being present.
@@ -88,6 +95,106 @@ export default function ArgClientsTab({
     matches: ArgClient[];
     selectedParentId: string | null; // null = create new
   } | null>(null);
+
+  // Bulk-add modal state. Two-step: input (textarea + default tipo) then
+  // preview (categorised lists) before any state mutation.
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkTipo, setBulkTipo] = useState<ArgClientTipo>("Bodega");
+  const [bulkStep, setBulkStep] = useState<"input" | "preview">("input");
+  const [bulkPreview, setBulkPreview] = useState<{
+    totalParsed: number;
+    toCreate: Array<Omit<ArgClient, "id">>;
+    duplicates: Array<{ candidate: string; match: ArgClient }>;
+    merges: Array<{ candidate: string; parent: ArgClient }>;
+  } | null>(null);
+
+  const closeBulk = () => {
+    setBulkOpen(false);
+    setBulkText("");
+    setBulkTipo("Bodega");
+    setBulkStep("input");
+    setBulkPreview(null);
+  };
+
+  const runBulkPreview = () => {
+    // Parse: split on newline AND comma, trim, drop empties, dedup within
+    // input by case-insensitive name. Same input twice in one paste gets
+    // collapsed to one candidate.
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const line of bulkText.split(/\r?\n/)) {
+      for (const part of line.split(",")) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const key = trimmed.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        names.push(trimmed);
+      }
+    }
+    if (names.length === 0) {
+      toast.error("Pegá al menos un nombre");
+      return;
+    }
+
+    const toCreate: Array<Omit<ArgClient, "id">> = [];
+    const duplicates: Array<{ candidate: string; match: ArgClient }> = [];
+    const merges: Array<{ candidate: string; parent: ArgClient }> = [];
+    for (const name of names) {
+      const { exactMatch, similarMatches } = findSimilarClient(name, items);
+      if (exactMatch) {
+        duplicates.push({ candidate: name, match: exactMatch });
+      } else if (similarMatches.length > 0) {
+        merges.push({ candidate: name, parent: similarMatches[0]! });
+      } else {
+        toCreate.push({
+          name,
+          tipo: bulkTipo,
+          alternativeNames: "",
+          notes: "",
+        });
+      }
+    }
+
+    setBulkPreview({
+      totalParsed: names.length,
+      toCreate,
+      duplicates,
+      merges,
+    });
+    setBulkStep("preview");
+  };
+
+  const applyBulkPreview = () => {
+    if (!bulkPreview) return;
+    const { toCreate, duplicates, merges } = bulkPreview;
+    // Single setItems call avoids the closure trap that would bite a loop of
+    // add()/update() — each lookup composes against the in-progress next.
+    setItems((prev) => {
+      const next = prev.slice();
+      for (const m of merges) {
+        const idx = next.findIndex((c) => c.id === m.parent.id);
+        if (idx < 0) continue;
+        const existing = next[idx]!.alternativeNames.trim();
+        const altsLower = existing
+          .split(/[,;]/)
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean);
+        if (altsLower.includes(m.candidate.toLowerCase())) continue;
+        const merged = existing ? `${existing}, ${m.candidate}` : m.candidate;
+        next[idx] = { ...next[idx]!, alternativeNames: merged };
+      }
+      for (const c of toCreate) {
+        next.push({ ...c, id: uid("arg") });
+      }
+      return next;
+    });
+    toast.success(
+      `Agregados ${toCreate.length}, descartados ${duplicates.length} duplicados, mergeados ${merges.length} como marcas`
+    );
+    closeBulk();
+  };
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -226,6 +333,11 @@ export default function ArgClientsTab({
           {filtered.length} de {items.length} clientes
         </span>
         <div className="flex-1" />
+        {!readOnly && (
+          <Button variant="outline" onClick={() => setBulkOpen(true)}>
+            Agregar varios
+          </Button>
+        )}
         {!readOnly && <Button onClick={openNew}>Nuevo cliente</Button>}
       </div>
 
@@ -400,6 +512,132 @@ export default function ArgClientsTab({
           <div className="text-center py-8 text-gray-500">No hay clientes</div>
         )}
       </div>
+
+      {bulkOpen && !readOnly && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-lg p-5 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <h3 className="font-semibold mb-3">Agregar varios clientes</h3>
+            {bulkStep === "input" ? (
+              <>
+                <div className="flex flex-wrap items-center gap-3 mb-3">
+                  <label className="text-sm flex items-center gap-2">
+                    Tipo por defecto:
+                    <select
+                      value={bulkTipo}
+                      onChange={(e) =>
+                        setBulkTipo(e.target.value as ArgClientTipo)
+                      }
+                      className="border border-gray-200 rounded-md p-1.5 h-9 bg-white"
+                    >
+                      <option value="Bodega">Bodega</option>
+                      <option value="Mostero">Mostero</option>
+                    </select>
+                  </label>
+                  <span className="text-xs text-gray-500">
+                    Aplica solo a clientes nuevos. Los merges no cambian el tipo del existente.
+                  </span>
+                </div>
+                <textarea
+                  value={bulkText}
+                  onChange={(e) => setBulkText(e.target.value)}
+                  rows={12}
+                  placeholder={
+                    "Bodega Foo\nBodega Bar, Bodega Baz\nViña Qux\n..."
+                  }
+                  className="w-full border border-gray-200 rounded-md p-2 text-sm font-mono"
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  Una bodega por línea, o varias separadas por coma. Las líneas vacías y los duplicados dentro del input se ignoran.
+                </p>
+                <div className="flex justify-end gap-2 mt-4">
+                  <Button variant="outline" onClick={closeBulk}>
+                    Cancelar
+                  </Button>
+                  <Button onClick={runBulkPreview}>Procesar</Button>
+                </div>
+              </>
+            ) : bulkPreview ? (
+              <>
+                <p className="text-sm text-gray-700 mb-3">
+                  Se procesaron <strong>{bulkPreview.totalParsed}</strong>{" "}
+                  nombres únicos.
+                </p>
+
+                <div className="flex flex-col gap-3">
+                  <div className="border border-blue-200 bg-blue-50/40 rounded-md p-3">
+                    <div className="text-sm font-medium text-blue-900 mb-1">
+                      Se agregarán {bulkPreview.toCreate.length} clientes nuevos
+                    </div>
+                    {bulkPreview.toCreate.length > 0 ? (
+                      <ul className="text-xs text-gray-700 list-disc pl-5 max-h-32 overflow-y-auto">
+                        {bulkPreview.toCreate.map((c, i) => (
+                          <li key={i}>
+                            {c.name}{" "}
+                            <span className="text-gray-500">
+                              ({c.tipo})
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-xs text-gray-500">Ninguno</div>
+                    )}
+                  </div>
+
+                  <div className="border border-gray-200 bg-gray-50 rounded-md p-3">
+                    <div className="text-sm font-medium text-gray-800 mb-1">
+                      Se descartarán {bulkPreview.duplicates.length} duplicados exactos
+                    </div>
+                    {bulkPreview.duplicates.length > 0 ? (
+                      <ul className="text-xs text-gray-700 list-disc pl-5 max-h-32 overflow-y-auto">
+                        {bulkPreview.duplicates.map((d, i) => (
+                          <li key={i}>
+                            <strong>{d.candidate}</strong>{" "}
+                            <span className="text-gray-500">
+                              (ya existe como {d.match.name})
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-xs text-gray-500">Ninguno</div>
+                    )}
+                  </div>
+
+                  <div className="border border-green-200 bg-green-50/40 rounded-md p-3">
+                    <div className="text-sm font-medium text-green-900 mb-1">
+                      Se mergearán {bulkPreview.merges.length} como marcas alternativas
+                    </div>
+                    {bulkPreview.merges.length > 0 ? (
+                      <ul className="text-xs text-gray-700 list-disc pl-5 max-h-32 overflow-y-auto">
+                        {bulkPreview.merges.map((m, i) => (
+                          <li key={i}>
+                            <strong>{m.candidate}</strong>{" "}
+                            <span className="text-gray-500">→</span>{" "}
+                            {m.parent.name}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-xs text-gray-500">Ninguno</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 mt-4">
+                  <Button
+                    variant="outline"
+                    onClick={() => setBulkStep("input")}
+                  >
+                    Volver
+                  </Button>
+                  <Button onClick={applyBulkPreview}>Confirmar y guardar</Button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {pendingSimilar && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">

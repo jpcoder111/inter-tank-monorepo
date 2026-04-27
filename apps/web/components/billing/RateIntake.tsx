@@ -186,6 +186,32 @@ function csvEscapeCell(s: string): string {
 // dropped — the returned chunks are pure header + data CSV.
 const CHUNK_DATA_ROWS = 30;
 
+// Lines mentioning these keywords typically describe agent-wide additional
+// costs (Thermal Liner, FCA Haulage, insulated discount, etc.) that live in
+// notes/footer rows outside the main rate table. We prepend them to every
+// chunk so Claude has the context to populate thermalLiner/fcaHaulage/
+// discountInsulated on rows that don't carry the values inline.
+const PREAMBLE_KEYWORDS =
+  /thermal\s*liner|fca\s*haulage|insulated|insulado|refuerzo/i;
+
+// True commas-per-line threshold for a line to be treated as a "note" rather
+// than a data row. Data rows in Excel-derived CSVs almost always have more
+// than 3 commas; notes/headers typically have 0-3.
+const PREAMBLE_MAX_COMMAS = 3;
+
+function extractContextPreamble(text: string): string {
+  const matches: string[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("Hoja:")) continue;
+    if (!PREAMBLE_KEYWORDS.test(line)) continue;
+    const commaCount = (line.match(/,/g) ?? []).length;
+    if (commaCount > PREAMBLE_MAX_COMMAS) continue;
+    matches.push(line);
+  }
+  return matches.join("\n");
+}
+
 function chunkExcelCsv(text: string, rowsPerChunk = CHUNK_DATA_ROWS): string[] {
   const meaningful = text
     .split("\n")
@@ -515,7 +541,7 @@ export default function RateIntake({
   // Set while chunked Excel extraction is in flight: shows the user which
   // chunk is being processed and lets us hide the form/intake mid-run.
   const [chunkProgress, setChunkProgress] = useState<
-    { current: number; total: number } | null
+    { current: number; total: number; retrying?: boolean } | null
   >(null);
   // Raw Claude response when JSON parse fails — user can edit and retry
   const [rawResponse, setRawResponse] = useState<string | null>(null);
@@ -668,20 +694,44 @@ export default function RateIntake({
   const submitChunked = async () => {
     if (!excelText) return;
     const chunks = chunkExcelCsv(excelText);
+    // Detect agent-wide additional-cost notes in the original text and
+    // prepend them to every chunk. This way Claude sees "Thermal Liner: …"
+    // even when chunking moved the literal line out of the chunk's own data.
+    const preamble = extractContextPreamble(excelText);
     setChunkProgress({ current: 0, total: chunks.length });
     const all: Record<string, unknown>[] = [];
     const failed: number[] = [];
     let anyPartial = false;
     for (let i = 0; i < chunks.length; i++) {
-      setChunkProgress({ current: i + 1, total: chunks.length });
-      try {
-        const content = `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${chunks[i]}`;
-        const result = await callExtractApi(content);
-        all.push(...result.rows);
-        if (result.partial) anyPartial = true;
-      } catch {
-        failed.push(i + 1);
+      const dataPart = `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${chunks[i]}`;
+      const content = preamble
+        ? `Contexto general del Excel (aplica a TODAS las filas, no es una fila de tarifa):\n${preamble}\n\n${dataPart}`
+        : dataPart;
+      let success = false;
+      // One automatic retry with a 2s backoff before declaring the chunk lost.
+      // Most chunk failures are transient (rate-limits, network blips, Claude
+      // returning truncated JSON the first time around).
+      for (let attempt = 0; attempt < 2 && !success; attempt++) {
+        if (attempt === 0) {
+          setChunkProgress({ current: i + 1, total: chunks.length });
+        } else {
+          setChunkProgress({
+            current: i + 1,
+            total: chunks.length,
+            retrying: true,
+          });
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        try {
+          const result = await callExtractApi(content);
+          all.push(...result.rows);
+          if (result.partial) anyPartial = true;
+          success = true;
+        } catch {
+          // fall through to retry (or to the failed list on the second pass)
+        }
       }
+      if (!success) failed.push(i + 1);
     }
     setChunkProgress(null);
     if (all.length === 0) {
@@ -873,7 +923,8 @@ export default function RateIntake({
     return (
       <div className="bg-white rounded-lg shadow p-6 border border-gray-200">
         <h3 className="font-semibold mb-2">
-          Procesando bloque {chunkProgress.current} de {chunkProgress.total}...
+          Procesando bloque {chunkProgress.current} de {chunkProgress.total}
+          {chunkProgress.retrying ? " (reintentando)" : ""}...
         </h3>
         <p className="text-xs text-gray-500 mb-3">
           El Excel se está enviando a Claude en bloques de {CHUNK_DATA_ROWS} filas para

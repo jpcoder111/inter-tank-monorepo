@@ -661,6 +661,152 @@ function splitCarrierList(rest: string): string[] {
     .filter(Boolean);
 }
 
+// ===== Asian PODs and needs-review classification =====
+//
+// When a rate's POD matches one of these, sf<=0 (zero or negative) is treated
+// as a legitimate differential rate rather than a flag for review. Hand-
+// curated from observed agent fixtures; extend manually when new ports
+// appear (Busan, Manila, Kaohsiung, etc.). Match is EXACT on the normalized
+// string — no Levenshtein, no regex.
+export const ASIAN_PODS: ReadonlySet<string> = new Set([
+  // China
+  "chongqing",
+  "dalian",
+  "fuzhou",
+  "hong kong",
+  "huangpu",
+  "jiangyin",
+  "jiaoxin",
+  "lian hua shan",
+  "nansha",
+  "nantong",
+  "ningbo",
+  "qingdao",
+  "shanghai",
+  "shekou",
+  "wenzhou",
+  "wuhan",
+  "xiamen",
+  "xingang",
+  "yantai",
+  "yantian",
+  // Japan
+  "hakata",
+  "kobe",
+  "nagoya",
+  "naha",
+  "osaka",
+  "sendai",
+  "tokyo",
+  "tomakomai",
+  "yokohama",
+  // Vietnam
+  "da nang",
+  "haiphong",
+  "ho chi minh",
+  // Cambodia
+  "sihanoukville",
+]);
+
+export function isAsianPod(pod: string): boolean {
+  if (!pod) return false;
+  const norm = pod.trim().toLowerCase().replace(/\s+/g, " ");
+  return ASIAN_PODS.has(norm);
+}
+
+// True when the raw value can be parsed as a finite number. Distinguishes
+// legitimate missing/invalid extraction ("TBD", "Ask agent", undefined,
+// empty string) from numeric zero — those return false here even though a
+// permissive Number() coercion might map them to 0.
+export function isParsableNumber(v: unknown): boolean {
+  if (typeof v === "number") return Number.isFinite(v);
+  if (typeof v !== "string") return false;
+  const trimmed = v.trim();
+  if (!trimmed) return false;
+  if (!/\d/.test(trimmed)) return false;
+  const cleaned = trimmed.replace(/[^0-9.,-]/g, "");
+  if (!cleaned) return false;
+  const n = Number(cleaned.replace(",", "."));
+  return Number.isFinite(n);
+}
+
+// True when the value parses to a real calendar date. Accepts ISO yyyy-mm-dd
+// or dd/mm/yyyy with optional time component.
+export function isValidDate(v: unknown): boolean {
+  if (v === undefined || v === null) return false;
+  const s = String(v).trim();
+  if (!s) return false;
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    const [, y, m, d] = iso;
+    const dt = new Date(
+      `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}T00:00:00`
+    );
+    return !Number.isNaN(dt.getTime());
+  }
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (dmy) {
+    const [, d, m, y] = dmy;
+    const dt = new Date(
+      `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}T00:00:00`
+    );
+    return !Number.isNaN(dt.getTime());
+  }
+  return false;
+}
+
+// Single source of truth for the "needs review" classification used by the
+// Step 2 banner, the visible-rows filter, and the per-row red highlight.
+//
+// A rate goes in the bucket when extraction failed in a way the user must
+// reconcile:
+//   - missing pol / pod
+//   - container type outside the v3 union
+//   - sf or bl_fee not parseable as a number
+//   - validFrom / validTo not valid dates (after applying batch defaults)
+//   - sf <= 0 with a NON-Asian POD (Asian POD permits differential rates)
+//
+// "Weird but legitimate" — SF=0, SF<0 on Asian routes, empty kinds, long
+// notas, bundle inclusions — DOES NOT trigger review.
+export function isRateNeedsReview(
+  input: {
+    pol: string;
+    pod: string;
+    tipo: string;
+    // True when the source tipo had to be coerced because it wasn't already
+    // one of the four v3 ContainerType values (e.g. "20'RF", "40'Flexi",
+    // "Dry" without size, blank).
+    tipoCoerced?: boolean;
+    // Numeric value already extracted (caller does the parse). Used for the
+    // "<=0 + non-Asian POD" check.
+    sfNum: number;
+    // Parseability of the raw source values. False when the source emitted
+    // tokens like "TBD" or "Ask agent" that toNumber() would silently
+    // coerce to 0 — those need to be flagged distinctly from legitimate 0.
+    sfParseable: boolean;
+    blFeeParseable: boolean;
+    // Per-rate validity strings from the extraction. Empty means the rate
+    // didn't carry its own validity and should fall back to batchValidity.
+    validFrom: string;
+    validTo: string;
+  },
+  batchValidity: { validFrom?: string; validTo?: string } | null
+): boolean {
+  if (!input.pol.trim() || !input.pod.trim()) return true;
+  if (input.tipoCoerced) return true;
+  if (!(CONTAINER_TYPES as readonly string[]).includes(input.tipo)) return true;
+  if (!input.sfParseable) return true;
+  if (!input.blFeeParseable) return true;
+
+  if (input.sfNum <= 0 && !isAsianPod(input.pod)) return true;
+
+  const effFrom = input.validFrom || batchValidity?.validFrom || "";
+  const effTo = input.validTo || batchValidity?.validTo || "";
+  if (!isValidDate(effFrom) || !isValidDate(effTo)) return true;
+
+  return false;
+}
+
 // ===== Free-text kind sweep detectors =====
 //
 // These run as a defense-in-depth pass after structured extraction: if Claude

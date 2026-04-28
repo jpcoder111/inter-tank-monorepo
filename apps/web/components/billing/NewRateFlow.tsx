@@ -26,6 +26,8 @@ import {
   findSimilarAgent,
   formatDateCl,
   isLclSheet,
+  isParsableNumber,
+  isRateNeedsReview,
   matchKindByAlias,
   migrateContainerType,
   parseMultiCarrier,
@@ -500,24 +502,6 @@ function toNumber(v: unknown): number {
 
 function toStr(v: unknown): string {
   return v === null || v === undefined ? "" : String(v);
-}
-
-// True when the raw extracted value can be parsed as a number. Distinct from
-// toNumber's permissive coercion (which returns 0 for "TBD" / undefined /
-// empty) — used to detect "extraction missed this field" so we can flag the
-// row as needs-review. Tokens like "TBD", "N/A", "Ask agent" return false.
-function isParsableNumber(v: unknown): boolean {
-  if (typeof v === "number") return Number.isFinite(v);
-  if (typeof v !== "string") return false;
-  const trimmed = v.trim();
-  if (!trimmed) return false;
-  // Has to contain at least one digit; otherwise tokens like "-" or "USD" pass
-  // the strip-and-parse path with NaN.
-  if (!/\d/.test(trimmed)) return false;
-  const cleaned = trimmed.replace(/[^0-9.,-]/g, "");
-  if (!cleaned) return false;
-  const n = Number(cleaned.replace(",", "."));
-  return Number.isFinite(n);
 }
 
 // ============================================================================
@@ -1222,11 +1206,11 @@ export default function NewRateFlow({
       // Multi-carrier rows clone into one row per carrier.
       const expanded = expandMultiCarrier(extracted.rates);
 
-      // Convert raw rate rows into preview-table records. SF=0 and SF<0 are
-      // both legitimate values in this business (some agents quote zero or
-      // differential rates) — they DO NOT mark a row as needs-review. The
-      // "needs-review" bucket is reserved for genuine extraction failures:
-      // missing pol/pod, unrecognized container type, or non-numeric sf/blFee.
+      // Convert raw rate rows into preview-table records. The needs-review
+      // classification is delegated to constants.ts:isRateNeedsReview — see
+      // that function for the criteria. SF=0 and SF<0 are PRESERVED as
+      // legitimate values; the asian-POD exception lets differential rates
+      // through without flagging.
       const rows: Record<string, unknown>[] = expanded.map((r) => {
         const baseNotes = toStr(r.notas ?? r.notes);
         const tipoOut = coerceContainerType(r.type ?? r.tipo);
@@ -1244,19 +1228,24 @@ export default function NewRateFlow({
         // the marker for visibility (no further processing).
         const bundle = detectBundleInclusions(notes);
         const finalNotes = bundle ? notes : notes;
-        const sfValid = isParsableNumber(r.sf);
+        const sfNum = toNumber(r.sf);
         const blFeeRaw = r.bl_fee ?? r.blFee;
-        const blFeeValid = isParsableNumber(blFeeRaw);
-        // tipoOut.note is set only when migrateContainerType had to coerce a
-        // non-standard tipo (e.g. "20'RF", "40'Flexi"). Either the source
-        // didn't emit a tipo or it emitted one outside the v3 union.
-        const tipoUnknown = !!tipoOut.note;
-        const needsReview =
-          !pol.trim() ||
-          !pod.trim() ||
-          tipoUnknown ||
-          !sfValid ||
-          !blFeeValid;
+        const rateValidFrom = toStr(r.validFrom);
+        const rateValidTo = toStr(r.validTo);
+        const needsReview = isRateNeedsReview(
+          {
+            pol,
+            pod,
+            tipo: tipoOut.tipo,
+            tipoCoerced: !!tipoOut.note,
+            sfNum,
+            sfParseable: isParsableNumber(r.sf),
+            blFeeParseable: isParsableNumber(blFeeRaw),
+            validFrom: rateValidFrom,
+            validTo: rateValidTo,
+          },
+          effectiveValidity
+        );
         return {
           carrier,
           pol,
@@ -1264,10 +1253,10 @@ export default function NewRateFlow({
           route,
           tipo: tipoOut.tipo,
           sl,
-          sf: toNumber(r.sf),
+          sf: sfNum,
           blFee: toNumber(blFeeRaw),
-          validFrom: toStr(r.validFrom),
-          validTo: toStr(r.validTo),
+          validFrom: rateValidFrom,
+          validTo: rateValidTo,
           notes: finalNotes,
           _needsReview: needsReview,
         };

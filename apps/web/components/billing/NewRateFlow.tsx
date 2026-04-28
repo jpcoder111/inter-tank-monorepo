@@ -18,6 +18,7 @@ import {
   Rate,
   carrierColor,
   consolidatePreferentialNotes,
+  datesEqual,
   detectAgencyFee,
   detectAgencyFeeMax,
   detectBundleInclusions,
@@ -145,6 +146,7 @@ HARD RULES:
 7. Any cell whose value reads "USD X per BL" / "USD X xbl" / "USD X / BL" / "USD X per bl" — regardless of column header — IS the rate's bl_fee. Example: a column "(Surcharge 1)" with value "USD 38 per bl" → bl_fee=38, NOT a kind. Multiple per-BL surcharges in the same row → sum them into bl_fee.
 8. Columns labeled BAF / Bunker / Surcharge whose cell value is literally "Included" / "Incl." / "Bundled" / "N/A": these mean the surcharge is bundled into SF. DO NOT emit them as kinds and DO NOT use them as numeric values. Append to that rate's notas: "BAF/Bunker incluido en SF.".
 9. Regional add-on rows like "Add San Carlos US$ 200 on top of Mendoza" → DO NOT emit them as a rate row. Skip; the frontend handles regional add-ons via a separate sweep.
+10. Rows whose SF cell is blank / missing / "TBD" / "Ask agent" but the row otherwise has POL+POD+Type+SL filled → STILL emit them. Set sf to null (NOT 0). The frontend flags these for user review rather than letting them disappear silently. The same applies to expired-validity rows (datetime in the past) — emit them; the frontend annotates and flags.
 
 If the chunk is not a rate table, return { "rates": [] }.
 
@@ -371,7 +373,14 @@ function classifySheet(
 
 async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   const buffer = await file.arrayBuffer();
-  const wb = XLSX.read(buffer, { type: "array" });
+  // cellDates: true converts Excel datetime serials into JS Date objects at
+  // read time. Combined with raw: false + dateNF: 'yyyy-mm-dd' below, every
+  // datetime cell comes through sheet_to_json as an ISO string regardless
+  // of the cell's locale-specific format ("30-Jun" / "30/06/2026" / etc.).
+  // Without this, the row converter's date comparisons against the batch
+  // validity got fooled by format mismatches and emitted spurious
+  // "Validez específica" notes for every row.
+  const wb = XLSX.read(buffer, { type: "array", cellDates: true });
   const rateSheets: string[] = [];
   const kindsBlocks: string[] = [];
   const classifications: { name: string; type: SheetClassification }[] = [];
@@ -381,13 +390,14 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
     const ws = wb.Sheets[name];
     if (!ws) continue;
     // raw: false applies cell formatting at read time. Excel datetime serial
-    // numbers (45838) become formatted strings ("30/06/2026") which Claude
-    // can parse directly; without it Claude saw raw serials and either
-    // treated them as numbers or guessed wrong.
+    // numbers (45838) become formatted strings; dateNF forces all date
+    // cells to ISO yyyy-mm-dd so the downstream date comparisons see a
+    // canonical format regardless of the cell's locale formatting.
     const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, {
       header: 1,
       defval: "",
       raw: false,
+      dateNF: "yyyy-mm-dd",
     });
     if (aoa.length === 0) continue;
     const maxCols = Math.max(0, ...aoa.map((r) => r.length));
@@ -1541,16 +1551,17 @@ export default function NewRateFlow({
           noteParts.push("⚠️ SF faltante en archivo — completar manualmente.");
         }
 
-        // Validity-per-rate override note. Only annotate when the rate has
-        // its OWN validFrom/validTo and either differs from effective
-        // batch dates OR is already past today. Both cases the user wants
-        // to know about explicitly.
+        // Validity-per-rate override note. Compare via datesEqual so a
+        // format mismatch ("2026-06-30" vs "30/06/2026" vs "30-Jun")
+        // doesn't trigger a false-positive "Validez específica" note.
         const effFrom = effectiveValidity?.validFrom ?? "";
         const effTo = effectiveValidity?.validTo ?? "";
         const rateHasOwnValidity = !!(rateValidFrom || rateValidTo);
         if (rateHasOwnValidity) {
-          const fromDiffers = rateValidFrom && rateValidFrom !== effFrom;
-          const toDiffers = rateValidTo && rateValidTo !== effTo;
+          const fromDiffers =
+            !!rateValidFrom && !datesEqual(rateValidFrom, effFrom);
+          const toDiffers =
+            !!rateValidTo && !datesEqual(rateValidTo, effTo);
           if (fromDiffers || toDiffers) {
             const segs: string[] = [];
             if (rateValidFrom) segs.push(formatDateCl(rateValidFrom));

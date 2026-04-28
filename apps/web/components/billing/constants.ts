@@ -848,36 +848,81 @@ export function isParsableNumber(v: unknown): boolean {
   return Number.isFinite(n);
 }
 
-// True when the value parses to a real calendar date. Accepts ISO yyyy-mm-dd
-// or dd/mm/yyyy with optional time component.
+const MONTH_INDEX: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+const MONTH_TOKEN = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec";
+
+// Coerces a loose date value into ISO yyyy-mm-dd. Recognized formats:
+//   - "2026-06-30" (already ISO; passes through with zero-padding)
+//   - "2026-06-30T00:00:00" (ISO with time component — strips time)
+//   - "30/06/2026" (dd/mm/yyyy — Spanish/CL/AR convention)
+//   - "30-Jun" / "30 Jun" / "30/Jun" (assumes current year — Excel
+//     "dd-mmm" default short format that comes through SheetJS when
+//     cellDates conversion is partial or the cell format is locale-
+//     specific)
+//   - "30-Jun-26" / "30-Jun-2026" (with year)
+//   - "Jun 30, 2026" (US-ish long format)
+// Returns the normalized yyyy-mm-dd string when matched; the original
+// trimmed input otherwise so downstream parsers can still try.
+export function normalizeDateString(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  const s = String(value).trim();
+  if (!s) return "";
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    return `${iso[1]}-${iso[2]!.padStart(2, "0")}-${iso[3]!.padStart(2, "0")}`;
+  }
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2]!.padStart(2, "0")}-${dmy[1]!.padStart(2, "0")}`;
+  }
+  const dmmm = s.match(
+    new RegExp(
+      `^(\\d{1,2})[-\\s/](${MONTH_TOKEN})(?:[-\\s/](\\d{2,4}))?\\b`,
+      "i"
+    )
+  );
+  if (dmmm) {
+    const day = dmmm[1]!.padStart(2, "0");
+    const monthIdx = MONTH_INDEX[dmmm[2]!.toLowerCase()];
+    if (monthIdx) {
+      const mm = String(monthIdx).padStart(2, "0");
+      let yy = dmmm[3] ?? String(new Date().getFullYear());
+      if (yy.length === 2) yy = "20" + yy;
+      return `${yy}-${mm}-${day}`;
+    }
+  }
+  const mmmd = s.match(
+    new RegExp(`^(${MONTH_TOKEN})\\s+(\\d{1,2}),?\\s+(\\d{4})`, "i")
+  );
+  if (mmmd) {
+    const monthIdx = MONTH_INDEX[mmmd[1]!.toLowerCase()];
+    if (monthIdx) {
+      return `${mmmd[3]}-${String(monthIdx).padStart(2, "0")}-${mmmd[2]!.padStart(2, "0")}`;
+    }
+  }
+  return s;
+}
+
+// True when the value parses to a real calendar date. Accepts the formats
+// recognized by normalizeDateString.
 export function isValidDate(v: unknown): boolean {
   return parseDateValue(v) !== null;
 }
 
-// Parses an ISO yyyy-mm-dd or dd/mm/yyyy string into a Date set to local
-// midnight. Returns null if the value isn't a parseable date format. Shared
-// by isValidDate and isDateInPast so both stay consistent.
+// Parses any of the supported date formats into a Date set to local
+// midnight. Returns null when the value isn't a parseable date format.
 function parseDateValue(v: unknown): Date | null {
-  if (v === undefined || v === null) return null;
-  const s = String(v).trim();
-  if (!s) return null;
-  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (iso) {
-    const [, y, m, d] = iso;
-    const dt = new Date(
-      `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}T00:00:00`
-    );
-    return Number.isNaN(dt.getTime()) ? null : dt;
-  }
-  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (dmy) {
-    const [, d, m, y] = dmy;
-    const dt = new Date(
-      `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}T00:00:00`
-    );
-    return Number.isNaN(dt.getTime()) ? null : dt;
-  }
-  return null;
+  const normalized = normalizeDateString(v);
+  if (!normalized) return null;
+  const m = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return null;
+  const dt = new Date(
+    `${m[1]}-${m[2]!.padStart(2, "0")}-${m[3]!.padStart(2, "0")}T00:00:00`
+  );
+  return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
 // True when the value parses to a date strictly before today (local
@@ -889,6 +934,15 @@ export function isDateInPast(v: unknown): boolean {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return dt.getTime() < today.getTime();
+}
+
+// True when both values normalize to the same calendar date (or both fail
+// to parse — returns true for empty/empty too). Used by the row converter
+// to suppress the "Validez específica" note when a row's validity matches
+// the batch's effective validity even though the raw strings differ in
+// format ("30-Jun" vs "2026-06-30").
+export function datesEqual(a: unknown, b: unknown): boolean {
+  return normalizeDateString(a) === normalizeDateString(b);
 }
 
 // Single source of truth for the "needs review" classification used by the

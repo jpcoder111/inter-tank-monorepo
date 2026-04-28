@@ -312,9 +312,12 @@ export const KIND_ALIASES: Record<string, ReadonlyArray<string | RegExp>> = {
     "flexitank arg",
     "s&f arg",
     "s&f argentina",
+    "laf",
     "laf mendoza",
-    "flexibag mendoza",
+    "flexibag",
+    "flexibag laf",
     "flexibag laf mendoza",
+    "flexibag mendoza",
   ],
   precarriage_mendoza: [
     "fca haulage mendoza to chile",
@@ -327,6 +330,12 @@ export const KIND_ALIASES: Record<string, ReadonlyArray<string | RegExp>> = {
     "inland rate for fca mendoza",
     "tarifa fca mendoza",
     /inland\s+for\s+\d+\s+fca\s+mendoza/i,
+    // Catalog sheets sometimes split the same charge across rows by size,
+    // emitting labels like "Precarriage 20'Flexi Mendoza" or "FCA 40'DC
+    // Mendoza". These regex catch the size-tagged variants so all rows
+    // collapse to one kind id.
+    /^precarriage\s+\S+\s+mendoza\b/i,
+    /^fca\s+\S+\s+mendoza\b/i,
   ],
   disposal: ["disposal", "disposal flexibag", "cargo disposal"],
   agency_fee: ["agency fee", "agentfee", "agencia", /agentfee\s+usd\s+\d+/i],
@@ -470,6 +479,28 @@ function normalizeKindLabel(s: string): string {
   out = out.replace(/\s+base port$/, "");
   out = out.replace(/^fca\s+(haulage|haulajes?)\b/, "$1");
   return out;
+}
+
+// Strips a size annotation (20' / 20'DC / 20'Flexi / 40' / 40'HC) from a
+// kind label so the alias matcher can resolve canonical labels like
+// "Precarriage 20'Flexi Mendoza" → "Precarriage Mendoza" + size: 20.
+// The size hint then routes a value_unique to value20 or value40 instead
+// of duplicating to both. Returns the cleaned label trimmed of redundant
+// whitespace plus the parsed size (20 | 40 | null).
+export function extractSizeFromKindLabel(label: string): {
+  cleanLabel: string;
+  size: 20 | 40 | null;
+} {
+  if (!label) return { cleanLabel: "", size: null };
+  const sizeRegex = /\b(20|40)\s*['"′]?\s*(?:dc|hc|flexi|fl|reefer|rf)?\b/i;
+  const m = label.match(sizeRegex);
+  if (!m) return { cleanLabel: label.trim(), size: null };
+  const size = m[1] === "20" ? 20 : 40;
+  const cleanLabel = label
+    .replace(sizeRegex, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { cleanLabel, size };
 }
 
 // Returns the predefined kind id for a label, or null if no alias matches.

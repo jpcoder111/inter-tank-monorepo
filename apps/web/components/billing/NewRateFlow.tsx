@@ -27,6 +27,7 @@ import {
   detectRegionalAddons,
   detectThermalLinerUnsized,
   extractPreferentialClientsFromLabel,
+  extractSizeFromKindLabel,
   findSimilarAgent,
   formatDateCl,
   isDateInPast,
@@ -171,6 +172,8 @@ RULES:
 - "Thermal Liner = USD X" without size → value_unique: X. Frontend will copy to both 20' and 40'.
 - Free-form market context, free days, regional add-ons → notas_globales (NOT as kinds).
 - If a charge's value is literally "Included" / "Incl." / "Bundled" / "N/A" (no number), do NOT emit a kind for it — that means it's bundled. Mention in notas_globales if relevant ("BAF incluido en SF.").
+- CONSOLIDATION: when the same charge appears across multiple rows split by container size (e.g. "FCA Mendoza | 20'Flexi | 2170", "FCA Mendoza | 20'DC | 2170", "FCA Mendoza | 40'DC | 2270"), emit ONE kind entry. Drop the size token from the label ("FCA Mendoza", not "FCA 40'DC Mendoza") and populate value20 / value40 from the size-tagged rows. When two size-20 rows give the same value, use it once.
+- ADD-ONS: rows like "Add San Carlos US$ 200 on top of Mendoza" / "Add Rivadavia US$ 150 on top of Mendoza" are regional add-ons, NOT kinds. Skip them — frontend captures them via a regex sweep into notas_globales.
 - If nothing recognizable, return { "kinds": [], "notas_globales": "" }.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
@@ -751,6 +754,17 @@ function detectKindsFromExtracted(rates: RawRate[]): {
       const label = toStr(k.label).trim();
       if (!label) continue;
 
+      // Reject regional add-on rows that leak from catalog sheets when
+      // Claude tries to interpret them as kinds. The detectRegionalAddons
+      // sweep captures these for notas_globales — they must NOT also
+      // become kinds. Tell-tale signal: "on top of" or "Add <City> US$".
+      if (
+        /\bon\s+top\s+of\b/i.test(label) ||
+        /^add\s+\S+\s+(us\$?|usd)\s+[\d.,]+/i.test(label)
+      ) {
+        continue;
+      }
+
       // Preferential-client kind labels ("Insulado Chile (ASC - Aussino -
       // EMW)") are routed to notas_globales instead of becoming batch-wide
       // kinds — the rate only applies to those clients.
@@ -774,7 +788,15 @@ function detectKindsFromExtracted(rates: RawRate[]): {
         continue;
       }
 
-      const matchedId = matchKindByAlias(label);
+      // Strip a size annotation ("20'Flexi", "40'DC", etc.) so that
+      // catalog rows like "Precarriage 20'Flexi Mendoza" / "Precarriage
+      // 40'DC Mendoza" canonicalize to the same alias and consolidate
+      // into one kind. The labelSize lets value_unique route to the
+      // matching value20/value40 instead of being copied to both.
+      const { cleanLabel, size: labelSize } = extractSizeFromKindLabel(label);
+      const matchedId =
+        matchKindByAlias(cleanLabel) ?? matchKindByAlias(label);
+
       let kindId: string;
       let def: KindDef;
       if (matchedId) {
@@ -808,14 +830,23 @@ function detectKindsFromExtracted(rates: RawRate[]): {
       const vu = toNumber(k.value_unique);
       if (v20 && kv.value20 === undefined) kv.value20 = v20;
       if (v40 && kv.value40 === undefined) kv.value40 = v40;
-      if (vu && kv.value_unique === undefined && !def.by_size) {
-        kv.value_unique = vu;
-      }
-      // For by_size kinds where the source provided only a unique value
-      // (e.g. CCL "Thermal Liner = USD 350"), copy it to both 20 and 40.
-      if (vu && def.by_size) {
-        if (kv.value20 === undefined) kv.value20 = vu;
-        if (kv.value40 === undefined) kv.value40 = vu;
+      if (vu) {
+        if (def.by_size) {
+          // Route value_unique to the bucket implied by the label's size
+          // hint when present, so split-by-size catalog rows accumulate
+          // correctly. Fallback (no size hint): copy to both, matching
+          // the CCL "Thermal Liner = USD 350" case.
+          if (labelSize === 20 && kv.value20 === undefined) {
+            kv.value20 = vu;
+          } else if (labelSize === 40 && kv.value40 === undefined) {
+            kv.value40 = vu;
+          } else if (labelSize === null) {
+            if (kv.value20 === undefined) kv.value20 = vu;
+            if (kv.value40 === undefined) kv.value40 = vu;
+          }
+        } else if (kv.value_unique === undefined) {
+          kv.value_unique = vu;
+        }
       }
     }
   }

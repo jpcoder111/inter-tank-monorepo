@@ -22,9 +22,19 @@ import {
   uniqueSuggestions,
 } from "./constants";
 
-// True if any of the optional cost columns has a meaningful value. Used to
-// hide those columns in tables/forms when nobody in the dataset cares.
+// True if a rate carries any kind values worth surfacing in the listing.
+// v3 rates store this in `kind_values`; legacy rows still use the fixed
+// thermal/haulage/discount fields, which migrateRateV3 will eventually fold
+// into kind_values but the fallback keeps pre-migration data visible.
 function hasAdditionalCosts(r: Rate): boolean {
+  if (r.kind_values && r.kind_values.length > 0) {
+    return r.kind_values.some(
+      (kv) =>
+        (kv.value20 ?? 0) !== 0 ||
+        (kv.value40 ?? 0) !== 0 ||
+        (kv.value_unique ?? 0) !== 0
+    );
+  }
   return (
     (r.thermalLinerChile20 ?? 0) > 0 ||
     (r.thermalLinerChile40 ?? 0) > 0 ||
@@ -35,6 +45,29 @@ function hasAdditionalCosts(r: Rate): boolean {
     (r.discountInsulated ?? 0) > 0 ||
     (r.additionalNotes ?? "").trim() !== ""
   );
+}
+
+// Compact one-line summary of a rate's kinds for the listing's "Kinds" column.
+// Format examples:
+//   "Insulado Chile=200/300 · Agency Fee=75"
+//   "Precarriage Mendoza=2170/2270"
+// Returns "—" when the rate has no v3 kinds.
+function formatRateKinds(r: Rate): string {
+  if (!r.kind_values || r.kind_values.length === 0) return "—";
+  const defs = r.kinds ?? [];
+  const parts: string[] = [];
+  for (const kv of r.kind_values) {
+    const def = defs.find((k) => k.id === kv.kind_id);
+    const label = def?.label ?? kv.kind_id;
+    if (def?.by_size) {
+      const v20 = kv.value20 ?? "—";
+      const v40 = kv.value40 ?? "—";
+      parts.push(`${label}=${v20}/${v40}`);
+    } else {
+      parts.push(`${label}=${kv.value_unique ?? "—"}`);
+    }
+  }
+  return parts.length > 0 ? parts.join(" · ") : "—";
 }
 
 function ValidityBadge({ validTo }: { validTo: string }) {
@@ -422,7 +455,7 @@ export default function RatesTab() {
                 </div>
 
                 {isOpen && (() => {
-                  const showExtra = g.rates.some(hasAdditionalCosts);
+                  const showKinds = g.rates.some(hasAdditionalCosts);
                   return (
                   <div className="overflow-x-auto border-t border-gray-200">
                     <table className="min-w-full divide-y divide-gray-200">
@@ -435,20 +468,7 @@ export default function RatesTab() {
                             "Tipo",
                             "SF",
                             "BL Fee",
-                            "AF",
-                            "AF Max",
-                            "Flexi ARG",
-                            ...(showExtra
-                              ? [
-                                  "Thermal Chile 20'",
-                                  "Thermal Chile 40'",
-                                  "Thermal Mza 20'",
-                                  "Thermal Mza 40'",
-                                  "Haulage Mza 20'",
-                                  "Haulage Mza 40'",
-                                  "Desc. Insulado",
-                                ]
-                              : []),
+                            ...(showKinds ? ["Kinds"] : []),
                             "Vigencia",
                             "Estado",
                             "Notas",
@@ -490,42 +510,13 @@ export default function RatesTab() {
                             <td className="px-4 py-2 whitespace-nowrap">{r.tipo}</td>
                             <td className="px-4 py-2 whitespace-nowrap">${r.sf}</td>
                             <td className="px-4 py-2 whitespace-nowrap">${r.blFee}</td>
-                            <td className="px-4 py-2 whitespace-nowrap">${r.af}</td>
-                            <td className="px-4 py-2 whitespace-nowrap">${r.afMax}</td>
-                            <td className="px-4 py-2 whitespace-nowrap">${r.flexiArg}</td>
-                            {showExtra && (
-                              <>
-                                <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.thermalLinerChile20 ?? 0}
-                                </td>
-                                <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.thermalLinerChile40 ?? 0}
-                                </td>
-                                <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.thermalLinerMendoza20 ?? 0}
-                                </td>
-                                <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.thermalLinerMendoza40 ?? 0}
-                                </td>
-                                <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.fcaHaulageMendoza20 ?? 0}
-                                </td>
-                                <td className="px-4 py-2 whitespace-nowrap">
-                                  ${r.fcaHaulageMendoza40 ?? 0}
-                                </td>
-                                <td className="px-4 py-2 whitespace-nowrap">
-                                  {(r.discountInsulated ?? 0) > 0 ? (
-                                    <span
-                                      className="text-green-700"
-                                      title={r.additionalNotes ?? ""}
-                                    >
-                                      -${r.discountInsulated}
-                                    </span>
-                                  ) : (
-                                    "—"
-                                  )}
-                                </td>
-                              </>
+                            {showKinds && (
+                              <td
+                                className="px-4 py-2 max-w-xs truncate text-xs"
+                                title={formatRateKinds(r)}
+                              >
+                                {formatRateKinds(r)}
+                              </td>
                             )}
                             <td className="px-4 py-2 whitespace-nowrap text-xs">
                               {formatDateCl(r.validFrom)} / {formatDateCl(r.validTo)}

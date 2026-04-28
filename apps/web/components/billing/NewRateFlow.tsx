@@ -6,18 +6,26 @@ import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
 import {
   AGENT_SUGGESTIONS,
-  AdditionalCost,
-  AdditionalCostKind,
-  AppliesTo,
   CARRIER_SUGGESTIONS,
-  CONTAINER_TYPE_SUGGESTIONS,
+  CONTAINER_TYPES,
+  ContainerType,
+  KIND_ALIASES,
+  KindDef,
+  KindScope,
+  KindValue,
+  PREDEFINED_KINDS,
   Quarter,
   Rate,
-  buildAdditionalCost,
   carrierColor,
+  detectBundleInclusions,
   findSimilarAgent,
   formatDateCl,
+  isLclSheet,
+  matchKindByAlias,
+  migrateContainerType,
+  parseMultiCarrier,
   quartersToDateRange,
+  slugifyKindLabel,
   uniqueSuggestions,
 } from "./constants";
 
@@ -30,43 +38,99 @@ import {
 
 const STRICT_RESPONSE_RULES_NO_LIMIT = `IMPORTANTE: Respondé SOLO con el JSON, sin backticks de markdown (\`\`\`), sin texto adicional antes o después.`;
 
-const RATE_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input puede contener UNA o MÚLTIPLES tarifas (ej: pegado de email, screenshot, o fila individual).
+const RATE_SYSTEM = `You are extracting shipping-rate data from a document (Excel/email/PDF/image).
 
-Extrae las tarifas que encuentres. Devolvé un JSON ARRAY con un objeto por cada tarifa.
+OUTPUT: a single JSON object with this exact shape:
+{
+  "agent_inferred": string,
+  "validity_inferred": { "from": string, "to": string } | null,
+  "notas_globales": string,
+  "rates": [
+    {
+      "carrier": string,
+      "pol": string,
+      "pod": string,
+      "type": "20'Dry" | "40'Dry" | "40'Reefer" | "20'Flexi",
+      "sl": string,
+      "sf": number,
+      "bl_fee": number,
+      "validFrom": string | null,
+      "validTo":   string | null,
+      "kinds": [
+        { "label": string, "value20": number | null, "value40": number | null, "value_unique": number | null }
+      ],
+      "notas": string
+    }
+  ]
+}
 
-[
-  {
-    "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, PIL, COSCO, Evergreen, MSC u otra)
-    "route": string,         // ruta o puerto de destino
-    "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
-    "sf": number,            // Sea Freight en USD por contenedor
-    "blFee": number,         // BL fee en USD por BL
-    "notes": string          // observación relevante
-  }
-]
+TYPE FIELD — RULES:
+Each rate row encodes ONE container size + ONE category in \`type\`:
+  - "20'Dry"     → 20-foot dry container
+  - "40'Dry"     → 40-foot dry container
+  - "40'Reefer"  → 40-foot reefer (refrigerated)
+  - "20'Flexi"   → 20-foot dry stuffed with flexitank
+NEVER emit just "Dry" or "Reefer" without size. If a single source row presents
+both sizes for the same lane (e.g. "20'Dry SF=1450 / 40'Dry SF=1600"), emit
+TWO rate rows — one per size — sharing pol/pod/sl/carrier/kinds. If size is
+genuinely ambiguous, default to "20'Dry" and append to \`notas\`:
+"Tamaño no especificado, asumido 20'."
 
-NO incluyas agente, vigencia ni costos adicionales — esos campos se aplican al guardar desde el formulario común.
+HARD RULES:
+1. EBS = EFS. NEVER include them in sf or as a kind. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60. Drop EBS silently.
+2. Thermal Liner / Thermo Liner / Insulado are the SAME concept — emit the original label, frontend canonicalizes via aliases.
+3. Multi-carrier on one row ("OOCL or CMA", "OOCL/EVER", "Carriers: OOCL, EVER"): set sl="OOCL or CMA". DO NOT clone — frontend clones.
+4. Bundle "includes X, Y, Z" / "incluye X, Y, Z": keep sf as ONE number (do not split). Add to notas: "Incluye: <list>". Do NOT invent kinds for the inclusions.
+5. Per-row validity override: set this row's validFrom/validTo from the row text AND add to notas.
+6. Regional add-ons (San Carlos, Tupungato, Rivadavia, San Juan, San Martín, "afuera de Mendoza"): NEVER as a rate row. Append to notas_globales.
+7. Free-day info: notas_globales.
+8. LCL content: skip entirely. Indicators: "Insulation Chile/Argentina" headers, amounts "per pallet/M3/shipment", early "OF" column, no clear POL+POD+Type triple.
+9. Date formats accepted: dd/mm/yyyy, dd/mm (assume current year), "Fin de Junio"/"end of June" (last day of month), "March 31st", "Q2 2026", Excel datetimes. Emit dd/mm/yyyy when possible, else original token.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
-const RATE_CHUNK_SYSTEM = `Sos un extractor de tarifas de fletes marítimos. El input contiene una tabla con tarifas (una por fila).
+const RATE_CHUNK_SYSTEM = `You are extracting shipping-rate rows from one chunk of an Excel sheet.
 
-Extrae las tarifas. Devolvé un JSON ARRAY con un objeto por cada tarifa/fila. Si el input no es una tabla o no contiene tarifas, devolvé un array vacío.
+OUTPUT: a single JSON object:
+{
+  "rates": [
+    {
+      "carrier": string,
+      "pol": string,
+      "pod": string,
+      "type": "20'Dry" | "40'Dry" | "40'Reefer" | "20'Flexi",
+      "sl": string,
+      "sf": number,
+      "bl_fee": number,
+      "validFrom": string | null,
+      "validTo":   string | null,
+      "kinds": [
+        { "label": string, "value20": number | null, "value40": number | null, "value_unique": number | null }
+      ],
+      "notas": string
+    }
+  ]
+}
 
-[
-  {
-    "carrier": string,       // naviera (OOCL, HAPAG, CMA-CGM, etc.)
-    "route": string,         // ruta o puerto de destino
-    "tipo": string,          // tipo de contenedor (20', Flexi, 20'-Flexi, 40', 40'HC, 20'RF, 40'RF)
-    "sf": number,            // Sea Freight USD por contenedor
-    "blFee": number,         // BL fee USD por BL
-    "notes": string          // observación relevante
-  }
-]
+(No agent_inferred / validity_inferred / notas_globales here — those come from the first chunk's preamble or from the user's Step 1 inputs.)
 
-Usá "" para strings faltantes y 0 para números faltantes. NO incluyas agente, vigencia, thermalLiner, fcaHaulage ni discountInsulated — esos los aplica el frontend desde el formulario común.
+TYPE FIELD — RULES:
+Each rate row encodes ONE container size + ONE category in \`type\`:
+  - "20'Dry"     → 20-foot dry container
+  - "40'Dry"     → 40-foot dry container
+  - "40'Reefer"  → 40-foot reefer (refrigerated)
+  - "20'Flexi"   → 20-foot dry stuffed with flexitank
+NEVER emit just "Dry" or "Reefer" without size. Two-size rows split into two RateRows.
 
-CELDAS COMPUESTAS: si una celda tiene formato "USD 2540 + USD 60 BL Fee" o "USD X + Y BL" (común en tarifas Reefer 40' de PIL u otras navieras), SIEMPRE extralo como UNA tarifa válida — NO descartes esas filas. Parseá el primer número antes del "+" como sf, el segundo como blFee. Lo mismo para variantes tipo "2540/60", "2540 (60 BL)", "2540+60". Si solo hay un número, ponelo en sf y blFee=0.
+HARD RULES:
+1. EBS = EFS. NEVER include them in sf. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60.
+2. Thermal Liner / Thermo Liner / Insulado: emit original label.
+3. Multi-carrier on one row: set sl="OOCL or CMA". DO NOT clone.
+4. Bundle "includes X, Y, Z": keep sf as one number. Add "Incluye: <list>" to notas.
+5. LCL rows: skip entirely.
+6. Compound SF cells like "USD 2540 + USD 60 BL Fee" or "2540/60": parse first number as sf, second as bl_fee.
+
+If the chunk is not a rate table, return { "rates": [] }.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -366,32 +430,174 @@ function toStr(v: unknown): string {
 }
 
 // ============================================================================
-// Step 1 — UI helpers for the cost editor
+// v3 extraction-pipeline types and helpers
 // ============================================================================
 
-// Quick-add definitions: predefined cost types the user can add with one
-// click. "Otros" is the free-form fallback.
-const QUICK_COSTS: Array<{
-  kind: AdditionalCostKind;
-  label: string;
-  applies: AppliesTo;
-}> = [
-  { kind: "thermal_chile", label: "Thermal Liner Chile 20'", applies: "20" },
-  { kind: "thermal_chile", label: "Thermal Liner Chile 40'", applies: "40" },
-  { kind: "thermal_mendoza", label: "Thermal Liner Mendoza 20'", applies: "20" },
-  { kind: "thermal_mendoza", label: "Thermal Liner Mendoza 40'", applies: "40" },
-  { kind: "fca_haulage_mendoza", label: "FCA Haulage Mendoza 20'", applies: "20" },
-  { kind: "fca_haulage_mendoza", label: "FCA Haulage Mendoza 40'", applies: "40" },
-  { kind: "flexitank_chile", label: "Flexitank Chile 20'", applies: "20" },
-  { kind: "flexitank_chile", label: "Flexitank Chile 40'", applies: "40" },
-  { kind: "flexitank_argentina", label: "Flexitank Argentina 20'", applies: "20" },
-  { kind: "flexitank_argentina", label: "Flexitank Argentina 40'", applies: "40" },
-  { kind: "agency_fee", label: "Agency Fee (USD/ctr)", applies: "all" },
-  { kind: "agency_fee_max", label: "Agency Fee Max (USD/BL)", applies: "all" },
-  { kind: "discount_insulated", label: "Descuento insulado", applies: "dry" },
-];
+// Shape of one rate row as returned by Claude (post-JSON-parse, pre-Frontend
+// canonicalization). The fields are loose-typed because Claude can drop or
+// vary field names slightly; toStr/toNumber coerce later.
+type RawRate = {
+  carrier?: unknown;
+  pol?: unknown;
+  pod?: unknown;
+  route?: unknown;
+  type?: unknown;
+  tipo?: unknown;
+  sl?: unknown;
+  sf?: unknown;
+  bl_fee?: unknown;
+  blFee?: unknown;
+  validFrom?: unknown;
+  validTo?: unknown;
+  kinds?: unknown;
+  notas?: unknown;
+  notes?: unknown;
+};
+
+type RawKind = {
+  label?: unknown;
+  value20?: unknown;
+  value40?: unknown;
+  value_unique?: unknown;
+};
+
+// Wrapper Claude returns for the non-chunked path. The chunked path returns
+// just { rates: [...] } — agent/validity/notas inference happens elsewhere.
+type ExtractedBatch = {
+  agent_inferred?: string;
+  validity_inferred?: { from?: string | null; to?: string | null } | null;
+  notas_globales?: string;
+  rates: RawRate[];
+};
 
 const QUARTER_LABELS: Quarter[] = ["Q1", "Q2", "Q3", "Q4"];
+
+// Coerces a free-text "type" value out of an extracted row to one of the v3
+// ContainerType literals. Falls back to migrateContainerType which knows about
+// historical synonyms ("40'HC", "20'-Flexi", "Reefer", etc.).
+function coerceContainerType(raw: unknown): {
+  tipo: ContainerType;
+  note?: string;
+} {
+  const s = toStr(raw);
+  if (CONTAINER_TYPES.includes(s as ContainerType)) {
+    return { tipo: s as ContainerType };
+  }
+  return migrateContainerType(s);
+}
+
+// Aggregates kind labels from all extracted rows into a deduplicated list of
+// KindDef + KindValue. Predefined ids win when an alias matches; unknown
+// labels become custom kinds with scope="all" and by_size inferred from
+// whether any row carried value20/value40 for that label. The first
+// non-empty value seen for a given (kindId, size) wins — sufficient for the
+// fixture's "all rates share the same kind values per agent" pattern.
+function detectKindsFromExtracted(rates: RawRate[]): {
+  kinds: KindDef[];
+  kindValues: KindValue[];
+} {
+  const kindsById = new Map<string, KindDef>();
+  const valuesById = new Map<string, KindValue>();
+  for (const r of rates) {
+    if (!Array.isArray(r.kinds)) continue;
+    for (const k of r.kinds as RawKind[]) {
+      const label = toStr(k.label).trim();
+      if (!label) continue;
+      const matchedId = matchKindByAlias(label);
+      let kindId: string;
+      let def: KindDef;
+      if (matchedId) {
+        const pred = PREDEFINED_KINDS.find((p) => p.id === matchedId);
+        if (!pred) continue;
+        kindId = pred.id;
+        def = pred;
+      } else {
+        kindId = "custom_" + slugifyKindLabel(label);
+        const hasSizeValue =
+          k.value20 !== undefined && k.value20 !== null && k.value20 !== ""
+            ? true
+            : k.value40 !== undefined && k.value40 !== null && k.value40 !== "";
+        def = {
+          id: kindId,
+          label,
+          scope: "all",
+          by_size: hasSizeValue,
+          predefined: false,
+        };
+      }
+      if (!kindsById.has(kindId)) kindsById.set(kindId, def);
+
+      let kv = valuesById.get(kindId);
+      if (!kv) {
+        kv = { kind_id: kindId };
+        valuesById.set(kindId, kv);
+      }
+      const v20 = toNumber(k.value20);
+      const v40 = toNumber(k.value40);
+      const vu = toNumber(k.value_unique);
+      if (v20 && kv.value20 === undefined) kv.value20 = v20;
+      if (v40 && kv.value40 === undefined) kv.value40 = v40;
+      if (vu && kv.value_unique === undefined && !def.by_size) {
+        kv.value_unique = vu;
+      }
+      // For by_size kinds where the source provided only a unique value
+      // (e.g. CCL "Thermal Liner = USD 350"), copy it to both 20 and 40.
+      if (vu && def.by_size) {
+        if (kv.value20 === undefined) kv.value20 = vu;
+        if (kv.value40 === undefined) kv.value40 = vu;
+      }
+    }
+  }
+  return {
+    kinds: Array.from(kindsById.values()),
+    kindValues: Array.from(valuesById.values()),
+  };
+}
+
+// Expands rate rows whose `sl` field carries multiple carriers (e.g.
+// "OOCL or CMA", "OOCL/EVER") into one row per carrier. Pol/pod/type/sf/etc.
+// stay identical; only the carrier and sl strings differ. Returns the input
+// unchanged when no row has a multi-carrier signal.
+function expandMultiCarrier(rates: RawRate[]): RawRate[] {
+  const out: RawRate[] = [];
+  for (const r of rates) {
+    const sl = toStr(r.sl);
+    const carriers = parseMultiCarrier(sl);
+    if (carriers.length <= 1) {
+      out.push(r);
+      continue;
+    }
+    for (const c of carriers) {
+      out.push({ ...r, sl: c, carrier: c });
+    }
+  }
+  return out;
+}
+
+// Splits an Excel CSV blob (the cleaned text we feed Claude) into per-sheet
+// pieces and drops sheets that look like LCL — see isLclSheet for indicators.
+// Returns the surviving text plus the names of dropped sheets so the UI can
+// surface them.
+function dropLclSheetsFromExcelText(text: string): {
+  text: string;
+  droppedSheets: string[];
+} {
+  if (!text.includes("Hoja:")) return { text, droppedSheets: [] };
+  const sheets = text.split(/(?=^Hoja:\s)/m);
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const s of sheets) {
+    if (!s.trim()) continue;
+    const m = s.match(/^Hoja:\s*(.+?)\n/);
+    const name = m ? m[1] ?? "?" : "?";
+    if (isLclSheet(s)) {
+      dropped.push(name);
+    } else {
+      kept.push(s);
+    }
+  }
+  return { text: kept.join("\n\n").trimEnd(), droppedSheets: dropped };
+}
 
 // ============================================================================
 // Component
@@ -421,7 +627,7 @@ export default function NewRateFlow({
   const isEditMode = Boolean(editingRate);
   const [step, setStep] = useState<Step>(isEditMode ? "preview" : "input");
 
-  // ---- Step 1: common defaults ----
+  // ---- Step 1: header (agent + validity + batch notas) ----
   const [agent, setAgent] = useState(editingRate?.agent ?? "");
   const [validityMode, setValidityMode] = useState<"dates" | "quarter">(
     "dates"
@@ -432,8 +638,22 @@ export default function NewRateFlow({
     new Date().getFullYear()
   );
   const [quarterPicked, setQuarterPicked] = useState<Set<Quarter>>(new Set());
-  const [costs, setCosts] = useState<AdditionalCost[]>(
-    editingRate?.additionalCosts?.map((c) => ({ ...c })) ?? []
+  const [batchNotas, setBatchNotas] = useState("");
+
+  // ---- Inferred (from extraction; used as fallback when user fields empty) ----
+  const [agentInferred, setAgentInferred] = useState("");
+  const [validityInferred, setValidityInferred] = useState<{
+    from?: string | null;
+    to?: string | null;
+  } | null>(null);
+  const [notasGlobalesInferred, setNotasGlobalesInferred] = useState("");
+
+  // ---- Step 1: kinds editor (zone b) ----
+  const [batchKinds, setBatchKinds] = useState<KindDef[]>(
+    editingRate?.kinds ? editingRate.kinds.map((k) => ({ ...k })) : []
+  );
+  const [batchKindValues, setBatchKindValues] = useState<KindValue[]>(
+    editingRate?.kind_values ? editingRate.kind_values.map((kv) => ({ ...kv })) : []
   );
 
   const agentSuggestions = useMemo(
@@ -467,13 +687,13 @@ export default function NewRateFlow({
       ? [
           {
             carrier: editingRate.carrier,
+            pol: editingRate.pol ?? "",
+            pod: editingRate.pod ?? "",
             route: editingRate.route,
             tipo: editingRate.tipo,
+            sl: editingRate.sl ?? editingRate.carrier,
             sf: editingRate.sf,
             blFee: editingRate.blFee,
-            af: editingRate.af,
-            afMax: editingRate.afMax,
-            flexiArg: editingRate.flexiArg,
             notes: editingRate.notes,
           },
         ]
@@ -492,9 +712,11 @@ export default function NewRateFlow({
     retrying?: boolean;
   } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [extractionDone, setExtractionDone] = useState(isEditMode);
+  const [extractionInfo, setExtractionInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Validity resolution (for Step 1 button enable + display).
+  // Validity resolution from user inputs alone (Step 1 dates/quarter pickers).
   const resolvedValidity = useMemo(() => {
     if (validityMode === "dates") {
       if (!validFrom) return null;
@@ -504,21 +726,41 @@ export default function NewRateFlow({
     return quartersToDateRange(quarterYear, quarterPicked);
   }, [validityMode, validFrom, validTo, quarterYear, quarterPicked]);
 
-  // Step 1 validity for "Procesar y revisar" button.
-  const step1Errors: string[] = [];
-  if (!agent.trim()) step1Errors.push("Falta indicar el agente.");
-  if (!resolvedValidity)
-    step1Errors.push(
+  // Effective agent / validity: user input wins. The inferred values are used
+  // ONLY as fallback when the user fields are empty at the moment of save.
+  // No detector ever overwrites a non-empty user field — see PRECEDENCE rule.
+  const effectiveAgent = agent.trim() || agentInferred.trim();
+  const effectiveValidity = useMemo<{ validFrom: string; validTo: string } | null>(
+    () => {
+      if (resolvedValidity) return resolvedValidity;
+      if (validityInferred?.from) {
+        return {
+          validFrom: validityInferred.from,
+          validTo: validityInferred.to ?? "",
+        };
+      }
+      return null;
+    },
+    [resolvedValidity, validityInferred]
+  );
+
+  const hasInput =
+    !!fileName || !!pasteText.trim() || !!imageData || !!docxText || !!excelText;
+
+  // Validation for "Continuar al preview" — runs after extraction has populated
+  // suggestions, so we check effectiveAgent/effectiveValidity (user OR inferred).
+  const continueErrors: string[] = [];
+  if (!effectiveAgent.trim()) continueErrors.push("Falta indicar el agente.");
+  if (!effectiveValidity)
+    continueErrors.push(
       validityMode === "dates"
         ? validFrom && validTo && validTo < validFrom
           ? "La fecha 'Vigente hasta' debe ser ≥ 'Vigente desde'."
           : "Falta la fecha de validez desde."
         : "Falta seleccionar al menos un quarter."
     );
-  const hasInput =
-    !!fileName || !!pasteText.trim() || !!imageData || !!docxText || !!excelText;
-  if (!hasInput && !isEditMode)
-    step1Errors.push("Subí un archivo o pegá texto con las tarifas.");
+  if (!extractionDone && !isEditMode)
+    continueErrors.push("Procesá el archivo antes de continuar.");
 
   // ---- File handling ----
   const handleFile = async (file: File) => {
@@ -528,6 +770,7 @@ export default function NewRateFlow({
     setImageData(null);
     setDocxText("");
     setExcelText("");
+    setExtractionDone(false);
     if (file.size > LARGE_FILE_BYTES) {
       const mb = (file.size / (1024 * 1024)).toFixed(1);
       setExcelTruncWarning(
@@ -623,15 +866,65 @@ export default function NewRateFlow({
     return { rows, failed, partial };
   };
 
-  // ---- Step 1 → Step 2 ----
-  const processAndReview = async () => {
-    if (step1Errors.length > 0) return;
+  // Coerces an array of API response objects into ExtractedBatch shape.
+  // The chunked path returns one object per chunk (each with .rates); the
+  // single-call path returns one object with the whole batch wrapper.
+  const collectBatchFromChunks = (rows: Record<string, unknown>[]): ExtractedBatch => {
+    const allRates: RawRate[] = [];
+    let agentInf = "";
+    let validityInf: ExtractedBatch["validity_inferred"] = null;
+    let notasGlob = "";
+    for (const r of rows) {
+      const ratesField = (r as Record<string, unknown>).rates;
+      if (Array.isArray(ratesField)) {
+        allRates.push(...(ratesField as RawRate[]));
+      } else if (
+        Array.isArray(r) === false &&
+        ((r.carrier !== undefined) || (r.type !== undefined) || (r.tipo !== undefined))
+      ) {
+        // Some chunks may return a bare rate object instead of { rates: [...] }
+        allRates.push(r as RawRate);
+      }
+      if (!agentInf && typeof r.agent_inferred === "string") {
+        agentInf = r.agent_inferred;
+      }
+      if (!validityInf && r.validity_inferred && typeof r.validity_inferred === "object") {
+        validityInf = r.validity_inferred as ExtractedBatch["validity_inferred"];
+      }
+      if (!notasGlob && typeof r.notas_globales === "string") {
+        notasGlob = r.notas_globales;
+      }
+    }
+    return {
+      agent_inferred: agentInf,
+      validity_inferred: validityInf,
+      notas_globales: notasGlob,
+      rates: allRates,
+    };
+  };
+
+  // ---- Step 1: process file/text → populate kinds + preview rows ----
+  // Pipeline: extract → detect kinds → expand multi-carrier → apply user-input
+  // precedence for agent/validity → set previewRows. The user reviews the
+  // detected kinds in Step 1 and clicks "Continuar al preview" to see the
+  // table in Step 2.
+  const processInput = async () => {
+    if (!hasInput) {
+      setError("Subí un archivo o pegá texto con las tarifas.");
+      return;
+    }
     setLoading(true);
     setError(null);
+    setExtractionInfo(null);
     try {
-      let rows: Record<string, unknown>[] = [];
+      let extracted: ExtractedBatch = { rates: [] };
+      let droppedSheets: string[] = [];
+
       if (excelText) {
-        const chunks = chunkExcelCsv(excelText);
+        // Drop LCL sheets silently before sending to Claude.
+        const filtered = dropLclSheetsFromExcelText(excelText);
+        droppedSheets = filtered.droppedSheets;
+        const chunks = chunkExcelCsv(filtered.text);
         const items = chunks.map((c, i) => ({
           index: i + 1,
           content: `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${c}`,
@@ -639,10 +932,10 @@ export default function NewRateFlow({
         setChunkProgress({ current: 0, total: chunks.length });
         const result = await processChunks(items, chunks.length);
         setChunkProgress(null);
-        rows = result.rows;
+        extracted = collectBatchFromChunks(result.rows);
         if (result.failed.length > 0) {
           setError(
-            `Bloques fallidos tras 3 reintentos: ${result.failed.join(", ")}. ${rows.length} tarifas extraídas.`
+            `Bloques fallidos tras 3 reintentos: ${result.failed.join(", ")}. ${extracted.rates.length} tarifas extraídas.`
           );
         }
       } else if (imageData) {
@@ -664,29 +957,88 @@ export default function NewRateFlow({
           },
         ];
         const result = await callExtractApi(content, RATE_SYSTEM);
-        rows = result.rows;
+        extracted = collectBatchFromChunks(result.rows);
       } else if (docxText) {
         const result = await callExtractApi(
           `Contenido del documento Word:\n\n${docxText}`,
           RATE_SYSTEM
         );
-        rows = result.rows;
+        extracted = collectBatchFromChunks(result.rows);
       } else if (pasteText.trim()) {
         const result = await callExtractApi(pasteText, RATE_SYSTEM);
-        rows = result.rows;
+        extracted = collectBatchFromChunks(result.rows);
       }
-      // Strip any truncated metadata; we don't surface that here.
-      const cleaned = rows.map((r) => {
-        if ("truncated" in r) {
-          const { truncated: _t, ...rest } = r;
-          void _t;
-          return rest;
-        }
-        return r;
+
+      // Detect kinds + values from the extracted rows.
+      const detected = detectKindsFromExtracted(extracted.rates);
+      setBatchKinds(detected.kinds);
+      setBatchKindValues(detected.kindValues);
+
+      // Apply user-input precedence: only set inferred slots if user fields
+      // are still empty. Never overwrite a non-empty user field.
+      if (extracted.agent_inferred && !agent.trim()) {
+        setAgentInferred(extracted.agent_inferred);
+      }
+      if (extracted.validity_inferred && !validFrom && !validTo) {
+        setValidityInferred(extracted.validity_inferred);
+      }
+      if (extracted.notas_globales) {
+        setNotasGlobalesInferred(extracted.notas_globales);
+      }
+
+      // Multi-carrier rows clone into one row per carrier.
+      const expanded = expandMultiCarrier(extracted.rates);
+
+      // Convert raw rate rows into preview-table records.
+      const rows: Record<string, unknown>[] = expanded.map((r) => {
+        const baseNotes = toStr(r.notas ?? r.notes);
+        const tipoOut = coerceContainerType(r.type ?? r.tipo);
+        const notes = tipoOut.note
+          ? baseNotes
+            ? `${baseNotes}\n${tipoOut.note}`
+            : tipoOut.note
+          : baseNotes;
+        const carrier = toStr(r.carrier);
+        const sl = toStr(r.sl) || carrier;
+        const pol = toStr(r.pol);
+        const pod = toStr(r.pod);
+        const route = toStr(r.route) || (pol && pod ? `${pol} - ${pod}` : pol || pod);
+        // Bundle inclusions detection (from notes or explicit field). When
+        // present, append to notes per the spec — SF stays as one number.
+        const bundle = detectBundleInclusions(notes);
+        const finalNotes = bundle
+          ? notes // already contains "Incluye:" tokens; leave as-is
+          : notes;
+        return {
+          carrier,
+          pol,
+          pod,
+          route,
+          tipo: tipoOut.tipo,
+          sl,
+          sf: toNumber(r.sf),
+          blFee: toNumber(r.bl_fee ?? r.blFee),
+          validFrom: toStr(r.validFrom),
+          validTo: toStr(r.validTo),
+          notes: finalNotes,
+        };
       });
-      setPreviewRows(cleaned);
-      setPreviewSelected(new Set(cleaned.map((_, i) => i)));
-      setStep("preview");
+
+      setPreviewRows(rows);
+      setPreviewSelected(new Set(rows.map((_, i) => i)));
+      setExtractionDone(true);
+
+      // Surface non-blocking info (LCL skipped, kinds detected count).
+      const infoParts: string[] = [];
+      if (droppedSheets.length > 0) {
+        infoParts.push(
+          `${droppedSheets.length} hoja${droppedSheets.length === 1 ? "" : "s"} LCL skipeada${droppedSheets.length === 1 ? "" : "s"} (${droppedSheets.join(", ")})`
+        );
+      }
+      infoParts.push(
+        `${detected.kinds.length} kind${detected.kinds.length === 1 ? "" : "s"} detectado${detected.kinds.length === 1 ? "" : "s"}, ${rows.length} tarifa${rows.length === 1 ? "" : "s"} extraída${rows.length === 1 ? "" : "s"}.`
+      );
+      setExtractionInfo(infoParts.join(" · "));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al extraer datos");
     } finally {
@@ -694,19 +1046,28 @@ export default function NewRateFlow({
     }
   };
 
-  // ---- Cost editor ----
-  const addCost = (
-    kind: AdditionalCostKind,
-    label: string,
-    applies: AppliesTo
-  ) => {
-    setCosts((prev) => [...prev, buildAdditionalCost(kind, label, 0, applies)]);
+  // ---- Kinds editor handlers ----
+  const addKind = (def: KindDef) => {
+    setBatchKinds((prev) =>
+      prev.some((k) => k.id === def.id) ? prev : [...prev, def]
+    );
+    setBatchKindValues((prev) =>
+      prev.some((kv) => kv.kind_id === def.id) ? prev : [...prev, { kind_id: def.id }]
+    );
   };
-  const updateCost = (id: string, patch: Partial<AdditionalCost>) => {
-    setCosts((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  const removeKind = (id: string) => {
+    setBatchKinds((prev) => prev.filter((k) => k.id !== id));
+    setBatchKindValues((prev) => prev.filter((kv) => kv.kind_id !== id));
   };
-  const removeCost = (id: string) => {
-    setCosts((prev) => prev.filter((c) => c.id !== id));
+  const updateKindDef = (id: string, patch: Partial<KindDef>) => {
+    setBatchKinds((prev) =>
+      prev.map((k) => (k.id === id ? { ...k, ...patch } : k))
+    );
+  };
+  const updateKindValue = (id: string, patch: Partial<KindValue>) => {
+    setBatchKindValues((prev) =>
+      prev.map((kv) => (kv.kind_id === id ? { ...kv, ...patch } : kv))
+    );
   };
 
   // ---- Save flow ----
@@ -716,53 +1077,69 @@ export default function NewRateFlow({
       agent: string;
       validFrom: string;
       validTo: string;
-      costs: AdditionalCost[];
     },
-    idx: number
+    idx: number,
+    kinds: KindDef[],
+    kindValues: KindValue[]
   ): Rate => {
-    // Pre-generate a stable id so React StrictMode's double-invocation can't
-    // produce different ids on the two passes.
     const stamp = Date.now();
     const rand = Math.random().toString(36).slice(2, 8);
-    const find = (kind: AdditionalCostKind, applies: AppliesTo) =>
-      common.costs.find((c) => c.kind === kind && c.applies === applies)
-        ?.value ?? 0;
+    const tipoRaw = toStr(row.tipo);
+    const tipoOut = CONTAINER_TYPES.includes(tipoRaw as ContainerType)
+      ? { tipo: tipoRaw as ContainerType, note: undefined as string | undefined }
+      : (() => {
+          const m = migrateContainerType(tipoRaw);
+          return { tipo: m.tipo, note: m.note };
+        })();
+    const baseNotes = toStr(row.notes);
+    const notes = tipoOut.note
+      ? baseNotes
+        ? `${baseNotes}\n${tipoOut.note}`
+        : tipoOut.note
+      : baseNotes;
     return {
       id: `rate-${stamp}-${idx}-${rand}`,
       agent: common.agent.trim(),
       carrier: toStr(row.carrier),
+      pol: toStr(row.pol),
+      pod: toStr(row.pod),
       route: toStr(row.route),
-      tipo: toStr(row.tipo),
+      tipo: tipoOut.tipo,
+      sl: toStr(row.sl) || toStr(row.carrier),
       sf: toNumber(row.sf),
       blFee: toNumber(row.blFee),
-      af: toNumber(row.af) || find("agency_fee", "all"),
-      afMax: toNumber(row.afMax) || find("agency_fee_max", "all"),
-      flexiArg: toNumber(row.flexiArg),
-      additionalCosts: common.costs.map((c) => ({ ...c })),
-      // Mirror the canonical costs into the legacy fields so the existing
-      // invoicing logic (which still reads the fixed shape) keeps working
-      // until that layer migrates to additionalCosts.
-      thermalLinerChile20: find("thermal_chile", "20"),
-      thermalLinerChile40: find("thermal_chile", "40"),
-      thermalLinerMendoza20: find("thermal_mendoza", "20"),
-      thermalLinerMendoza40: find("thermal_mendoza", "40"),
-      fcaHaulageMendoza20: find("fca_haulage_mendoza", "20"),
-      fcaHaulageMendoza40: find("fca_haulage_mendoza", "40"),
-      discountInsulated: find("discount_insulated", "dry"),
+      af: 0,
+      afMax: 0,
+      flexiArg: 0,
+      kind_values: kindValues.map((kv) => ({ ...kv })),
+      kinds: kinds.map((k) => ({ ...k })),
       validFrom: common.validFrom,
       validTo: common.validTo,
-      notes: toStr(row.notes),
+      notes,
+      notas: notes,
+      additionalCosts: [],
     };
   };
 
+  const continueToPreview = () => {
+    if (continueErrors.length > 0) return;
+    setStep("preview");
+  };
+
   const saveSelected = () => {
-    if (!resolvedValidity) return;
+    if (!effectiveValidity) return;
     if (isEditMode && editingRate && onSaveEdit) {
       const row = previewRows[0]!;
       const updated = buildRateFromRow(
         row,
-        { agent, validFrom: resolvedValidity.validFrom, validTo: resolvedValidity.validTo, costs },
-        0
+        {
+          agent: effectiveAgent,
+          validFrom: effectiveValidity.validFrom,
+          validTo: effectiveValidity.validTo,
+        },
+        0,
+        batchKinds,
+        batchKindValues
       );
       // Preserve the original id when editing.
       onSaveEdit({ ...updated, id: editingRate.id });
@@ -777,12 +1154,13 @@ export default function NewRateFlow({
       buildRateFromRow(
         row,
         {
-          agent,
-          validFrom: resolvedValidity.validFrom,
-          validTo: resolvedValidity.validTo,
-          costs,
+          agent: effectiveAgent,
+          validFrom: effectiveValidity.validFrom,
+          validTo: effectiveValidity.validTo,
         },
-        idx
+        idx,
+        batchKinds,
+        batchKindValues
       )
     );
     onSaveMany(rates);
@@ -867,7 +1245,7 @@ export default function NewRateFlow({
           </Button>
         </div>
 
-        {/* Agent input */}
+        {/* === Zone A: Header === */}
         <Step1AgentField
           agent={agent}
           onChange={setAgent}
@@ -875,7 +1253,30 @@ export default function NewRateFlow({
           match={agentMatch}
         />
 
-        {/* Validity */}
+        {/* Inferred-agent banner. Shown only when extraction inferred a name
+            AND the user has nothing typed — never overrides a non-empty input. */}
+        {!agent.trim() && agentInferred && (
+          <div className="text-xs bg-blue-50 text-blue-900 border border-blue-200 rounded px-2 py-1.5 flex items-center gap-2">
+            <span>
+              Agente detectado: <strong>{agentInferred}</strong>
+            </span>
+            <button
+              type="button"
+              onClick={() => setAgent(agentInferred)}
+              className="px-2 py-0.5 rounded border border-blue-300 bg-white hover:bg-blue-100 cursor-pointer"
+            >
+              Usar
+            </button>
+            <button
+              type="button"
+              onClick={() => setAgentInferred("")}
+              className="text-blue-700 underline cursor-pointer"
+            >
+              Ignorar
+            </button>
+          </div>
+        )}
+
         <Step1ValidityField
           mode={validityMode}
           onChangeMode={setValidityMode}
@@ -897,15 +1298,76 @@ export default function NewRateFlow({
           resolved={resolvedValidity}
         />
 
-        {/* Costs editor */}
-        <Step1CostsEditor
-          costs={costs}
-          onAdd={addCost}
-          onUpdate={updateCost}
-          onRemove={removeCost}
+        {/* Inferred-validity banner. Same precedence rule. */}
+        {!validFrom && !validTo && validityInferred?.from && (
+          <div className="text-xs bg-blue-50 text-blue-900 border border-blue-200 rounded px-2 py-1.5 flex items-center gap-2">
+            <span>
+              Validez detectada:{" "}
+              <strong>
+                {validityInferred.from}
+                {validityInferred.to ? ` — ${validityInferred.to}` : ""}
+              </strong>
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                if (validityInferred.from) setValidFrom(validityInferred.from);
+                if (validityInferred.to) setValidTo(validityInferred.to);
+                setValidityInferred(null);
+              }}
+              className="px-2 py-0.5 rounded border border-blue-300 bg-white hover:bg-blue-100 cursor-pointer"
+            >
+              Usar
+            </button>
+            <button
+              type="button"
+              onClick={() => setValidityInferred(null)}
+              className="text-blue-700 underline cursor-pointer"
+            >
+              Ignorar
+            </button>
+          </div>
+        )}
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Notas del batch (opcional)</span>
+          <textarea
+            value={batchNotas}
+            onChange={(e) => setBatchNotas(e.target.value)}
+            placeholder="Free days, contexto de mercado, add-ons regionales — info que aplica a todas las tarifas del batch"
+            rows={2}
+            className="w-full border border-gray-200 rounded-md p-2 text-sm"
+          />
+          {notasGlobalesInferred && !batchNotas.trim() && (
+            <span className="text-xs bg-blue-50 text-blue-900 border border-blue-200 rounded px-2 py-1 flex items-center gap-2">
+              <span className="truncate">
+                Detectado: <em>{notasGlobalesInferred.slice(0, 100)}{notasGlobalesInferred.length > 100 ? "…" : ""}</em>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setBatchNotas(notasGlobalesInferred);
+                  setNotasGlobalesInferred("");
+                }}
+                className="px-2 py-0.5 rounded border border-blue-300 bg-white hover:bg-blue-100 cursor-pointer"
+              >
+                Usar
+              </button>
+            </span>
+          )}
+        </label>
+
+        {/* === Zone B: Kinds editor === */}
+        <Step1KindsEditor
+          kinds={batchKinds}
+          values={batchKindValues}
+          onAdd={addKind}
+          onRemove={removeKind}
+          onUpdateDef={updateKindDef}
+          onUpdateValue={updateKindValue}
         />
 
-        {/* Input zone */}
+        {/* === Zone C: Input === */}
         <div className="flex flex-col gap-2">
           <div className="text-sm font-medium">
             Datos de las tarifas (subí archivo o pegá texto)
@@ -968,7 +1430,10 @@ export default function NewRateFlow({
           />
           <textarea
             value={pasteText}
-            onChange={(e) => setPasteText(e.target.value)}
+            onChange={(e) => {
+              setPasteText(e.target.value);
+              if (extractionDone) setExtractionDone(false);
+            }}
             placeholder="O pegá aquí el texto con las tarifas (ej: cuerpo del email del agente)"
             rows={6}
             className="w-full border border-gray-200 rounded-md p-2 text-sm font-mono"
@@ -980,24 +1445,44 @@ export default function NewRateFlow({
             ⚠️ {excelTruncWarning}
           </div>
         )}
+        {extractionInfo && !error && (
+          <div className="text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded-md px-3 py-2">
+            ✓ {extractionInfo}
+          </div>
+        )}
         {error && <div className="text-sm text-red-600">{error}</div>}
 
-        {step1Errors.length > 0 && (
+        <div className="flex justify-end gap-2 flex-wrap">
+          <Button
+            variant={extractionDone ? "outline" : "default"}
+            onClick={processInput}
+            disabled={!hasInput || loading}
+          >
+            {loading
+              ? "Procesando..."
+              : extractionDone
+                ? "Re-procesar"
+                : "Procesar archivo"}
+          </Button>
+          {extractionDone && (
+            <Button
+              onClick={continueToPreview}
+              disabled={continueErrors.length > 0}
+              title={continueErrors.join(" · ")}
+            >
+              Continuar al preview ({previewRows.length} tarifa
+              {previewRows.length === 1 ? "" : "s"}) →
+            </Button>
+          )}
+        </div>
+
+        {extractionDone && continueErrors.length > 0 && (
           <ul className="text-xs text-red-600 list-disc pl-5">
-            {step1Errors.map((m, i) => (
+            {continueErrors.map((m, i) => (
               <li key={i}>{m}</li>
             ))}
           </ul>
         )}
-
-        <div className="flex justify-end gap-2">
-          <Button
-            onClick={processAndReview}
-            disabled={step1Errors.length > 0 || loading}
-          >
-            {loading ? "Procesando..." : "Procesar y revisar"}
-          </Button>
-        </div>
       </div>
     );
   }
@@ -1006,9 +1491,10 @@ export default function NewRateFlow({
   return (
     <PreviewStep
       isEditMode={isEditMode}
-      agent={agent}
-      validity={resolvedValidity}
-      costs={costs}
+      agent={effectiveAgent}
+      validity={effectiveValidity}
+      kinds={batchKinds}
+      kindValues={batchKindValues}
       rows={previewRows}
       selected={previewSelected}
       editingIdx={editingIdx}
@@ -1204,137 +1690,323 @@ function Step1ValidityField({
   );
 }
 
-function Step1CostsEditor({
-  costs,
+// Renders the kinds editor in Step 1 zone (b). Each kind is shown as a card
+// with its scope and value inputs; the user can edit values, change scope,
+// remove a kind, or open the AddKindModal to introduce a new one (predefined
+// from the catalog or fully custom).
+function Step1KindsEditor({
+  kinds,
+  values,
   onAdd,
-  onUpdate,
   onRemove,
+  onUpdateDef,
+  onUpdateValue,
 }: {
-  costs: AdditionalCost[];
-  onAdd: (kind: AdditionalCostKind, label: string, applies: AppliesTo) => void;
-  onUpdate: (id: string, patch: Partial<AdditionalCost>) => void;
+  kinds: KindDef[];
+  values: KindValue[];
+  onAdd: (def: KindDef) => void;
   onRemove: (id: string) => void;
+  onUpdateDef: (id: string, patch: Partial<KindDef>) => void;
+  onUpdateValue: (id: string, patch: Partial<KindValue>) => void;
 }) {
-  const [showQuickAdd, setShowQuickAdd] = useState(false);
-  const [otherLabel, setOtherLabel] = useState("");
-  const [otherApplies, setOtherApplies] = useState<AppliesTo>("all");
+  const [showAddModal, setShowAddModal] = useState(false);
+  const valueByKindId = useMemo(() => {
+    const m = new Map<string, KindValue>();
+    for (const v of values) m.set(v.kind_id, v);
+    return m;
+  }, [values]);
+
   return (
     <div className="flex flex-col gap-2 text-sm">
       <div className="flex items-center justify-between">
-        <span className="font-medium">Costos adicionales (opcional)</span>
+        <span className="font-medium">
+          Kinds detectados ({kinds.length})
+        </span>
         <Button
           variant="outline"
           size="sm"
-          onClick={() => setShowQuickAdd((s) => !s)}
+          onClick={() => setShowAddModal(true)}
         >
-          {showQuickAdd ? "Cerrar" : "+ Agregar costo"}
+          + Agregar kind
         </Button>
       </div>
-      {showQuickAdd && (
-        <div className="border border-gray-200 rounded-md p-3 flex flex-col gap-3 bg-gray-50">
-          <div className="text-xs text-gray-700">
-            Quick add — clic para agregar el costo con valor inicial 0:
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {QUICK_COSTS.map((qc) => (
-              <button
-                key={qc.label}
-                type="button"
-                onClick={() => onAdd(qc.kind, qc.label, qc.applies)}
-                className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-blue-50 cursor-pointer"
-              >
-                + {qc.label}
-              </button>
-            ))}
-          </div>
-          <div className="border-t border-gray-200 pt-3 flex flex-col gap-2">
-            <div className="text-xs text-gray-700">
-              O agregá un costo personalizado (kind = &quot;other&quot;):
-            </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <input
-                type="text"
-                value={otherLabel}
-                onChange={(e) => setOtherLabel(e.target.value)}
-                placeholder="Label (ej: Surcharge BL)"
-                className="flex-1 border border-gray-200 rounded p-1.5 h-9 text-sm bg-white"
-              />
-              <select
-                value={otherApplies}
-                onChange={(e) => setOtherApplies(e.target.value as AppliesTo)}
-                className="border border-gray-200 rounded p-1.5 h-9 text-sm bg-white"
-              >
-                <option value="all">Aplica a todos</option>
-                <option value="20">Solo 20&apos;</option>
-                <option value="40">Solo 40&apos;</option>
-                <option value="dry">Solo Dry</option>
-                <option value="reefer">Solo Reefer</option>
-              </select>
-              <Button
-                size="sm"
-                onClick={() => {
-                  const lbl = otherLabel.trim();
-                  if (!lbl) return;
-                  onAdd("other", lbl, otherApplies);
-                  setOtherLabel("");
-                  setOtherApplies("all");
-                }}
-              >
-                Agregar
-              </Button>
-            </div>
-          </div>
+      {kinds.length === 0 && (
+        <div className="text-xs text-gray-500 border border-dashed border-gray-200 rounded-md p-3 bg-gray-50">
+          Procesá un archivo o pegado para auto-detectar kinds, o agregá uno
+          manualmente.
         </div>
       )}
-      {costs.length > 0 && (
-        <div className="flex flex-col gap-1.5">
-          {costs.map((c) => (
-            <div
-              key={c.id}
-              className="flex items-center gap-2 border border-gray-200 rounded-md p-2 bg-white text-xs"
-            >
-              <input
-                type="text"
-                value={c.label}
-                onChange={(e) => onUpdate(c.id, { label: e.target.value })}
-                className="flex-1 border border-gray-200 rounded p-1 h-8"
-              />
-              <input
-                type="number"
-                value={c.value}
-                onChange={(e) =>
-                  onUpdate(c.id, { value: Number(e.target.value) })
-                }
-                className="w-24 border border-gray-200 rounded p-1 h-8"
-              />
-              <select
-                value={c.applies}
-                onChange={(e) =>
-                  onUpdate(c.id, { applies: e.target.value as AppliesTo })
-                }
-                className="border border-gray-200 rounded p-1 h-8 bg-white"
-              >
-                <option value="all">todos</option>
-                <option value="20">20&apos;</option>
-                <option value="40">40&apos;</option>
-                <option value="dry">dry</option>
-                <option value="reefer">reefer</option>
-              </select>
-              <button
-                type="button"
-                onClick={() => onRemove(c.id)}
-                className="text-red-600 hover:bg-red-50 rounded px-2 py-1 cursor-pointer"
-                aria-label="Eliminar costo"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
+      <div className="flex flex-col gap-2">
+        {kinds.map((k) => (
+          <KindCard
+            key={k.id}
+            def={k}
+            value={valueByKindId.get(k.id) ?? { kind_id: k.id }}
+            onUpdateDef={(patch) => onUpdateDef(k.id, patch)}
+            onUpdateValue={(patch) => onUpdateValue(k.id, patch)}
+            onRemove={() => onRemove(k.id)}
+          />
+        ))}
+      </div>
+      {showAddModal && (
+        <AddKindModal
+          existingIds={new Set(kinds.map((k) => k.id))}
+          onClose={() => setShowAddModal(false)}
+          onAdd={(def) => {
+            onAdd(def);
+            setShowAddModal(false);
+          }}
+        />
       )}
     </div>
   );
 }
+
+const SCOPE_LABELS: Record<KindScope, string> = {
+  dry: "Dry",
+  reefer: "Reefer",
+  all: "Todos",
+};
+
+function KindCard({
+  def,
+  value,
+  onUpdateDef,
+  onUpdateValue,
+  onRemove,
+}: {
+  def: KindDef;
+  value: KindValue;
+  onUpdateDef: (patch: Partial<KindDef>) => void;
+  onUpdateValue: (patch: Partial<KindValue>) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="border border-gray-200 rounded-md p-3 bg-white flex flex-col gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          type="text"
+          value={def.label}
+          onChange={(e) => onUpdateDef({ label: e.target.value })}
+          className="flex-1 min-w-32 border border-gray-200 rounded p-1.5 h-8 text-sm font-medium"
+          disabled={def.predefined}
+          title={def.predefined ? "Label fija (kind predefinido)" : ""}
+        />
+        <select
+          value={def.scope}
+          onChange={(e) => onUpdateDef({ scope: e.target.value as KindScope })}
+          className="border border-gray-200 rounded p-1 h-8 text-xs bg-white"
+        >
+          {(Object.keys(SCOPE_LABELS) as KindScope[]).map((s) => (
+            <option key={s} value={s}>
+              {SCOPE_LABELS[s]}
+            </option>
+          ))}
+        </select>
+        <label className="flex items-center gap-1 text-xs">
+          <input
+            type="checkbox"
+            checked={def.by_size}
+            onChange={(e) => onUpdateDef({ by_size: e.target.checked })}
+          />
+          por tamaño
+        </label>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="text-red-600 hover:bg-red-50 rounded px-2 py-1 cursor-pointer text-xs"
+          aria-label="Eliminar kind"
+          title="Eliminar kind"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="flex items-center gap-3 text-xs">
+        {def.by_size ? (
+          <>
+            <label className="flex items-center gap-1">
+              <span className="text-gray-500">20&apos;</span>
+              <input
+                type="number"
+                value={value.value20 ?? ""}
+                onChange={(e) =>
+                  onUpdateValue({
+                    value20: e.target.value === "" ? undefined : Number(e.target.value),
+                  })
+                }
+                className="w-24 border border-gray-200 rounded p-1 h-8"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-gray-500">40&apos;</span>
+              <input
+                type="number"
+                value={value.value40 ?? ""}
+                onChange={(e) =>
+                  onUpdateValue({
+                    value40: e.target.value === "" ? undefined : Number(e.target.value),
+                  })
+                }
+                className="w-24 border border-gray-200 rounded p-1 h-8"
+              />
+            </label>
+          </>
+        ) : (
+          <label className="flex items-center gap-1">
+            <span className="text-gray-500">valor único</span>
+            <input
+              type="number"
+              value={value.value_unique ?? ""}
+              onChange={(e) =>
+                onUpdateValue({
+                  value_unique:
+                    e.target.value === "" ? undefined : Number(e.target.value),
+                })
+              }
+              className="w-32 border border-gray-200 rounded p-1 h-8"
+            />
+          </label>
+        )}
+        {!def.predefined && (
+          <span className="text-gray-400 italic">custom</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Modal for adding a new kind. Two paths:
+//   1. Pick from PREDEFINED_KINDS catalog — sets id/label/scope/by_size from catalog.
+//   2. Custom kind — user provides label, scope, by_size; id is slugified.
+function AddKindModal({
+  existingIds,
+  onClose,
+  onAdd,
+}: {
+  existingIds: Set<string>;
+  onClose: () => void;
+  onAdd: (def: KindDef) => void;
+}) {
+  const [customLabel, setCustomLabel] = useState("");
+  const [customScope, setCustomScope] = useState<KindScope>("all");
+  const [customBySize, setCustomBySize] = useState(false);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-lg shadow-lg max-w-lg w-full mx-4 p-4 flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <h4 className="font-semibold">Agregar kind</h4>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-500 hover:bg-gray-100 rounded px-2 py-0.5 cursor-pointer"
+            aria-label="Cerrar"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="flex flex-col gap-1 text-sm">
+          <span className="text-xs text-gray-700 uppercase tracking-wide">
+            Predefinidos
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {PREDEFINED_KINDS.map((p) => {
+              const already = existingIds.has(p.id);
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  disabled={already}
+                  onClick={() => onAdd(p)}
+                  className={`px-2 py-1 text-xs rounded border ${
+                    already
+                      ? "bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed"
+                      : "bg-white border-gray-300 hover:bg-blue-50 cursor-pointer"
+                  }`}
+                  title={
+                    already
+                      ? "Ya está agregado"
+                      : `${p.label} · scope=${p.scope}${p.by_size ? " · por tamaño" : ""}`
+                  }
+                >
+                  {already ? "✓ " : "+ "}
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="border-t border-gray-200 pt-3 flex flex-col gap-2 text-sm">
+          <span className="text-xs text-gray-700 uppercase tracking-wide">
+            Custom
+          </span>
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1 flex-1 min-w-32">
+              <span className="text-xs text-gray-500">Label</span>
+              <input
+                type="text"
+                value={customLabel}
+                onChange={(e) => setCustomLabel(e.target.value)}
+                placeholder="Ej: Genset Fee"
+                className="border border-gray-200 rounded p-1.5 h-9 bg-white"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-gray-500">Scope</span>
+              <select
+                value={customScope}
+                onChange={(e) => setCustomScope(e.target.value as KindScope)}
+                className="border border-gray-200 rounded p-1.5 h-9 bg-white"
+              >
+                {(Object.keys(SCOPE_LABELS) as KindScope[]).map((s) => (
+                  <option key={s} value={s}>
+                    {SCOPE_LABELS[s]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-xs h-9">
+              <input
+                type="checkbox"
+                checked={customBySize}
+                onChange={(e) => setCustomBySize(e.target.checked)}
+              />
+              por tamaño
+            </label>
+            <Button
+              size="sm"
+              onClick={() => {
+                const lbl = customLabel.trim();
+                if (!lbl) return;
+                const id = "custom_" + slugifyKindLabel(lbl);
+                if (existingIds.has(id)) return;
+                onAdd({
+                  id,
+                  label: lbl,
+                  scope: customScope,
+                  by_size: customBySize,
+                  predefined: false,
+                });
+              }}
+              disabled={!customLabel.trim()}
+            >
+              Agregar custom
+            </Button>
+          </div>
+          <div className="text-xs text-gray-500">
+            Los kinds custom viven solo en este batch — no se persisten en el
+            catálogo. Usá un kind predefinido cuando coincida.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Aliased to silence "unused" warnings while we keep KIND_ALIASES exposed for
+// callers that want to introspect the matcher's vocabulary. Not used directly
+// here because matchKindByAlias encapsulates the lookup.
+void KIND_ALIASES;
 
 // ============================================================================
 // Step 2 — Preview / Edit
@@ -1344,7 +2016,8 @@ function PreviewStep({
   isEditMode,
   agent,
   validity,
-  costs,
+  kinds,
+  kindValues,
   rows,
   selected,
   editingIdx,
@@ -1361,7 +2034,8 @@ function PreviewStep({
   isEditMode: boolean;
   agent: string;
   validity: { validFrom: string; validTo: string } | null;
-  costs: AdditionalCost[];
+  kinds: KindDef[];
+  kindValues: KindValue[];
   rows: Record<string, unknown>[];
   selected: Set<number>;
   editingIdx: number | null;
@@ -1396,6 +2070,57 @@ function PreviewStep({
         )
     : rows.map((r, i) => ({ r, i }));
 
+  // Index batch kind values by id for quick lookup when rendering each row's
+  // kind columns.
+  const kindValueById = useMemo(() => {
+    const m = new Map<string, KindValue>();
+    for (const kv of kindValues) m.set(kv.kind_id, kv);
+    return m;
+  }, [kindValues]);
+
+  // Headers for the static columns + one column per kind. Kinds with by_size
+  // get two sub-columns (20', 40'); single-value kinds get one.
+  const kindColumns = useMemo(() => {
+    return kinds.flatMap((k) => {
+      if (k.by_size) {
+        return [
+          { kindId: k.id, label: `${k.label} 20'`, size: 20 as const },
+          { kindId: k.id, label: `${k.label} 40'`, size: 40 as const },
+        ];
+      }
+      return [{ kindId: k.id, label: k.label, size: null as null | 20 | 40 }];
+    });
+  }, [kinds]);
+
+  // For one (rate, kindColumn) cell: returns the value to display, or "—"
+  // when scope mismatches the rate's tipo (e.g. a dry-only kind on a Reefer
+  // rate, or a 20'-only column on a 40' rate).
+  const renderKindCell = (
+    r: Record<string, unknown>,
+    col: { kindId: string; size: null | 20 | 40 }
+  ): string => {
+    const def = kinds.find((k) => k.id === col.kindId);
+    if (!def) return "—";
+    const tipoStr = String(r.tipo ?? "");
+    const isReefer = /reefer/i.test(tipoStr);
+    if (def.scope === "dry" && isReefer) return "—";
+    if (def.scope === "reefer" && !isReefer) return "—";
+    const isForty = /^40/.test(tipoStr);
+    if (col.size === 20 && isForty) return "—";
+    if (col.size === 40 && !isForty && def.by_size) return "—";
+    const kv = kindValueById.get(col.kindId);
+    if (!kv) return "—";
+    if (def.by_size) {
+      const v = col.size === 20 ? kv.value20 : kv.value40;
+      return v === undefined ? "—" : `$${v}`;
+    }
+    return kv.value_unique === undefined ? "—" : `$${kv.value_unique}`;
+  };
+
+  const baseHeaders = ["Carrier", "Ruta", "Tipo", "SF", "BL Fee"];
+  const allHeaders = [...baseHeaders, ...kindColumns.map((c) => c.label), "Acciones"];
+  const colCount = (isEditMode ? 0 : 1) + allHeaders.length;
+
   return (
     <div className="bg-white rounded-lg shadow p-4 border border-gray-200 flex flex-col gap-3">
       <div className="flex justify-between items-center">
@@ -1427,11 +2152,18 @@ function PreviewStep({
               }`
             : "—"}
         </div>
-        {costs.length > 0 && (
+        {kinds.length > 0 && (
           <div>
-            <strong>Costos adicionales:</strong>{" "}
-            {costs
-              .map((c) => `${c.label} = $${c.value}`)
+            <strong>Kinds:</strong>{" "}
+            {kinds
+              .map((k) => {
+                const kv = kindValueById.get(k.id);
+                if (!kv) return `${k.label}=—`;
+                if (k.by_size) {
+                  return `${k.label}=${kv.value20 ?? "—"}/${kv.value40 ?? "—"}`;
+                }
+                return `${k.label}=${kv.value_unique ?? "—"}`;
+              })
               .join(" · ")}
           </div>
         )}
@@ -1474,16 +2206,14 @@ function PreviewStep({
                   />
                 </th>
               )}
-              {["Carrier", "Ruta", "Tipo", "SF", "BL Fee", "Acciones"].map(
-                (h) => (
-                  <th
-                    key={h}
-                    className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
-                  >
-                    {h}
-                  </th>
-                )
-              )}
+              {allHeaders.map((h) => (
+                <th
+                  key={h}
+                  className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
+                >
+                  {h}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
@@ -1540,6 +2270,14 @@ function PreviewStep({
                     <td className="px-3 py-2 whitespace-nowrap">
                       ${Number(r.blFee ?? 0)}
                     </td>
+                    {kindColumns.map((col, ci) => (
+                      <td
+                        key={ci}
+                        className="px-3 py-2 whitespace-nowrap text-xs"
+                      >
+                        {renderKindCell(r, col)}
+                      </td>
+                    ))}
                     <td className="px-3 py-2 whitespace-nowrap">
                       {!isEditMode && (
                         <Button
@@ -1556,10 +2294,7 @@ function PreviewStep({
                   </tr>
                   {isEditing && (
                     <tr className="bg-blue-50/40">
-                      <td
-                        colSpan={isEditMode ? 6 : 7}
-                        className="px-3 py-3"
-                      >
+                      <td colSpan={colCount} className="px-3 py-3">
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                           <RowField
                             label="Carrier"
@@ -1568,6 +2303,20 @@ function PreviewStep({
                             onChange={onUpdateField}
                             idx={idx}
                             list="new-rate-carrier-sugg"
+                          />
+                          <RowField
+                            label="POL"
+                            row={r}
+                            field="pol"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
+                          <RowField
+                            label="POD"
+                            row={r}
+                            field="pod"
+                            onChange={onUpdateField}
+                            idx={idx}
                           />
                           <RowField
                             label="Ruta"
@@ -1584,6 +2333,13 @@ function PreviewStep({
                             idx={idx}
                             list="new-rate-tipo-sugg"
                           />
+                          <RowField
+                            label="SL"
+                            row={r}
+                            field="sl"
+                            onChange={onUpdateField}
+                            idx={idx}
+                          />
                           <RowNumField
                             label="SF"
                             row={r}
@@ -1598,27 +2354,6 @@ function PreviewStep({
                             onChange={onUpdateField}
                             idx={idx}
                           />
-                          <RowNumField
-                            label="AF"
-                            row={r}
-                            field="af"
-                            onChange={onUpdateField}
-                            idx={idx}
-                          />
-                          <RowNumField
-                            label="AF Max"
-                            row={r}
-                            field="afMax"
-                            onChange={onUpdateField}
-                            idx={idx}
-                          />
-                          <RowNumField
-                            label="Flexi ARG"
-                            row={r}
-                            field="flexiArg"
-                            onChange={onUpdateField}
-                            idx={idx}
-                          />
                           <RowField
                             label="Notas"
                             row={r}
@@ -1627,6 +2362,10 @@ function PreviewStep({
                             idx={idx}
                             colSpan="col-span-2 md:col-span-4"
                           />
+                        </div>
+                        <div className="text-xs text-gray-500 mt-2">
+                          Los valores de los kinds se editan en Step 1 a nivel
+                          de batch (aplican a todas las tarifas).
                         </div>
                       </td>
                     </tr>
@@ -1651,7 +2390,7 @@ function PreviewStep({
         ))}
       </datalist>
       <datalist id="new-rate-tipo-sugg">
-        {CONTAINER_TYPE_SUGGESTIONS.map((t) => (
+        {CONTAINER_TYPES.map((t) => (
           <option key={t} value={t} />
         ))}
       </datalist>

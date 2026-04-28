@@ -18,15 +18,19 @@ export const CARRIER_SUGGESTIONS = [
   "MSC",
 ] as const;
 
-export const CONTAINER_TYPE_SUGGESTIONS = [
-  "20'",
-  "Flexi",
-  "20'-Flexi",
-  "40'",
-  "40'HC",
-  "20'RF",
-  "40'RF",
+// Canonical container-type literals used by the v3 schema. Each rate row
+// encodes ONE size + ONE category. Free-form strings produced by extraction or
+// loaded from older localStorage records are normalized via migrateContainerType.
+export const CONTAINER_TYPES = [
+  "20'Dry",
+  "40'Dry",
+  "40'Reefer",
+  "20'Flexi",
 ] as const;
+
+export type ContainerType = (typeof CONTAINER_TYPES)[number];
+
+export const CONTAINER_TYPE_SUGGESTIONS = CONTAINER_TYPES;
 
 // EBS aplica por región/tráfico, no por puerto específico. Estas regiones
 // alimentan el datalist del campo "Tráfico" pero el campo es texto libre.
@@ -156,7 +160,13 @@ export function carrierColor(carrier: string): string {
 
 // Storage keys are version-suffixed: bump when the schema or seed changes so
 // existing localStorage data is replaced with the new seeds on next load.
-export const RATES_STORAGE_KEY = "it_rates_v2";
+// v3 introduces dynamic kinds with scope. Migration from v2 (834ad41
+// additionalCosts) and older legacy fields runs once at module init via
+// ensureRateMigration below — see RATE_MIGRATION_FLAG / RATES_STORAGE_KEY_V2.
+export const RATES_STORAGE_KEY = "it_rates_v3";
+export const RATES_STORAGE_KEY_V2 = "it_rates_v2";
+export const RATES_STORAGE_KEY_V2_BACKUP = "it_rates_v2_backup_pre_v3";
+export const RATE_MIGRATION_FLAG = "rate_schema_v3_migrated";
 export const EBS_STORAGE_KEY = "it_ebs_v4";
 export const LOCAL_STD_STORAGE_KEY = "it_local_std";
 export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions_v2";
@@ -230,24 +240,144 @@ export type AdditionalCost = {
   applies: AppliesTo;
 };
 
+// ===== v3 schema (kinds with scope) =====
+//
+// Replaces the fixed-shape thermal/haulage/agency fields with a dynamic list of
+// "kinds" — each kind is a category of charge (Insulado Chile, Precarriage
+// Mendoza, Agency Fee, etc.) that may or may not vary by container size.
+// `kind_values` holds the actual numbers per rate; `kinds` (denormalized into
+// the rate so it stays self-contained outside a batch) holds the definitions.
+//
+// Scope decides which container types pick up the charge at invoicing time:
+//   "dry"    → applies only to dry cargo (excludes Reefer)
+//   "reefer" → applies only to refrigerated cargo
+//   "all"    → applies to anything
+export type KindScope = "dry" | "reefer" | "all";
+
+export type KindDef = {
+  id: string;
+  label: string;
+  scope: KindScope;
+  // true  → the kind's value differs between 20' and 40' (uses value20/value40)
+  // false → a single value_unique applies regardless of size
+  by_size: boolean;
+  // false for user-created custom kinds; true for the hardcoded catalog below.
+  predefined: boolean;
+};
+
+export type KindValue = {
+  kind_id: string;
+  value20?: number;
+  value40?: number;
+  value_unique?: number;
+};
+
+// Hardcoded catalog of 9 kinds. Custom kinds the user adds at extraction time
+// live ONLY on the resulting rate(s) — we don't persist them back into this
+// catalog. Default-value hints in the fixture are not enforced; the parser
+// emits whatever the source document says.
+export const PREDEFINED_KINDS: KindDef[] = [
+  { id: "flexitank_chile", label: "Flexitank Chile", scope: "dry", by_size: false, predefined: true },
+  { id: "flexitank_arg", label: "Flexitank Argentina", scope: "dry", by_size: false, predefined: true },
+  { id: "insulado_chile", label: "Insulado Chile", scope: "dry", by_size: true, predefined: true },
+  { id: "insulado_arg", label: "Insulado Argentina", scope: "dry", by_size: true, predefined: true },
+  { id: "precarriage_mendoza", label: "Precarriage Mendoza", scope: "all", by_size: true, predefined: true },
+  { id: "disposal", label: "Disposal", scope: "all", by_size: false, predefined: true },
+  { id: "agency_fee", label: "Agency Fee", scope: "all", by_size: false, predefined: true },
+  { id: "agency_fee_max", label: "Agency Fee Max", scope: "all", by_size: false, predefined: true },
+  { id: "discount_insulated", label: "Descuento Insulado", scope: "dry", by_size: false, predefined: true },
+];
+
+// Aliases the parser uses to canonicalize labels coming out of Excel headers
+// or email lines. Both literal strings and regex are accepted; matching is
+// case-insensitive and ignores punctuation / common suffixes (see normalizeKindLabel).
+export const KIND_ALIASES: Record<string, ReadonlyArray<string | RegExp>> = {
+  insulado_chile: [
+    "thermal liner s&f chile",
+    "thermal liner chile",
+    "thermoliner chile",
+    "insulado chile",
+    /^thermal\s*liner$/i,
+  ],
+  insulado_arg: [
+    "thermal liner s&f mendoza",
+    "thermal liner mendoza",
+    "thermoliner mendoza",
+    "insulado argentina",
+    "insulado mendoza",
+  ],
+  flexitank_chile: ["flexitank chile", "s&f chile", "stuffing chile"],
+  flexitank_arg: [
+    "flexitank argentina",
+    "flexitank arg",
+    "s&f arg",
+    "s&f argentina",
+    "laf mendoza",
+    "flexibag mendoza",
+    "flexibag laf mendoza",
+  ],
+  precarriage_mendoza: [
+    "fca haulage mendoza to chile",
+    "haulage mendoza to chile",
+    "fca haulage mendoza",
+    "haulage mendoza",
+    "fca mendoza",
+    "precarriage mendoza",
+    "inland fca mendoza",
+    "inland rate for fca mendoza",
+    "tarifa fca mendoza",
+    /inland\s+for\s+\d+\s+fca\s+mendoza/i,
+  ],
+  disposal: ["disposal", "disposal flexibag", "cargo disposal"],
+  agency_fee: ["agency fee", "agentfee", "agencia", /agentfee\s+usd\s+\d+/i],
+  agency_fee_max: [
+    "agency fee max",
+    "agentfee max",
+    "tope agencia",
+    /max\s+usd\s+[\d.]+\s+x\s+bl/i,
+  ],
+  discount_insulated: [
+    "descuento insulado",
+    /discount\s+(of\s+)?usd\s+[\d.]+\s+if\s+insulated/i,
+  ],
+};
+
 export type Rate = {
   id: string;
   agent: string;
   carrier: string;
+  // Optional in v3; legacy records and several flows use route as a free-text
+  // field that may combine pol+pod. Newer extractions can split them.
+  pol?: string;
+  pod?: string;
   route: string;
-  tipo: string;
+  // Container type narrowed to the v3 union. Existing localStorage records
+  // are migrated by migrateRateV3 at module init; new records produced by
+  // the extraction pipeline are validated against this union.
+  tipo: ContainerType;
+  // Shipping line. Distinct from carrier for some agents that route via a
+  // particular line — when there's no distinction, sl mirrors carrier.
+  sl?: string;
   sf: number;
   blFee: number;
   af: number;
   afMax: number;
   flexiArg: number;
-  // Dynamic, user-extensible cost list. New rates from the unified flow
-  // populate this array exclusively; legacy records get migrated by
-  // normalizeRate. Optional so rate records loaded from localStorage that
-  // pre-date this field still type-check.
+  // v3 dynamic kinds. Optional in the type so seed records and pre-migration
+  // localStorage data still type-check; migrateRateV3 always populates both
+  // (possibly empty) arrays before downstream rendering / invoicing.
+  kind_values?: KindValue[];
+  // Per-rate denormalized KindDef list. Lets a rate be self-describing once
+  // detached from its batch — invoicing can render columns without needing
+  // catalog lookups for custom kinds.
+  kinds?: KindDef[];
+  // Optional v3 alias for `notes`. Migration sets both to the same value so
+  // either reader works. Free-form bullet-style notes (validity overrides,
+  // bundle inclusions, market context).
+  notas?: string;
+  // ----- Legacy fixed-shape fields (kept so older records still type-check
+  // and so InvoicingTab's fallback chain works during the transition). -----
   additionalCosts?: AdditionalCost[];
-  // Legacy fixed-shape fields. Kept so existing localStorage records still
-  // validate; normalizeRate copies them into additionalCosts on read.
   thermalLinerChile20?: number;
   thermalLinerChile40?: number;
   thermalLinerMendoza20?: number;
@@ -263,6 +393,18 @@ export type Rate = {
   validFrom: string;
   validTo: string;
   notes: string;
+};
+
+// Batch wrapper produced by NewRateFlow during extraction. Not persisted as
+// a single record — once the user confirms the preview, individual Rate rows
+// are saved (each carrying its own `kinds` denormalized from this batch).
+export type RateBatch = {
+  agent_id: string;
+  validFrom: string;
+  validTo: string;
+  kinds: KindDef[];
+  rates: Rate[];
+  notas_globales: string;
 };
 
 // Helper used by the migration below and the new flow when persisting.
@@ -281,37 +423,441 @@ export function buildAdditionalCost(
   return { id: makeCostId(), kind, label, value, applies };
 }
 
-// Migrates legacy fixed fields into the dynamic additionalCosts array. Idempotent:
-// if `additionalCosts` is already populated we leave it alone. Old single-thermal
-// records (thermalLiner20/40) are interpreted as Chile-origin, matching the
-// previous schema's semantics.
-export function normalizeRate(r: Rate): Rate {
-  if (r.additionalCosts && r.additionalCosts.length > 0) return r;
-  const tl20 = r.thermalLinerChile20 ?? r.thermalLiner20 ?? 0;
-  const tl40 = r.thermalLinerChile40 ?? r.thermalLiner40 ?? 0;
-  const tm20 = r.thermalLinerMendoza20 ?? 0;
-  const tm40 = r.thermalLinerMendoza40 ?? 0;
-  const hm20 = r.fcaHaulageMendoza20 ?? r.fcaHaulage20 ?? 0;
-  const hm40 = r.fcaHaulageMendoza40 ?? r.fcaHaulage40 ?? 0;
-  const ins = r.discountInsulated ?? 0;
-  const costs: AdditionalCost[] = [];
-  if (tl20 > 0)
-    costs.push(buildAdditionalCost("thermal_chile", "Thermal Liner Chile 20'", tl20, "20"));
-  if (tl40 > 0)
-    costs.push(buildAdditionalCost("thermal_chile", "Thermal Liner Chile 40'", tl40, "40"));
-  if (tm20 > 0)
-    costs.push(buildAdditionalCost("thermal_mendoza", "Thermal Liner Mendoza 20'", tm20, "20"));
-  if (tm40 > 0)
-    costs.push(buildAdditionalCost("thermal_mendoza", "Thermal Liner Mendoza 40'", tm40, "40"));
-  if (hm20 > 0)
-    costs.push(buildAdditionalCost("fca_haulage_mendoza", "FCA Haulage Mendoza 20'", hm20, "20"));
-  if (hm40 > 0)
-    costs.push(buildAdditionalCost("fca_haulage_mendoza", "FCA Haulage Mendoza 40'", hm40, "40"));
-  if (ins > 0)
-    costs.push(
-      buildAdditionalCost("discount_insulated", "Descuento insulado", ins, "dry")
+// Maps the 834ad41 AdditionalCostKind onto v3 kind ids. "other" is handled
+// specially: a custom kind is generated from the cost's free-text label.
+const LEGACY_KIND_MAP: Partial<Record<AdditionalCostKind, string>> = {
+  thermal_chile: "insulado_chile",
+  thermal_mendoza: "insulado_arg",
+  fca_haulage_mendoza: "precarriage_mendoza",
+  flexitank_chile: "flexitank_chile",
+  flexitank_argentina: "flexitank_arg",
+  agency_fee: "agency_fee",
+  agency_fee_max: "agency_fee_max",
+  discount_insulated: "discount_insulated",
+};
+
+// Slug helper used to derive stable ids for custom kinds. Conservative:
+// lowercase + ascii + replace non-alphanumeric with underscore.
+export function slugifyKindLabel(label: string): string {
+  return label
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40) || "misc";
+}
+
+// Normalizes a label so the alias matcher tolerates punctuation, casing, the
+// "base port" suffix some agents append, and the "FCA " prefix used before
+// Haulage/Mendoza variants (we intentionally don't strip "FCA " when followed
+// directly by "Mendoza" — that's a meaningful match target on its own).
+function normalizeKindLabel(s: string): string {
+  let out = s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[.,;:()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  out = out.replace(/\s+base port$/, "");
+  out = out.replace(/^fca\s+(haulage|haulajes?)\b/, "$1");
+  return out;
+}
+
+// Returns the predefined kind id for a label, or null if no alias matches.
+export function matchKindByAlias(label: string): string | null {
+  const norm = normalizeKindLabel(label);
+  if (!norm) return null;
+  for (const kindId of Object.keys(KIND_ALIASES)) {
+    for (const alias of KIND_ALIASES[kindId]!) {
+      if (alias instanceof RegExp) {
+        if (alias.test(norm)) return kindId;
+      } else {
+        const a = normalizeKindLabel(alias);
+        if (norm === a || norm.includes(a)) return kindId;
+      }
+    }
+  }
+  return null;
+}
+
+// Splits a v3 ContainerType into its size-and-category components. Used by
+// invoicing to pick value20 vs value40 from a kind, and by UI to decide
+// which scope/by_size combinations are renderable for a rate.
+export function splitContainerType(tipo: ContainerType): {
+  size: 20 | 40;
+  category: "Dry" | "Reefer" | "Flexi";
+} {
+  switch (tipo) {
+    case "20'Dry":
+      return { size: 20, category: "Dry" };
+    case "40'Dry":
+      return { size: 40, category: "Dry" };
+    case "40'Reefer":
+      return { size: 40, category: "Reefer" };
+    case "20'Flexi":
+      return { size: 20, category: "Flexi" };
+  }
+}
+
+// True when a kind's scope is compatible with a rate's container type. Reefer
+// rates skip dry-only kinds (and vice versa); "all" applies everywhere. The
+// Flexi category is treated as dry-equivalent for scope purposes.
+export function kindAppliesToTipo(scope: KindScope, tipo: ContainerType): boolean {
+  if (scope === "all") return true;
+  const cat = splitContainerType(tipo).category;
+  if (scope === "reefer") return cat === "Reefer";
+  return cat !== "Reefer"; // dry → Dry or Flexi
+}
+
+// Picks the right value off a kind value based on the rate's size when the
+// kind is by_size, or returns value_unique otherwise. Returns 0 when nothing
+// resolves so callers can sum without nullable handling.
+export function readKindValueFor(
+  kv: KindValue,
+  def: KindDef,
+  tipo: ContainerType
+): number {
+  if (!def.by_size) return kv.value_unique ?? 0;
+  return splitContainerType(tipo).size === 20
+    ? kv.value20 ?? 0
+    : kv.value40 ?? 0;
+}
+
+// Coerces a free-form tipo string to one of the v3 ContainerType literals.
+// When the original cannot be cleanly mapped (e.g. "20'RF" — a 20-foot reefer
+// — which is intentionally NOT in the v3 union per the fixture spec), returns
+// the closest fallback plus a note string the caller can append to rate.notes.
+export function migrateContainerType(raw: string): {
+  tipo: ContainerType;
+  note?: string;
+} {
+  const original = (raw ?? "").toString();
+  const t = original
+    .trim()
+    .toUpperCase()
+    .replace(/['']/g, "'")
+    .replace(/\s+/g, "")
+    .replace(/-/g, "");
+  if (!t) return { tipo: "20'Dry" };
+  const isReefer = /RF$|REEFER/.test(t);
+  const isFlexi = /FLEXI/.test(t);
+  const isForty = /^40/.test(t);
+  const isTwenty = /^20/.test(t);
+  if (isForty && isReefer) return { tipo: "40'Reefer" };
+  if (isForty && isFlexi)
+    return {
+      tipo: "40'Dry",
+      note: `Tipo no estándar detectado: ${original}`,
+    };
+  if (isForty) return { tipo: "40'Dry" };
+  if (isTwenty && isReefer)
+    return {
+      tipo: "20'Dry",
+      note: `Tipo no estándar detectado: ${original}`,
+    };
+  if (isTwenty && isFlexi) return { tipo: "20'Flexi" };
+  if (isTwenty) return { tipo: "20'Dry" };
+  if (isFlexi) return { tipo: "20'Flexi" };
+  return {
+    tipo: "20'Dry",
+    note: `Tipo no estándar detectado: ${original}`,
+  };
+}
+
+// Parses a compound SF cell like "USD 1450 + USD 60 BL Fee + EBS USD 75" into
+// { sf, blFee }, dropping any EBS/EFS terms. Tolerates many phrasings: "+ EBS",
+// "+ EFS USD X", "EBS USD X per teu/ctr/BL", "USD 580 + USD 40xbl + EBS".
+// Returns 0 for fields that don't appear; dropped EBS is signalled via the
+// boolean so the UI can confirm the source row was understood.
+export function parseSfCell(cell: string): {
+  sf: number;
+  blFee: number;
+  ebsDescartado: boolean;
+} {
+  if (!cell) return { sf: 0, blFee: 0, ebsDescartado: false };
+  const original = String(cell);
+  let stripped = original;
+  let ebsDescartado = false;
+  // Drop "+ EBS [USD X] [per teu/ctr/BL/bl]" anywhere in the string.
+  const ebsRe =
+    /[+,]?\s*\b(?:ebs|efs)\b(?:\s+usd\s*[\d.,]+)?(?:\s+per\s+(?:teu|ctr|bl|container))?/gi;
+  if (ebsRe.test(stripped)) {
+    ebsDescartado = true;
+    stripped = stripped.replace(ebsRe, " ");
+  }
+  // Find a BL Fee number: "USD X BL Fee", "USD X per BL", "X xbl", "X per bl"
+  let blFee = 0;
+  const blMatch =
+    stripped.match(
+      /(?:usd\s*)?(\d[\d.,]*)\s*(?:bl\s*fee|per\s*bl|xbl|x\s*bl|\/bl)/i
     );
-  return { ...r, additionalCosts: costs };
+  if (blMatch) {
+    blFee = parseAmount(blMatch[1] ?? "");
+    stripped = stripped.replace(blMatch[0], " ");
+  }
+  // First USD-prefixed number left → SF. Fallback: first standalone number.
+  let sf = 0;
+  const sfUsd = stripped.match(/usd\s*([\d.,]+)/i);
+  if (sfUsd) {
+    sf = parseAmount(sfUsd[1] ?? "");
+  } else {
+    const m = stripped.match(/(\d[\d.,]*)/);
+    if (m) sf = parseAmount(m[1] ?? "");
+  }
+  return { sf, blFee, ebsDescartado };
+}
+
+function parseAmount(s: string): number {
+  if (!s) return 0;
+  // Accept "1.600" (Spanish thousands) and "1,600.50" (English) — drop dots
+  // when there's no decimal portion, normalize commas.
+  let t = s.replace(/\s/g, "");
+  if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) {
+    // Spanish: dots = thousands, comma = decimal
+    t = t.replace(/\./g, "").replace(",", ".");
+  } else if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) {
+    // English: commas = thousands
+    t = t.replace(/,/g, "");
+  } else {
+    t = t.replace(/,/g, "");
+  }
+  const n = Number(t);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Detects multi-carrier strings like "OOCL or CMA", "OOCL/EVER", "Carriers:
+// OOCL, EVER" and returns the individual carriers. Returns the original string
+// (single-element array) when no multi-carrier signal is present.
+export function parseMultiCarrier(sl: string): string[] {
+  const s = (sl ?? "").trim();
+  if (!s) return [s];
+  const carriersPrefix = s.match(/^carriers?:\s*(.+)$/i);
+  if (carriersPrefix) {
+    return splitCarrierList(carriersPrefix[1] ?? "");
+  }
+  // " or " separator
+  if (/\s+or\s+/i.test(s)) {
+    return s
+      .split(/\s+or\s+/i)
+      .map((p) => p.trim())
+      .filter(Boolean);
+  }
+  // "/" separator (only when both sides look like reasonable carrier names)
+  if (/^[A-Za-z][A-Za-z\s-]+\s*\/\s*[A-Za-z][A-Za-z\s-]+$/.test(s)) {
+    return s
+      .split("/")
+      .map((p) => p.trim())
+      .filter(Boolean);
+  }
+  return [s];
+}
+
+function splitCarrierList(rest: string): string[] {
+  return rest
+    .split(/[,/]| or /i)
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
+// Identifies bundle inclusions ("includes flexitank, OF, EBS"). Returns the
+// list of inclusion items when present, null otherwise. Used to keep SF as a
+// single number (no splitting) and append "Incluye: ..." to rate notes.
+export function detectBundleInclusions(text: string): string[] | null {
+  if (!text) return null;
+  const m = text.match(/\b(?:includes?|incluye|incluyen)\s+([^.;\n]+)/i);
+  if (!m) return null;
+  const list = (m[1] ?? "")
+    .split(/,|\sand\s|\sy\s|\+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return list.length > 0 ? list : null;
+}
+
+// Heuristic detector for LCL sheets — they get skipped silently by the
+// extractor. Indicators: "Insulation Chile/Argentina" headers, "per pallet/M3"
+// in amount columns, and the absence of a clear POL+POD+Type header triple.
+export function isLclSheet(sheetText: string): boolean {
+  const t = sheetText ?? "";
+  if (!t) return false;
+  const indicators = [
+    /insulation\s+(chile|argentina)/i,
+    /per\s+(pallet|m3|m\^3|shipment)/i,
+  ];
+  const hits = indicators.filter((r) => r.test(t)).length;
+  const hasTriple =
+    /\bpol\b/i.test(t) && /\bpod\b/i.test(t) && /(type|equipment)/i.test(t);
+  return hits >= 1 && !hasTriple;
+}
+
+// When a kind's value_unique was extracted but its KindDef says by_size=true,
+// copy that single value into both value20 and value40 (the CCL "Thermal Liner
+// = USD 350" case). Mutates kv in place and returns it.
+export function copyUniqueToBothSizes(kv: KindValue, def: KindDef): KindValue {
+  if (!def.by_size) return kv;
+  if (kv.value_unique === undefined) return kv;
+  if (kv.value20 === undefined) kv.value20 = kv.value_unique;
+  if (kv.value40 === undefined) kv.value40 = kv.value_unique;
+  delete kv.value_unique;
+  return kv;
+}
+
+// Migrates one legacy rate record (834ad41 schema or older single-thermal
+// shape) onto the v3 schema. Idempotent: rates already in v3 shape pass
+// through with their kind_values/kinds preserved.
+export function migrateRateV3(legacy: Rate | Record<string, unknown>): Rate {
+  const r = legacy as Rate;
+  const tipoMig = migrateContainerType(String(r.tipo ?? "20'"));
+
+  // Build/refresh kind_values + kinds from whichever legacy shape we find.
+  const kind_values: KindValue[] = [];
+  const kinds: KindDef[] = [];
+
+  // Already v3? Trust it but ensure the type literal is canonical.
+  if (Array.isArray(r.kind_values) && Array.isArray(r.kinds)) {
+    for (const k of r.kinds) kinds.push({ ...k });
+    for (const kv of r.kind_values) kind_values.push({ ...kv });
+  } else if (Array.isArray(r.additionalCosts)) {
+    // Path A: 834ad41 dynamic costs
+    const byKindId = new Map<string, KindValue>();
+    for (const c of r.additionalCosts) {
+      const mappedId = LEGACY_KIND_MAP[c.kind];
+      let kindId: string;
+      let def: KindDef;
+      if (!mappedId) {
+        // c.kind === "other" or unknown
+        kindId = "custom_" + slugifyKindLabel(c.label || "misc");
+        def = {
+          id: kindId,
+          label: c.label || "Otro",
+          scope:
+            c.applies === "reefer" ? "reefer" : c.applies === "dry" ? "dry" : "all",
+          by_size: c.applies === "20" || c.applies === "40",
+          predefined: false,
+        };
+      } else {
+        kindId = mappedId;
+        const found = PREDEFINED_KINDS.find((k) => k.id === kindId);
+        if (!found) continue;
+        def = found;
+      }
+      if (!kinds.some((k) => k.id === kindId)) kinds.push(def);
+      let kv = byKindId.get(kindId);
+      if (!kv) {
+        kv = { kind_id: kindId };
+        byKindId.set(kindId, kv);
+        kind_values.push(kv);
+      }
+      if (c.applies === "20") kv.value20 = c.value;
+      else if (c.applies === "40") kv.value40 = c.value;
+      else kv.value_unique = c.value;
+    }
+  } else {
+    // Path B: oldest legacy fixed-shape fields
+    const addByKey = (
+      kindId: string,
+      field: "value20" | "value40" | "value_unique",
+      value: number
+    ) => {
+      if (!value) return;
+      const def = PREDEFINED_KINDS.find((k) => k.id === kindId);
+      if (!def) return;
+      if (!kinds.some((k) => k.id === kindId)) kinds.push(def);
+      let kv = kind_values.find((k) => k.kind_id === kindId);
+      if (!kv) {
+        kv = { kind_id: kindId };
+        kind_values.push(kv);
+      }
+      kv[field] = value;
+    };
+    addByKey("insulado_chile", "value20", r.thermalLinerChile20 ?? r.thermalLiner20 ?? 0);
+    addByKey("insulado_chile", "value40", r.thermalLinerChile40 ?? r.thermalLiner40 ?? 0);
+    addByKey("insulado_arg", "value20", r.thermalLinerMendoza20 ?? 0);
+    addByKey("insulado_arg", "value40", r.thermalLinerMendoza40 ?? 0);
+    addByKey(
+      "precarriage_mendoza",
+      "value20",
+      r.fcaHaulageMendoza20 ?? r.fcaHaulage20 ?? 0
+    );
+    addByKey(
+      "precarriage_mendoza",
+      "value40",
+      r.fcaHaulageMendoza40 ?? r.fcaHaulage40 ?? 0
+    );
+    addByKey("flexitank_arg", "value_unique", r.flexiArg ?? 0);
+    addByKey("agency_fee", "value_unique", r.af ?? 0);
+    addByKey("agency_fee_max", "value_unique", r.afMax ?? 0);
+    addByKey("discount_insulated", "value_unique", r.discountInsulated ?? 0);
+  }
+
+  const baseNotes = (r.notes ?? r.notas ?? "").toString();
+  const mergedNotes = tipoMig.note
+    ? baseNotes
+      ? `${baseNotes}\n${tipoMig.note}`
+      : tipoMig.note
+    : baseNotes;
+
+  return {
+    ...r,
+    tipo: tipoMig.tipo,
+    kind_values,
+    kinds,
+    notes: mergedNotes,
+    notas: mergedNotes,
+  };
+}
+
+// Backwards-compatible alias. Older call sites import normalizeRate; they now
+// run the v3 migration which is a strict superset of the prior normalization.
+export const normalizeRate = migrateRateV3;
+
+// Migrates the localStorage rates blob from v2 (834ad41) to v3 ONCE per
+// browser. Runs synchronously at module load so useLocalStore's first read of
+// RATES_STORAGE_KEY (= "it_rates_v3") sees the migrated data. Idempotent: a
+// flag in localStorage prevents re-running, even across different module
+// imports within the same SPA navigation.
+let _migrationDone = false;
+function ensureRateMigration(): void {
+  if (_migrationDone) return;
+  if (typeof window === "undefined") return;
+  try {
+    if (window.localStorage.getItem(RATE_MIGRATION_FLAG) === "true") {
+      _migrationDone = true;
+      return;
+    }
+    const v2raw = window.localStorage.getItem(RATES_STORAGE_KEY_V2);
+    if (v2raw) {
+      // Snapshot the pre-migration data so a manual rollback is possible if
+      // something downstream goes wrong with the new schema.
+      window.localStorage.setItem(RATES_STORAGE_KEY_V2_BACKUP, v2raw);
+      try {
+        const parsed = JSON.parse(v2raw) as unknown[];
+        if (Array.isArray(parsed)) {
+          const migrated = parsed.map((r) =>
+            migrateRateV3(r as Record<string, unknown>)
+          );
+          window.localStorage.setItem(
+            RATES_STORAGE_KEY,
+            JSON.stringify(migrated)
+          );
+        }
+      } catch {
+        // Bad parse — leave the backup in place and continue; the user can
+        // recover manually if needed.
+      }
+    }
+    window.localStorage.setItem(RATE_MIGRATION_FLAG, "true");
+  } catch {
+    // localStorage disabled or quota — silently skip; the in-memory migration
+    // applied by migrateRateV3 at read time still keeps things working.
+  } finally {
+    _migrationDone = true;
+  }
+}
+
+if (typeof window !== "undefined") {
+  ensureRateMigration();
 }
 
 // True if a rate has a 20'/40' cost of the given kind. Convenience for
@@ -433,7 +979,7 @@ export const SEED_RATES: Rate[] = [
     agent: "IWS",
     carrier: "OOCL",
     route: "Rotterdam-Hamburg-Antwerp-London",
-    tipo: "20'-Flexi",
+    tipo: "20'Flexi",
     sf: 700,
     blFee: 38,
     af: 75,
@@ -448,7 +994,7 @@ export const SEED_RATES: Rate[] = [
     agent: "IWS",
     carrier: "OOCL",
     route: "Rotterdam-Hamburg-Antwerp-London",
-    tipo: "40'",
+    tipo: "40'Dry",
     sf: 900,
     blFee: 38,
     af: 75,
@@ -463,7 +1009,7 @@ export const SEED_RATES: Rate[] = [
     agent: "IWS",
     carrier: "OOCL",
     route: "Copenhagen",
-    tipo: "20'-Flexi",
+    tipo: "20'Flexi",
     sf: 1100,
     blFee: 38,
     af: 75,
@@ -478,7 +1024,7 @@ export const SEED_RATES: Rate[] = [
     agent: "IWS",
     carrier: "OOCL",
     route: "Copenhagen",
-    tipo: "40'",
+    tipo: "40'Dry",
     sf: 1200,
     blFee: 38,
     af: 75,
@@ -493,7 +1039,7 @@ export const SEED_RATES: Rate[] = [
     agent: "Van Moer",
     carrier: "OOCL",
     route: "Rotterdam-Hamburg-Antwerp-London",
-    tipo: "20'-Flexi",
+    tipo: "20'Flexi",
     sf: 580,
     blFee: 40,
     af: 0,
@@ -508,7 +1054,7 @@ export const SEED_RATES: Rate[] = [
     agent: "Van Moer",
     carrier: "OOCL",
     route: "Rotterdam-Hamburg-Antwerp-London",
-    tipo: "40'",
+    tipo: "40'Dry",
     sf: 695,
     blFee: 40,
     af: 0,
@@ -523,7 +1069,7 @@ export const SEED_RATES: Rate[] = [
     agent: "Asstra",
     carrier: "OOCL",
     route: "Klaipeda-Riga",
-    tipo: "40'",
+    tipo: "40'Dry",
     sf: 1600,
     blFee: 60,
     af: 0,
@@ -538,7 +1084,7 @@ export const SEED_RATES: Rate[] = [
     agent: "CCL",
     carrier: "OOCL",
     route: "London Gateway",
-    tipo: "40'",
+    tipo: "40'Dry",
     sf: 970,
     blFee: 85,
     af: 0,
@@ -553,7 +1099,7 @@ export const SEED_RATES: Rate[] = [
     agent: "BULLET",
     carrier: "HAPAG",
     route: "Grangemouth",
-    tipo: "40'",
+    tipo: "40'Dry",
     sf: 1800,
     blFee: 80,
     af: 0,
@@ -568,7 +1114,7 @@ export const SEED_RATES: Rate[] = [
     agent: "HCL",
     carrier: "CMA-CGM",
     route: "Rotterdam",
-    tipo: "Flexi",
+    tipo: "20'Flexi",
     sf: 2905,
     blFee: 0,
     af: 0,
@@ -583,7 +1129,7 @@ export const SEED_RATES: Rate[] = [
     agent: "Scan",
     carrier: "OOCL",
     route: "Copenhagen",
-    tipo: "20'",
+    tipo: "20'Dry",
     sf: 1300,
     blFee: 0,
     af: 0,

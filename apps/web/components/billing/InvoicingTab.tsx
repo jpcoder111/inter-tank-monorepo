@@ -13,6 +13,7 @@ import {
   ArgClient,
   CARRIER_SUGGESTIONS,
   CONTAINER_TYPE_SUGGESTIONS,
+  ContainerType,
   EBS_STORAGE_KEY,
   Ebs,
   INVOICED_BLS_KEY,
@@ -39,9 +40,83 @@ import {
   formatDateCl,
   invoiceHistoryKey,
   isArgShipper,
+  migrateContainerType,
   normalizeRate,
+  splitContainerType,
   uid,
 } from "./constants";
+
+// Fallback-aware reader for kind values stored on a Rate. Tries the v3
+// kind_values array first; if that's empty, drops back to the 834ad41
+// additionalCosts dynamic list, then to the oldest fixed-shape legacy fields.
+// Returns 0 when nothing resolves so callers can sum without nullable checks.
+function readRateKindValue(
+  rate: Rate,
+  kindId: string,
+  size: 20 | 40
+): number {
+  // v3: kind_values + kinds
+  if (rate.kind_values && rate.kind_values.length > 0) {
+    const kv = rate.kind_values.find((k) => k.kind_id === kindId);
+    if (kv) {
+      const def = rate.kinds?.find((k) => k.id === kindId);
+      if (def?.by_size) {
+        const v = size === 20 ? kv.value20 : kv.value40;
+        if (v !== undefined) return v;
+      } else if (kv.value_unique !== undefined) {
+        return kv.value_unique;
+      }
+    }
+  }
+  // 834ad41: additionalCosts dynamic list
+  if (rate.additionalCosts && rate.additionalCosts.length > 0) {
+    const legacyKindMap: Record<string, string> = {
+      insulado_chile: "thermal_chile",
+      insulado_arg: "thermal_mendoza",
+      precarriage_mendoza: "fca_haulage_mendoza",
+      flexitank_chile: "flexitank_chile",
+      flexitank_arg: "flexitank_argentina",
+      agency_fee: "agency_fee",
+      agency_fee_max: "agency_fee_max",
+      discount_insulated: "discount_insulated",
+    };
+    const legacyKind = legacyKindMap[kindId];
+    if (legacyKind) {
+      const sizeKey = String(size);
+      const found = rate.additionalCosts.find(
+        (c) =>
+          c.kind === legacyKind &&
+          (c.applies === sizeKey || c.applies === "all")
+      );
+      if (found) return found.value;
+    }
+  }
+  // Oldest fixed-shape fields
+  switch (kindId) {
+    case "insulado_chile":
+      return size === 20
+        ? rate.thermalLinerChile20 ?? rate.thermalLiner20 ?? 0
+        : rate.thermalLinerChile40 ?? rate.thermalLiner40 ?? 0;
+    case "insulado_arg":
+      return size === 20
+        ? rate.thermalLinerMendoza20 ?? 0
+        : rate.thermalLinerMendoza40 ?? 0;
+    case "precarriage_mendoza":
+      return size === 20
+        ? rate.fcaHaulageMendoza20 ?? rate.fcaHaulage20 ?? 0
+        : rate.fcaHaulageMendoza40 ?? rate.fcaHaulage40 ?? 0;
+    case "flexitank_arg":
+      return rate.flexiArg ?? 0;
+    case "agency_fee":
+      return rate.af ?? 0;
+    case "agency_fee_max":
+      return rate.afMax ?? 0;
+    case "discount_insulated":
+      return rate.discountInsulated ?? 0;
+    default:
+      return 0;
+  }
+}
 
 type Row = Record<string, unknown>;
 
@@ -133,17 +208,25 @@ function findRate(
   tipo: string,
   route: string
 ): Rate | undefined {
-  return rates.find(
-    (r) =>
+  // BLs may carry legacy tipo strings ("20'", "40'HC", "20'-Flexi") while
+  // rates are now stored with the v3 ContainerType union. Normalize both
+  // sides through migrateContainerType before comparing.
+  const normalized = migrateContainerType(tipo).tipo;
+  return rates.find((r) => {
+    const rTipo = (CONTAINER_TYPE_SUGGESTIONS as readonly string[]).includes(r.tipo)
+      ? (r.tipo as ContainerType)
+      : migrateContainerType(r.tipo as string).tipo;
+    return (
       r.agent.toLowerCase() === agent.toLowerCase() &&
       r.carrier.toLowerCase() === carrier.toLowerCase() &&
-      r.tipo.toLowerCase() === tipo.toLowerCase() &&
+      rTipo === normalized &&
       (!route || r.route.toLowerCase() === route.toLowerCase())
-  );
+    );
+  });
 }
 
 function isReeferContainer(tipo: string): boolean {
-  return tipo.toUpperCase().includes("RF");
+  return tipo.toUpperCase().includes("RF") || tipo.toLowerCase().includes("reefer");
 }
 
 function isFortyFoot(tipo: string): boolean {
@@ -210,8 +293,14 @@ function processRows(
     if (rate) {
       sf = rate.sf * (ctrs || 0);
       blFee = rate.blFee * (bls || 0);
-      const afCalc = rate.af * (ctrs || 0);
-      af = rate.afMax > 0 ? Math.min(afCalc, rate.afMax) : afCalc;
+      // Agency Fee + Cap: v3 stores them in kind_values; fall back to legacy.
+      // Size argument is unused for these (scope=all, by_size=false) but the
+      // signature requires one — pick 20 as a stable default.
+      const afPerCtr = rate.af || readRateKindValue(rate, "agency_fee", 20);
+      const afMaxPerBl =
+        rate.afMax || readRateKindValue(rate, "agency_fee_max", 20);
+      const afCalc = afPerCtr * (ctrs || 0);
+      af = afMaxPerBl > 0 ? Math.min(afCalc, afMaxPerBl) : afCalc;
     } else {
       pending.add("sf");
       pending.add("blFee");
@@ -254,20 +343,22 @@ function processRows(
 
     // Argentinean shippers receive the Mendoza variants of thermal liner +
     // FCA haulage; everyone else gets the Chile thermal liner (no haulage).
+    // Reads the canonical v3 kind_values first, with a fallback chain through
+    // 834ad41 additionalCosts and the oldest fixed-shape fields.
     const isArg = isArgShipper(shipper, argClients);
     let thermal = 0;
     let haulage = 0;
     if (rate) {
-      if (cargoIsForty) {
-        thermal = isArg
-          ? rate.thermalLinerMendoza40 ?? 0
-          : rate.thermalLinerChile40 ?? 0;
-        haulage = isArg ? rate.fcaHaulageMendoza40 ?? 0 : 0;
-      } else {
-        thermal = isArg
-          ? rate.thermalLinerMendoza20 ?? 0
-          : rate.thermalLinerChile20 ?? 0;
-        haulage = isArg ? rate.fcaHaulageMendoza20 ?? 0 : 0;
+      const rateTipo = (CONTAINER_TYPE_SUGGESTIONS as readonly string[]).includes(
+        rate.tipo
+      )
+        ? (rate.tipo as ContainerType)
+        : migrateContainerType(rate.tipo as string).tipo;
+      const size = splitContainerType(rateTipo).size;
+      const insulatedKindId = isArg ? "insulado_arg" : "insulado_chile";
+      thermal = readRateKindValue(rate, insulatedKindId, size);
+      if (isArg) {
+        haulage = readRateKindValue(rate, "precarriage_mendoza", size);
       }
       // Per container.
       thermal = thermal * (ctrs || 0);

@@ -502,6 +502,24 @@ function toStr(v: unknown): string {
   return v === null || v === undefined ? "" : String(v);
 }
 
+// True when the raw extracted value can be parsed as a number. Distinct from
+// toNumber's permissive coercion (which returns 0 for "TBD" / undefined /
+// empty) — used to detect "extraction missed this field" so we can flag the
+// row as needs-review. Tokens like "TBD", "N/A", "Ask agent" return false.
+function isParsableNumber(v: unknown): boolean {
+  if (typeof v === "number") return Number.isFinite(v);
+  if (typeof v !== "string") return false;
+  const trimmed = v.trim();
+  if (!trimmed) return false;
+  // Has to contain at least one digit; otherwise tokens like "-" or "USD" pass
+  // the strip-and-parse path with NaN.
+  if (!/\d/.test(trimmed)) return false;
+  const cleaned = trimmed.replace(/[^0-9.,-]/g, "");
+  if (!cleaned) return false;
+  const n = Number(cleaned.replace(",", "."));
+  return Number.isFinite(n);
+}
+
 // ============================================================================
 // v3 extraction-pipeline types and helpers
 // ============================================================================
@@ -759,8 +777,11 @@ export default function NewRateFlow({
 
   // ---- Step 1: header (agent + validity + batch notas) ----
   const [agent, setAgent] = useState(editingRate?.agent ?? "");
+  // Default to quarter — most agent rate sheets are quarterly. The dates and
+  // quarter selections are preserved across mode toggles so the user can
+  // flip back without losing what they had picked.
   const [validityMode, setValidityMode] = useState<"dates" | "quarter">(
-    "dates"
+    editingRate ? "dates" : "quarter"
   );
   const [validFrom, setValidFrom] = useState(editingRate?.validFrom ?? "");
   const [validTo, setValidTo] = useState(editingRate?.validTo ?? "");
@@ -1201,21 +1222,17 @@ export default function NewRateFlow({
       // Multi-carrier rows clone into one row per carrier.
       const expanded = expandMultiCarrier(extracted.rates);
 
-      // Convert raw rate rows into preview-table records. Negative SF values
-      // are PRESERVED (some agents quote them as differential rates) — we
-      // only flag them in notas so the user can confirm before saving.
+      // Convert raw rate rows into preview-table records. SF=0 and SF<0 are
+      // both legitimate values in this business (some agents quote zero or
+      // differential rates) — they DO NOT mark a row as needs-review. The
+      // "needs-review" bucket is reserved for genuine extraction failures:
+      // missing pol/pod, unrecognized container type, or non-numeric sf/blFee.
       const rows: Record<string, unknown>[] = expanded.map((r) => {
         const baseNotes = toStr(r.notas ?? r.notes);
         const tipoOut = coerceContainerType(r.type ?? r.tipo);
-        const sfValue = toNumber(r.sf);
         const noteParts: string[] = [];
         if (baseNotes) noteParts.push(baseNotes);
         if (tipoOut.note) noteParts.push(tipoOut.note);
-        if (sfValue < 0) {
-          noteParts.push(
-            `⚠️ SF negativo extraído: USD ${sfValue} — confirmar si es rate diferencial o error`
-          );
-        }
         const notes = noteParts.join("\n");
         const carrier = toStr(r.carrier);
         const sl = toStr(r.sl) || carrier;
@@ -1227,6 +1244,19 @@ export default function NewRateFlow({
         // the marker for visibility (no further processing).
         const bundle = detectBundleInclusions(notes);
         const finalNotes = bundle ? notes : notes;
+        const sfValid = isParsableNumber(r.sf);
+        const blFeeRaw = r.bl_fee ?? r.blFee;
+        const blFeeValid = isParsableNumber(blFeeRaw);
+        // tipoOut.note is set only when migrateContainerType had to coerce a
+        // non-standard tipo (e.g. "20'RF", "40'Flexi"). Either the source
+        // didn't emit a tipo or it emitted one outside the v3 union.
+        const tipoUnknown = !!tipoOut.note;
+        const needsReview =
+          !pol.trim() ||
+          !pod.trim() ||
+          tipoUnknown ||
+          !sfValid ||
+          !blFeeValid;
         return {
           carrier,
           pol,
@@ -1234,11 +1264,12 @@ export default function NewRateFlow({
           route,
           tipo: tipoOut.tipo,
           sl,
-          sf: sfValue,
-          blFee: toNumber(r.bl_fee ?? r.blFee),
+          sf: toNumber(r.sf),
+          blFee: toNumber(blFeeRaw),
           validFrom: toStr(r.validFrom),
           validTo: toStr(r.validTo),
           notes: finalNotes,
+          _needsReview: needsReview,
         };
       });
 
@@ -1408,15 +1439,13 @@ export default function NewRateFlow({
   };
 
   // ---- Validity stats ----
+  // needs-review = the row failed the extraction-validity check captured at
+  // conversion time (missing pol/pod, unknown container type, or non-numeric
+  // sf/blFee). SF=0 and SF<0 are NOT triggers — those are legitimate values.
   const stats = useMemo(() => {
     const total = previewRows.length;
-    const ok = previewRows.filter((r) => {
-      const carrier = toStr(r.carrier).trim();
-      const route = toStr(r.route).trim();
-      const sf = toNumber(r.sf);
-      return carrier && route && sf > 0;
-    }).length;
-    return { total, ok, needsReview: total - ok };
+    const needsReview = previewRows.filter((r) => r._needsReview === true).length;
+    return { total, ok: total - needsReview, needsReview };
   }, [previewRows]);
 
   // Reuse Esc to cancel.
@@ -2276,16 +2305,7 @@ function PreviewStep({
         : "bg-yellow-50 border-yellow-200 text-yellow-900";
   const [filterToReview, setFilterToReview] = useState(false);
   const visibleRows = filterToReview
-    ? rows
-        .map((r, i) => ({ r, i }))
-        .filter(
-          ({ r }) =>
-            !(
-              String(r.carrier ?? "").trim() &&
-              String(r.route ?? "").trim() &&
-              Number(r.sf ?? 0) > 0
-            )
-        )
+    ? rows.map((r, i) => ({ r, i })).filter(({ r }) => r._needsReview === true)
     : rows.map((r, i) => ({ r, i }));
 
   // Index batch kind values by id for quick lookup when rendering each row's
@@ -2440,12 +2460,7 @@ function PreviewStep({
               const isEditing = editingIdx === idx;
               const carrier = String(r.carrier ?? "");
               const carrierBg = carrier ? carrierColor(carrier) : undefined;
-              const needsReview =
-                !(
-                  String(r.carrier ?? "").trim() &&
-                  String(r.route ?? "").trim() &&
-                  Number(r.sf ?? 0) > 0
-                );
+              const needsReview = r._needsReview === true;
               return (
                 <Fragment key={idx}>
                   <tr

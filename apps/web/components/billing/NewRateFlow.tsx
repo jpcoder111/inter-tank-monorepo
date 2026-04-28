@@ -822,7 +822,15 @@ export default function NewRateFlow({
     from?: string | null;
     to?: string | null;
   } | null>(null);
-  const [notasGlobalesInferred, setNotasGlobalesInferred] = useState("");
+  // Tracks the last block of inferred notes auto-appended to batchNotas. On
+  // a re-process we strip this exact string off the end of batchNotas before
+  // appending the new inferred block — keeps the user's manual edits intact
+  // and avoids stacking duplicates across multiple processInput runs.
+  const [lastAutoInsertedNotes, setLastAutoInsertedNotes] = useState("");
+  // Dismissible info banner above the batchNotas textarea, shown when
+  // processInput auto-appended inferred content. The user can close it; it
+  // re-shows on the next processInput that produces inferred content.
+  const [showAutoInsertBanner, setShowAutoInsertBanner] = useState(false);
 
   // ---- Step 1: kinds editor (zone b) ----
   const [batchKinds, setBatchKinds] = useState<KindDef[]>(
@@ -1238,8 +1246,13 @@ export default function NewRateFlow({
       if (extracted.validity_inferred && !validFrom && !validTo) {
         setValidityInferred(extracted.validity_inferred);
       }
-      // Consolidate preferential-client kind entries into human-readable
-      // lines that get prepended to the inferred notas_globales banner.
+      // Consolidate inferred batch-level notas (preferential-client lines,
+      // notas_globales from rate extraction, notas from the right-block
+      // pass) and APPEND them directly to the user's batchNotas textarea.
+      // The user gets to edit/delete in place — no extra "Usar" click.
+      // On a re-process we first strip the previously auto-inserted block
+      // (when batchNotas still ends with it verbatim) so the user's manual
+      // edits are preserved and we don't accumulate duplicates.
       const preferentialLines = consolidatePreferentialNotes(
         detected.preferentialEntries
       );
@@ -1252,7 +1265,28 @@ export default function NewRateFlow({
         .join("\n")
         .trim();
       if (combinedNotasGlobales) {
-        setNotasGlobalesInferred(combinedNotasGlobales);
+        setBatchNotas((prev) => {
+          let base = prev;
+          if (
+            lastAutoInsertedNotes &&
+            base.trimEnd().endsWith(lastAutoInsertedNotes)
+          ) {
+            // Find the last occurrence of the auto-inserted block at the end
+            // (allowing for trailing whitespace) and strip it cleanly.
+            const idx = base.lastIndexOf(lastAutoInsertedNotes);
+            base = base.slice(0, idx).replace(/\n+\s*$/, "");
+          }
+          if (!base.trim()) return combinedNotasGlobales;
+          return `${base.trimEnd()}\n\n${combinedNotasGlobales}`;
+        });
+        setLastAutoInsertedNotes(combinedNotasGlobales);
+        setShowAutoInsertBanner(true);
+      } else {
+        // Nothing inferred this round — clear the tracker so a future run
+        // doesn't accidentally strip user-typed text that happened to match
+        // a stale value.
+        setLastAutoInsertedNotes("");
+        setShowAutoInsertBanner(false);
       }
 
       // Multi-carrier rows clone into one row per carrier.
@@ -1397,6 +1431,7 @@ export default function NewRateFlow({
         ? `${baseNotes}\n${tipoOut.note}`
         : tipoOut.note
       : baseNotes;
+    const trimmedBatchNotas = batchNotas.trim();
     return {
       id: `rate-${stamp}-${idx}-${rand}`,
       agent: common.agent.trim(),
@@ -1417,6 +1452,10 @@ export default function NewRateFlow({
       validTo: common.validTo,
       notes,
       notas: notes,
+      // Denormalize the batch's globales onto every saved rate so the rate
+      // is self-contained for invoicing/listing without needing a batch
+      // lookup. Stored once per rate but kept distinct from rate.notes.
+      batch_notas_globales: trimmedBatchNotas || undefined,
       additionalCosts: [],
     };
   };
@@ -1629,30 +1668,29 @@ export default function NewRateFlow({
 
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Notas del batch (opcional)</span>
+          {showAutoInsertBanner && (
+            <span className="text-xs bg-blue-50 text-blue-900 border border-blue-200 rounded px-2 py-1.5 flex items-center gap-2">
+              <span className="flex-1">
+                ℹ️ Detectamos información adicional y la agregamos a las notas
+                del batch. Podés editar o eliminar.
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowAutoInsertBanner(false)}
+                className="text-blue-700 hover:bg-blue-100 rounded px-1.5 cursor-pointer"
+                aria-label="Cerrar"
+              >
+                ✕
+              </button>
+            </span>
+          )}
           <textarea
             value={batchNotas}
             onChange={(e) => setBatchNotas(e.target.value)}
             placeholder="Free days, contexto de mercado, add-ons regionales — info que aplica a todas las tarifas del batch"
-            rows={2}
+            rows={4}
             className="w-full border border-gray-200 rounded-md p-2 text-sm"
           />
-          {notasGlobalesInferred && !batchNotas.trim() && (
-            <span className="text-xs bg-blue-50 text-blue-900 border border-blue-200 rounded px-2 py-1 flex items-center gap-2">
-              <span className="truncate">
-                Detectado: <em>{notasGlobalesInferred.slice(0, 100)}{notasGlobalesInferred.length > 100 ? "…" : ""}</em>
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setBatchNotas(notasGlobalesInferred);
-                  setNotasGlobalesInferred("");
-                }}
-                className="px-2 py-0.5 rounded border border-blue-300 bg-white hover:bg-blue-100 cursor-pointer"
-              >
-                Usar
-              </button>
-            </span>
-          )}
         </label>
 
         {/* === Zone B: Kinds editor === */}
@@ -1793,6 +1831,7 @@ export default function NewRateFlow({
       validity={effectiveValidity}
       kinds={batchKinds}
       kindValues={batchKindValues}
+      batchNotas={batchNotas}
       rows={previewRows}
       selected={previewSelected}
       editingIdx={editingIdx}
@@ -2316,6 +2355,7 @@ function PreviewStep({
   validity,
   kinds,
   kindValues,
+  batchNotas,
   rows,
   selected,
   editingIdx,
@@ -2334,6 +2374,7 @@ function PreviewStep({
   validity: { validFrom: string; validTo: string } | null;
   kinds: KindDef[];
   kindValues: KindValue[];
+  batchNotas: string;
   rows: Record<string, unknown>[];
   selected: Set<number>;
   editingIdx: number | null;
@@ -2355,9 +2396,15 @@ function PreviewStep({
         ? "bg-red-50 border-red-200 text-red-900"
         : "bg-yellow-50 border-yellow-200 text-yellow-900";
   const [filterToReview, setFilterToReview] = useState(false);
+  // Index of the row whose notes are open in the modal — null when closed.
+  // Modal shows the row's individual notes plus the batch-level globales,
+  // each in its own section.
+  const [notesModalIdx, setNotesModalIdx] = useState<number | null>(null);
   const visibleRows = filterToReview
     ? rows.map((r, i) => ({ r, i })).filter(({ r }) => r._needsReview === true)
     : rows.map((r, i) => ({ r, i }));
+  const trimmedBatchNotas = batchNotas.trim();
+  const hasBatchNotas = trimmedBatchNotas.length > 0;
 
   // Index batch kind values by id for quick lookup when rendering each row's
   // kind columns.
@@ -2407,7 +2454,12 @@ function PreviewStep({
   };
 
   const baseHeaders = ["Carrier", "Ruta", "Tipo", "SF", "BL Fee"];
-  const allHeaders = [...baseHeaders, ...kindColumns.map((c) => c.label), "Acciones"];
+  const allHeaders = [
+    ...baseHeaders,
+    ...kindColumns.map((c) => c.label),
+    "Notas",
+    "Acciones",
+  ];
   const colCount = (isEditMode ? 0 : 1) + allHeaders.length;
 
   return (
@@ -2562,6 +2614,55 @@ function PreviewStep({
                         {renderKindCell(r, col)}
                       </td>
                     ))}
+                    {(() => {
+                      const rowNotes = String(r.notes ?? "").trim();
+                      const hasRowNotes = rowNotes.length > 0;
+                      const truncated = hasRowNotes
+                        ? rowNotes.length > 30
+                          ? rowNotes.slice(0, 30) + "…"
+                          : rowNotes
+                        : "";
+                      const showAnything = hasRowNotes || hasBatchNotas;
+                      return (
+                        <td
+                          className="px-3 py-2 text-xs"
+                          style={{ maxWidth: 250, minWidth: 80 }}
+                        >
+                          {showAnything ? (
+                            <button
+                              type="button"
+                              onClick={() => setNotesModalIdx(idx)}
+                              className="text-left flex items-center gap-1 hover:underline cursor-pointer w-full"
+                              title={
+                                hasRowNotes
+                                  ? rowNotes
+                                  : "Aplica nota global del batch"
+                              }
+                            >
+                              {hasRowNotes ? (
+                                <span className="truncate flex-1">
+                                  {truncated}
+                                </span>
+                              ) : (
+                                <span className="text-gray-500 italic flex-1">
+                                  global
+                                </span>
+                              )}
+                              {hasBatchNotas && (
+                                <span
+                                  className="text-blue-600 flex-shrink-0"
+                                  aria-label="Nota global del batch"
+                                >
+                                  ℹ️
+                                </span>
+                              )}
+                            </button>
+                          ) : (
+                            <span className="text-gray-300">—</span>
+                          )}
+                        </td>
+                      );
+                    })()}
                     <td className="px-3 py-2 whitespace-nowrap">
                       {!isEditMode && (
                         <Button
@@ -2689,6 +2790,59 @@ function PreviewStep({
             : `Guardar seleccionadas (${selected.size} de ${rows.length})`}
         </Button>
       </div>
+
+      {notesModalIdx !== null && (() => {
+        const row = rows[notesModalIdx];
+        if (!row) return null;
+        const rowNotes = String(row.notes ?? "").trim();
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+            onClick={() => setNotesModalIdx(null)}
+          >
+            <div
+              className="bg-white rounded-lg shadow-lg max-w-2xl w-full mx-4 p-4 flex flex-col gap-3 max-h-[80vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h4 className="font-semibold">Notas</h4>
+                <button
+                  type="button"
+                  onClick={() => setNotesModalIdx(null)}
+                  className="text-gray-500 hover:bg-gray-100 rounded px-2 py-0.5 cursor-pointer"
+                  aria-label="Cerrar"
+                >
+                  ✕
+                </button>
+              </div>
+              {rowNotes ? (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs uppercase tracking-wide text-gray-500">
+                    Nota individual de la rate
+                  </span>
+                  <pre className="text-sm whitespace-pre-wrap font-sans bg-gray-50 border border-gray-200 rounded p-2">
+                    {rowNotes}
+                  </pre>
+                </div>
+              ) : (
+                <div className="text-xs text-gray-500 italic">
+                  Sin nota individual para esta rate.
+                </div>
+              )}
+              {hasBatchNotas && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs uppercase tracking-wide text-gray-500">
+                    Notas del batch (aplican a todas las rates)
+                  </span>
+                  <pre className="text-sm whitespace-pre-wrap font-sans bg-blue-50 border border-blue-200 rounded p-2">
+                    {trimmedBatchNotas}
+                  </pre>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

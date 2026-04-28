@@ -373,8 +373,15 @@ export type Rate = {
   kinds?: KindDef[];
   // Optional v3 alias for `notes`. Migration sets both to the same value so
   // either reader works. Free-form bullet-style notes (validity overrides,
-  // bundle inclusions, market context).
+  // bundle inclusions, market context). PER-RATE — specific to this row.
   notas?: string;
+  // Denormalized copy of the batch's notas_globales. Stored on each rate
+  // saved in a single batch so the rate is self-contained for invoicing /
+  // listing without needing a separate batch lookup table. UI should show
+  // it as the rate-level "global" annotation (preferential clients, free
+  // days, market context, etc.) distinct from `notas`/`notes`. Optional —
+  // older rates created before this field land WITHOUT it.
+  batch_notas_globales?: string;
   // ----- Legacy fixed-shape fields (kept so older records still type-check
   // and so InvoicingTab's fallback chain works during the transition). -----
   additionalCosts?: AdditionalCost[];

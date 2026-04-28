@@ -17,7 +17,12 @@ import {
   Quarter,
   Rate,
   carrierColor,
+  detectAgencyFee,
+  detectAgencyFeeMax,
   detectBundleInclusions,
+  detectDisposal,
+  detectDiscountInsulated,
+  detectThermalLinerUnsized,
   findSimilarAgent,
   formatDateCl,
   isLclSheet,
@@ -134,6 +139,31 @@ If the chunk is not a rate table, return { "rates": [] }.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
+// Concise prompt for the second extraction pass: takes the right-side block
+// of an Excel sheet (Items table, free-text discount, "Please note..." boxes)
+// and returns ONLY the kinds + global notes. Routed to haiku via the API
+// route's text-only model (route.ts: TEXT_MODEL = claude-haiku-4-5-20251001).
+const KINDS_FROM_BLOCK_SYSTEM = `You extract charge/discount definitions from a free-form text block (Excel side block, item table, or notes section).
+
+OUTPUT: a single JSON object:
+{
+  "kinds": [
+    { "label": string, "value20": number | null, "value40": number | null, "value_unique": number | null }
+  ],
+  "notas_globales": string
+}
+
+A "kind" is a charge or discount that applies to rates: Insulado / Thermal Liner, Flexitank, Agency Fee, Agency Fee Max, Disposal, Discount Insulado, Precarriage, etc. Emit one entry per distinct kind.
+
+RULES:
+- Use value20 + value40 when the source distinguishes sizes; otherwise use value_unique.
+- For discounts ("discount of USD 25 if insulated"), emit value_unique as a NEGATIVE number.
+- "Thermal Liner = USD X" without size → value_unique: X. Frontend will copy to both 20' and 40'.
+- Free-form market context, free days, regional add-ons → notas_globales (NOT as kinds).
+- If nothing recognizable, return { "kinds": [], "notas_globales": "" }.
+
+${STRICT_RESPONSE_RULES_NO_LIMIT}`;
+
 const EXCEL_MAX_ROWS = 150;
 const EXCEL_MAX_CHARS = 15000;
 const CHUNK_DATA_ROWS = 15;
@@ -145,6 +175,12 @@ const DOCX_MIME =
 
 type ExcelReadResult = {
   text: string;
+  // Text from columns located to the right of the first fully-empty column
+  // (per sheet). These are typically free-form Items / kinds / discount /
+  // notes blocks that the rate-extraction prompt should NOT see, but the
+  // kinds-extraction prompt should. Empty string when no right-side block
+  // exists.
+  rightBlock: string;
   totalRows: number;
   usedRows: number;
   truncated: boolean;
@@ -206,6 +242,7 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   const buffer = await file.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array" });
   const sheets: string[] = [];
+  const rightBlocks: string[] = [];
   let totalRows = 0;
   let usedRows = 0;
   for (const name of wb.SheetNames) {
@@ -217,11 +254,46 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
     });
     if (aoa.length === 0) continue;
     const maxCols = Math.max(0, ...aoa.map((r) => r.length));
-    const keepCols: number[] = [];
+
+    // Right-boundary detection: stop at the first fully-empty column. Empty
+    // columns are the consistent visual separator agents use between the
+    // rate table (POL/POD/Type/SL/Amount, leftmost) and side blocks (Items
+    // table, free-text discounts, "Please note..." boxes, etc.). Without
+    // this cut, dropping the empty col makes side-block cells adjacent to
+    // rate cells in the CSV and Claude routinely picks the wrong column as
+    // Amount — emitting SF=200 (kind value), SF=0 (no Amount), or SF=-25
+    // (discount text bleeding in).
+    let rightBoundary = maxCols;
     for (let c = 0; c < maxCols; c++) {
+      if (aoa.every((r) => String(r[c] ?? "").trim() === "")) {
+        rightBoundary = c;
+        break;
+      }
+    }
+
+    const keepCols: number[] = [];
+    for (let c = 0; c < rightBoundary; c++) {
       if (aoa.some((r) => String(r[c] ?? "").trim() !== "")) keepCols.push(c);
     }
     if (keepCols.length === 0) continue;
+
+    // Capture cells beyond the right boundary as a separate text blob, one
+    // line per non-empty source row, joined " | " across columns.
+    if (rightBoundary < maxCols) {
+      const rightLines: string[] = [];
+      for (const r of aoa) {
+        const cells: string[] = [];
+        for (let c = rightBoundary; c < maxCols; c++) {
+          const v = String(r[c] ?? "").trim();
+          if (v) cells.push(v);
+        }
+        if (cells.length > 0) rightLines.push(cells.join(" | "));
+      }
+      if (rightLines.length > 0) {
+        rightBlocks.push(`Hoja: ${name}\n${rightLines.join("\n")}`);
+      }
+    }
+
     const csvLines = aoa.map((r) =>
       keepCols.map((c) => csvEscapeCell(String(r[c] ?? ""))).join(",")
     );
@@ -243,6 +315,7 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   }
   return {
     text,
+    rightBlock: rightBlocks.join("\n\n"),
     totalRows,
     usedRows,
     truncated: totalRows > usedRows,
@@ -599,6 +672,63 @@ function dropLclSheetsFromExcelText(text: string): {
   return { text: kept.join("\n\n").trimEnd(), droppedSheets: dropped };
 }
 
+// Defense-in-depth sweep: scans free-form text (notas globales, right-side
+// block, per-rate notas) for kind patterns that might have slipped past the
+// structured extraction. Returns NEW kinds + values to append; only emits
+// kinds whose id isn't already present in `existing`.
+function sweepKindsFromText(
+  text: string,
+  existing: KindDef[]
+): { kinds: KindDef[]; kindValues: KindValue[] } {
+  const newKinds: KindDef[] = [];
+  const newValues: KindValue[] = [];
+  const seen = new Set(existing.map((k) => k.id));
+  const pushPredefined = (
+    id: string,
+    value: number,
+    field: "value20" | "value40" | "value_unique"
+  ) => {
+    if (seen.has(id)) return;
+    const def = PREDEFINED_KINDS.find((k) => k.id === id);
+    if (!def) return;
+    newKinds.push(def);
+    newValues.push({ kind_id: id, [field]: value } as KindValue);
+    seen.add(id);
+  };
+
+  if (!text) return { kinds: newKinds, kindValues: newValues };
+
+  const di = detectDiscountInsulated(text);
+  if (di !== null) pushPredefined("discount_insulated", di, "value_unique");
+
+  const af = detectAgencyFee(text);
+  if (af !== null) pushPredefined("agency_fee", af, "value_unique");
+
+  const afMax = detectAgencyFeeMax(text);
+  if (afMax !== null) pushPredefined("agency_fee_max", afMax, "value_unique");
+
+  const disposal = detectDisposal(text);
+  if (disposal !== null) pushPredefined("disposal", disposal, "value_unique");
+
+  // Thermal Liner unsized → emit as insulado_chile with both 20 and 40 set
+  // to the same value, matching the CCL fixture rule.
+  const tlu = detectThermalLinerUnsized(text);
+  if (tlu !== null && !seen.has("insulado_chile")) {
+    const def = PREDEFINED_KINDS.find((k) => k.id === "insulado_chile");
+    if (def) {
+      newKinds.push(def);
+      newValues.push({
+        kind_id: "insulado_chile",
+        value20: tlu,
+        value40: tlu,
+      });
+      seen.add("insulado_chile");
+    }
+  }
+
+  return { kinds: newKinds, kindValues: newValues };
+}
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -674,6 +804,10 @@ export default function NewRateFlow({
   >(null);
   const [docxText, setDocxText] = useState("");
   const [excelText, setExcelText] = useState("");
+  // Right-side block (Items, free-text discount, notes) captured per-sheet at
+  // Excel read time. Stored separately from excelText so the rate-extraction
+  // chunks contain ONLY the rate table; the kinds-extraction pass takes this.
+  const [excelRightBlock, setExcelRightBlock] = useState("");
   const [excelTruncWarning, setExcelTruncWarning] = useState<string | null>(
     null
   );
@@ -770,6 +904,7 @@ export default function NewRateFlow({
     setImageData(null);
     setDocxText("");
     setExcelText("");
+    setExcelRightBlock("");
     setExtractionDone(false);
     if (file.size > LARGE_FILE_BYTES) {
       const mb = (file.size / (1024 * 1024)).toFixed(1);
@@ -786,6 +921,7 @@ export default function NewRateFlow({
           return;
         }
         setExcelText(result.text);
+        setExcelRightBlock(result.rightBlock);
         const warnings: string[] = [];
         if (result.truncated) {
           warnings.push(
@@ -903,9 +1039,41 @@ export default function NewRateFlow({
     };
   };
 
+  // ---- Kinds-from-block second pass ----
+  // Runs only when an Excel right-side block was captured. Uses the same
+  // /api/billing/extract-rate route so it inherits haiku for text-only payloads
+  // (route.ts: TEXT_MODEL = claude-haiku-4-5-20251001). Two-attempt retry; on
+  // failure, returns null and the main flow keeps going (graceful degradation:
+  // the regex sweep below picks up the obvious cases anyway).
+  const extractKindsFromBlock = async (
+    blockText: string
+  ): Promise<{ kinds: RawKind[]; notas_globales: string } | null> => {
+    if (!blockText.trim()) return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await callExtractApi(
+          `Bloque de texto (Items / descuento / notas) para extracción de kinds:\n\n${blockText}`,
+          KINDS_FROM_BLOCK_SYSTEM
+        );
+        const obj = result.rows[0];
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+          const kinds = Array.isArray(obj.kinds) ? (obj.kinds as RawKind[]) : [];
+          const notas =
+            typeof obj.notas_globales === "string" ? obj.notas_globales : "";
+          return { kinds, notas_globales: notas };
+        }
+      } catch {
+        if (attempt === 1) return null;
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      }
+    }
+    return null;
+  };
+
   // ---- Step 1: process file/text → populate kinds + preview rows ----
-  // Pipeline: extract → detect kinds → expand multi-carrier → apply user-input
-  // precedence for agent/validity → set previewRows. The user reviews the
+  // Pipeline: extract → detect kinds → second-pass kinds from right block →
+  // sweep free-text → expand multi-carrier → apply user-input precedence for
+  // agent/validity → flag negative SF → set previewRows. The user reviews the
   // detected kinds in Step 1 and clicks "Continuar al preview" to see the
   // table in Step 2.
   const processInput = async () => {
@@ -969,8 +1137,48 @@ export default function NewRateFlow({
         extracted = collectBatchFromChunks(result.rows);
       }
 
-      // Detect kinds + values from the extracted rows.
+      // Detect kinds + values from the extracted rate rows.
       const detected = detectKindsFromExtracted(extracted.rates);
+
+      // Second pass: extract kinds from the Excel right-side block (Items
+      // table / discount text / notes) that the rate-extraction prompt was
+      // intentionally NOT shown. Append any new kinds + capture extra notas.
+      let extraNotas = "";
+      if (excelRightBlock.trim()) {
+        const blockResult = await extractKindsFromBlock(excelRightBlock);
+        if (blockResult) {
+          const blockDetected = detectKindsFromExtracted([
+            { kinds: blockResult.kinds } as RawRate,
+          ]);
+          for (const def of blockDetected.kinds) {
+            if (!detected.kinds.some((k) => k.id === def.id)) {
+              detected.kinds.push(def);
+            }
+          }
+          for (const kv of blockDetected.kindValues) {
+            if (!detected.kindValues.some((v) => v.kind_id === kv.kind_id)) {
+              detected.kindValues.push(kv);
+            }
+          }
+          if (blockResult.notas_globales) extraNotas = blockResult.notas_globales;
+        }
+      }
+
+      // Defense-in-depth sweep: regex over notas_globales + right-side block
+      // + per-rate notas to recover kinds that neither pass picked up. Only
+      // adds kinds whose ids aren't already present.
+      const sweepText = [
+        extracted.notas_globales ?? "",
+        extraNotas,
+        excelRightBlock,
+        ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const sweepResult = sweepKindsFromText(sweepText, detected.kinds);
+      detected.kinds.push(...sweepResult.kinds);
+      detected.kindValues.push(...sweepResult.kindValues);
+
       setBatchKinds(detected.kinds);
       setBatchKindValues(detected.kindValues);
 
@@ -982,33 +1190,43 @@ export default function NewRateFlow({
       if (extracted.validity_inferred && !validFrom && !validTo) {
         setValidityInferred(extracted.validity_inferred);
       }
-      if (extracted.notas_globales) {
-        setNotasGlobalesInferred(extracted.notas_globales);
+      const combinedNotasGlobales = [extracted.notas_globales, extraNotas]
+        .filter((s) => s && s.trim())
+        .join("\n")
+        .trim();
+      if (combinedNotasGlobales) {
+        setNotasGlobalesInferred(combinedNotasGlobales);
       }
 
       // Multi-carrier rows clone into one row per carrier.
       const expanded = expandMultiCarrier(extracted.rates);
 
-      // Convert raw rate rows into preview-table records.
+      // Convert raw rate rows into preview-table records. Negative SF values
+      // are PRESERVED (some agents quote them as differential rates) — we
+      // only flag them in notas so the user can confirm before saving.
       const rows: Record<string, unknown>[] = expanded.map((r) => {
         const baseNotes = toStr(r.notas ?? r.notes);
         const tipoOut = coerceContainerType(r.type ?? r.tipo);
-        const notes = tipoOut.note
-          ? baseNotes
-            ? `${baseNotes}\n${tipoOut.note}`
-            : tipoOut.note
-          : baseNotes;
+        const sfValue = toNumber(r.sf);
+        const noteParts: string[] = [];
+        if (baseNotes) noteParts.push(baseNotes);
+        if (tipoOut.note) noteParts.push(tipoOut.note);
+        if (sfValue < 0) {
+          noteParts.push(
+            `⚠️ SF negativo extraído: USD ${sfValue} — confirmar si es rate diferencial o error`
+          );
+        }
+        const notes = noteParts.join("\n");
         const carrier = toStr(r.carrier);
         const sl = toStr(r.sl) || carrier;
         const pol = toStr(r.pol);
         const pod = toStr(r.pod);
         const route = toStr(r.route) || (pol && pod ? `${pol} - ${pod}` : pol || pod);
-        // Bundle inclusions detection (from notes or explicit field). When
-        // present, append to notes per the spec — SF stays as one number.
+        // Bundle inclusions detection — Claude is instructed to keep SF as
+        // a single number and put "Incluye: ..." in notas; this just confirms
+        // the marker for visibility (no further processing).
         const bundle = detectBundleInclusions(notes);
-        const finalNotes = bundle
-          ? notes // already contains "Incluye:" tokens; leave as-is
-          : notes;
+        const finalNotes = bundle ? notes : notes;
         return {
           carrier,
           pol,
@@ -1016,7 +1234,7 @@ export default function NewRateFlow({
           route,
           tipo: tipoOut.tipo,
           sl,
-          sf: toNumber(r.sf),
+          sf: sfValue,
           blFee: toNumber(r.bl_fee ?? r.blFee),
           validFrom: toStr(r.validFrom),
           validTo: toStr(r.validTo),

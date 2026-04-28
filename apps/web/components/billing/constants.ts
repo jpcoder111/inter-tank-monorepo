@@ -661,6 +661,102 @@ function splitCarrierList(rest: string): string[] {
     .filter(Boolean);
 }
 
+// ===== Free-text kind sweep detectors =====
+//
+// These run as a defense-in-depth pass after structured extraction: if Claude
+// missed promoting a kind (because the source had it as free-form text in a
+// margin or text box rather than a column), the regex below salvages it.
+// Each returns the numeric value when the pattern matches, null otherwise.
+
+export function detectDiscountInsulated(text: string): number | null {
+  if (!text) return null;
+  const patterns = [
+    /discount\s+(?:of\s+)?usd\s+([\d.,]+)\s+(?:will\s+be\s+applied\s+)?if\s+(?:the\s+)?(?:cargo\s+is\s+)?insulated/i,
+    /descuento\s+(?:de\s+)?usd\s+([\d.,]+)\s+si\s+(?:el\s+)?(?:cargo\s+es\s+)?insulado/i,
+    /descuento\s+insulado[:\s]+\$?(?:usd\s*)?([\d.,]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) {
+      const n = parseAmount(m[1]);
+      if (n > 0) return -n; // discount → stored as negative value_unique
+    }
+  }
+  return null;
+}
+
+export function detectAgencyFee(text: string): number | null {
+  if (!text) return null;
+  // Avoid matching "Agency Fee Max ..." here — that's a different kind.
+  const patterns = [
+    /agentfee\s+usd\s+([\d.,]+)(?!\s*max)/i,
+    /agency\s*fee[:\s]+(?:usd\s*)?([\d.,]+)(?!\s*max)/i,
+    /agencia[:\s]+(?:usd\s*)?([\d.,]+)(?!\s*max)/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) {
+      const n = parseAmount(m[1]);
+      if (n > 0) return n;
+    }
+  }
+  return null;
+}
+
+export function detectAgencyFeeMax(text: string): number | null {
+  if (!text) return null;
+  const patterns = [
+    /max\s+usd\s+([\d.,]+)\s*(?:x|per)\s*bl/i,
+    /agency\s*fee\s*max[:\s]+(?:usd\s*)?([\d.,]+)/i,
+    /agentfee\s*max[:\s]+(?:usd\s*)?([\d.,]+)/i,
+    /tope\s+agencia[:\s]+(?:usd\s*)?([\d.,]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) {
+      const n = parseAmount(m[1]);
+      if (n > 0) return n;
+    }
+  }
+  return null;
+}
+
+export function detectDisposal(text: string): number | null {
+  if (!text) return null;
+  const patterns = [
+    /disposal\s+flexibag[:\s]+(?:usd\s*)?([\d.,]+)/i,
+    /cargo\s+disposal[:\s]+(?:usd\s*)?([\d.,]+)/i,
+    /disposal[:\s]+(?:usd\s*)?([\d.,]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) {
+      const n = parseAmount(m[1]);
+      if (n > 0) return n;
+    }
+  }
+  return null;
+}
+
+// "Thermal Liner = USD 350" without a 20'/40' qualifier (CCL fixture case).
+// Returns the unique value the caller should copy to both value20 and value40
+// for the insulado_chile kind.
+export function detectThermalLinerUnsized(text: string): number | null {
+  if (!text) return null;
+  const patterns = [
+    /thermal\s+liner\s*=\s*usd\s*([\d.,]+)\b(?!\s*(?:20|40|chile|mendoza|argentina))/i,
+    /thermoliner\s*=\s*usd\s*([\d.,]+)\b(?!\s*(?:20|40|chile|mendoza|argentina))/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) {
+      const n = parseAmount(m[1]);
+      if (n > 0) return n;
+    }
+  }
+  return null;
+}
+
 // Identifies bundle inclusions ("includes flexitank, OF, EBS"). Returns the
 // list of inclusion items when present, null otherwise. Used to keep SF as a
 // single number (no splitting) and append "Incluye: ..." to rate notes.

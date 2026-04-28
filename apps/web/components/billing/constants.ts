@@ -855,18 +855,21 @@ const MONTH_INDEX: Record<string, number> = {
 const MONTH_TOKEN = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec";
 
 // Coerces a loose date value into ISO yyyy-mm-dd. Recognized formats:
-//   - "2026-06-30" (already ISO; passes through with zero-padding)
-//   - "2026-06-30T00:00:00" (ISO with time component — strips time)
-//   - "30/06/2026" (dd/mm/yyyy — Spanish/CL/AR convention)
-//   - "30-Jun" / "30 Jun" / "30/Jun" (assumes current year — Excel
-//     "dd-mmm" default short format that comes through SheetJS when
-//     cellDates conversion is partial or the cell format is locale-
-//     specific)
-//   - "30-Jun-26" / "30-Jun-2026" (with year)
-//   - "Jun 30, 2026" (US-ish long format)
-// Returns the normalized yyyy-mm-dd string when matched; the original
-// trimmed input otherwise so downstream parsers can still try.
-export function normalizeDateString(value: unknown): string {
+//   - "2026-06-30" (ISO)
+//   - "2026-06-30T00:00:00" (ISO with time — strips time)
+//   - "30/06/2026" / "30/06/26" / "30/06" (dd/mm/[yy[yy]])
+//   - "30-Jun" / "30 Jun" / "30/Jun" (no year — uses batchYearHint)
+//   - "30-Jun-26" / "30-Jun-2026"
+//   - "Jun 30, 2026"
+// `batchYearHint`: the year to use when the source omits one. Callers
+// pass the year of the batch's effective validity so emails like Bullet
+// "31/6" or Valle Redondo "Fin de JUNIO" land in the batch's intended
+// year (2026) rather than the system's current year (which would be
+// wrong if the user is preparing rates for a future quarter).
+export function normalizeDateString(
+  value: unknown,
+  batchYearHint?: number
+): string {
   if (value === undefined || value === null) return "";
   const s = String(value).trim();
   if (!s) return "";
@@ -874,9 +877,13 @@ export function normalizeDateString(value: unknown): string {
   if (iso) {
     return `${iso[1]}-${iso[2]!.padStart(2, "0")}-${iso[3]!.padStart(2, "0")}`;
   }
-  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (dmy) {
-    return `${dmy[3]}-${dmy[2]!.padStart(2, "0")}-${dmy[1]!.padStart(2, "0")}`;
+  // dd/mm[/yyyy|/yy] — including no-year case
+  const dmShort = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (dmShort) {
+    let yy = dmShort[3];
+    if (!yy) yy = String(batchYearHint ?? new Date().getFullYear());
+    if (yy.length === 2) yy = "20" + yy;
+    return `${yy}-${dmShort[2]!.padStart(2, "0")}-${dmShort[1]!.padStart(2, "0")}`;
   }
   const dmmm = s.match(
     new RegExp(
@@ -889,7 +896,7 @@ export function normalizeDateString(value: unknown): string {
     const monthIdx = MONTH_INDEX[dmmm[2]!.toLowerCase()];
     if (monthIdx) {
       const mm = String(monthIdx).padStart(2, "0");
-      let yy = dmmm[3] ?? String(new Date().getFullYear());
+      let yy = dmmm[3] ?? String(batchYearHint ?? new Date().getFullYear());
       if (yy.length === 2) yy = "20" + yy;
       return `${yy}-${mm}-${day}`;
     }
@@ -907,42 +914,63 @@ export function normalizeDateString(value: unknown): string {
 }
 
 // True when the value parses to a real calendar date. Accepts the formats
-// recognized by normalizeDateString.
-export function isValidDate(v: unknown): boolean {
-  return parseDateValue(v) !== null;
+// recognized by normalizeDateString. Calendar-impossible dates (31 of
+// June, 30 of February) return false — the JS Date constructor would
+// silently roll them over to the next month otherwise.
+export function isValidDate(v: unknown, batchYearHint?: number): boolean {
+  return parseDateValue(v, batchYearHint) !== null;
 }
 
 // Parses any of the supported date formats into a Date set to local
-// midnight. Returns null when the value isn't a parseable date format.
-function parseDateValue(v: unknown): Date | null {
-  const normalized = normalizeDateString(v);
+// midnight. Returns null when the value isn't a parseable date format OR
+// when it's calendar-impossible. Roundtrip-checks year/month/day after
+// constructing the Date so 31/6 and 30/2 never sneak through.
+function parseDateValue(v: unknown, batchYearHint?: number): Date | null {
+  const normalized = normalizeDateString(v, batchYearHint);
   if (!normalized) return null;
   const m = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (!m) return null;
+  const yyyy = Number(m[1]);
+  const mm = Number(m[2]);
+  const dd = Number(m[3]);
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
   const dt = new Date(
     `${m[1]}-${m[2]!.padStart(2, "0")}-${m[3]!.padStart(2, "0")}T00:00:00`
   );
-  return Number.isNaN(dt.getTime()) ? null : dt;
+  if (Number.isNaN(dt.getTime())) return null;
+  if (
+    dt.getFullYear() !== yyyy ||
+    dt.getMonth() !== mm - 1 ||
+    dt.getDate() !== dd
+  ) {
+    return null;
+  }
+  return dt;
 }
 
 // True when the value parses to a date strictly before today (local
 // midnight). Used by isRateNeedsReview to flag expired rates so the user
 // reviews them before saving.
-export function isDateInPast(v: unknown): boolean {
-  const dt = parseDateValue(v);
+export function isDateInPast(v: unknown, batchYearHint?: number): boolean {
+  const dt = parseDateValue(v, batchYearHint);
   if (!dt) return false;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return dt.getTime() < today.getTime();
 }
 
-// True when both values normalize to the same calendar date (or both fail
-// to parse — returns true for empty/empty too). Used by the row converter
-// to suppress the "Validez específica" note when a row's validity matches
-// the batch's effective validity even though the raw strings differ in
-// format ("30-Jun" vs "2026-06-30").
-export function datesEqual(a: unknown, b: unknown): boolean {
-  return normalizeDateString(a) === normalizeDateString(b);
+// True when both values represent the same calendar date. Goes through
+// parseDateValue so format mismatches ("30-Jun" vs "2026-06-30") still
+// match. Returns false when either side fails to parse.
+export function datesEqual(
+  a: unknown,
+  b: unknown,
+  batchYearHint?: number
+): boolean {
+  const da = parseDateValue(a, batchYearHint);
+  const db = parseDateValue(b, batchYearHint);
+  if (!da || !db) return false;
+  return da.getTime() === db.getTime();
 }
 
 // Single source of truth for the "needs review" classification used by the
@@ -985,7 +1013,8 @@ export function isRateNeedsReview(
     validFrom: string;
     validTo: string;
   },
-  batchValidity: { validFrom?: string; validTo?: string } | null
+  batchValidity: { validFrom?: string; validTo?: string } | null,
+  batchYearHint?: number
 ): boolean {
   if (!input.pol.trim() || !input.pod.trim()) return true;
   if (input.tipoCoerced) return true;
@@ -1002,11 +1031,12 @@ export function isRateNeedsReview(
 
   const effFrom = input.validFrom || batchValidity?.validFrom || "";
   const effTo = input.validTo || batchValidity?.validTo || "";
-  if (!isValidDate(effFrom) || !isValidDate(effTo)) return true;
+  if (!isValidDate(effFrom, batchYearHint) || !isValidDate(effTo, batchYearHint))
+    return true;
   // Validity vencida: validTo is before today. The row stays in the bucket
   // so the user decides whether to drop it or import-and-edit; we don't
   // skip it automatically.
-  if (isDateInPast(effTo)) return true;
+  if (isDateInPast(effTo, batchYearHint)) return true;
 
   return false;
 }
@@ -1175,16 +1205,16 @@ export function detectDisposal(text: string): number | null {
 
 // Detects free-text add-ons of the form
 //   "Add San Carlos US$ 200 on top of Mendoza"
-// emitted by some IWS-style sheets and returns one canonical line per
-// distinct (city, base) pair so they can be appended to notas_globales:
+//   "Additional Rivadavia US$ 100 on top of Mendoza"
+// and returns one canonical line per distinct (city, base) pair, ready
+// to drop into notas_globales:
 //   "Origen alternativo San Carlos: +USD 200 sobre Mendoza."
-// The match is greedy on the city portion (allows multi-word like "San
-// Juan") and rejects amounts that don't parse to a positive number.
+// Accepts both "Add" (IWS-style) and "Additional" (Arterra-style) leads.
 export function detectRegionalAddons(text: string): string[] {
   if (!text) return [];
   const lines = new Map<string, string>();
   const re =
-    /Add\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?)\s+US\$?\s+([\d.,]+)\s+on\s+top\s+of\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][\w\sñ]{1,30}?)(?=[.,;\n]|$)/gi;
+    /\b(?:add|additional)\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?)\s+US\$?\s+([\d.,]+)\s+on\s+top\s+of\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][\w\sñ]{1,30}?)(?=[.,;\n]|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const city = (m[1] ?? "").trim().replace(/\s+/g, " ");
@@ -1197,6 +1227,119 @@ export function detectRegionalAddons(text: string): string[] {
     lines.set(key, `Origen alternativo ${city}: +USD ${amount} sobre ${base}.`);
   }
   return Array.from(lines.values());
+}
+
+// True when a rate looks like an FCA bundle (inland trucking from
+// Mendoza / Santa Rita / Tupungato / etc. + ocean freight in one SF
+// number). Used by validateRateRange so abnormally-high SFs on FCA
+// rates aren't flagged. Matches against the rate's ruta / pol / notas
+// fields. Conservative: only fires when the FCA / inland signal is
+// explicit; misses still fall through as warnings rather than fail
+// silently.
+export function isFCARate(input: {
+  ruta?: string;
+  pol?: string;
+  notas?: string;
+}): boolean {
+  const fields = [input.ruta ?? "", input.pol ?? "", input.notas ?? ""];
+  const text = fields.join(" ");
+  if (/\bFCA\b/i.test(text)) return true;
+  if (
+    /\b(?:argentina|mendoza|santa\s+rita|tupungato|rivadavia|san\s+carlos|san\s+juan)\b/i.test(
+      input.pol ?? ""
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:inland|trucking\s+(?:incluido|origin|origen)|local\s+charges\s+at\s+origin|trucking\s+\+\s+ocean)\b/i.test(
+      input.notas ?? ""
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+// ===== Rate-range validation (sanity hard rules) =====
+//
+// Twelve-year-stable price-band heuristics for the shipping rates
+// Inter-Tank manages. Modes:
+//   - "warning"  → flag the row yellow but the user can save anyway
+//                  (slot-release negatives in Asia / FCA bundles with
+//                  high SF are legitimate and only warn the operator).
+//   - "blocking" → flag red, uncheck by default, save excludes the row
+//                  (Reefer SF outside 999-10000 is almost always a
+//                  typo or a Thermal Liner kind being misread as a
+//                  rate row — never a legitimate ocean Reefer rate).
+//
+// Inland AR/CL has high natural variability (truck rate fluctuations,
+// city-to-port distance, fuel surcharges) so it's intentionally NOT
+// validated here.
+export const RATE_RANGES: Record<
+  string,
+  { min: number; max: number; mode: "warning" | "blocking" }
+> = {
+  // Dry / Flexi can be NEGATIVE legitimately on Asian routes (slot
+  // release / spot reductions) and HIGH legitimately on FCA bundles
+  // (Mendoza / Santa Rita / etc. inland trucking included in SF — see
+  // Arterra FCA ARG → Montreal SF=6680).
+  "20'Dry": { min: -300, max: 5000, mode: "warning" },
+  "20'Flexi": { min: -300, max: 6000, mode: "warning" },
+  "40'Dry": { min: -300, max: 8000, mode: "warning" },
+  // 40'Reefer ocean rates have NEVER fallen below ~999 USD or risen
+  // above ~10000 USD in 12+ years of Inter-Tank's history. A value
+  // outside this band almost certainly means a Thermal Liner / Insulado
+  // kind value got mistaken for a rate (e.g. "Thermal Liner = USD 350"
+  // → SF=350) or a typo. BLOCKING.
+  "40'Reefer": { min: 999, max: 10000, mode: "blocking" },
+};
+
+// Range-validation result: null when the rate's tipo isn't in
+// RATE_RANGES (e.g. inland-only, or a future tipo). When present,
+// severity drives the UI treatment (yellow/warning vs red/blocking).
+export type RateRangeFlag = {
+  severity: "warning" | "blocking";
+  message: string;
+};
+
+// Applies the RATE_RANGES band check. Skips the upper bound for FCA
+// rates (legitimate high SF when bundling inland trucking). Returns
+// null when the rate looks fine.
+export function validateRateRange(
+  rate: { tipo: string; sf: number },
+  isFCA: boolean
+): RateRangeFlag | null {
+  const band = RATE_RANGES[rate.tipo];
+  if (!band) return null;
+
+  // Reefer block check first — independent of FCA, applies to both
+  // bounds (a 40'Reefer "FCA Mendoza" doesn't exist as a single SF).
+  if (band.mode === "blocking") {
+    if (rate.sf < band.min || rate.sf > band.max) {
+      return {
+        severity: "blocking",
+        message: `SF=${rate.sf} fuera del rango Reefer (${band.min}-${band.max}). Probable error de tipeo o confusión con kind insulado/thermal liner. Verificá tipo y monto antes de guardar.`,
+      };
+    }
+    return null;
+  }
+
+  // Dry / Flexi warnings.
+  if (rate.sf < band.min) {
+    return {
+      severity: "warning",
+      message: `SF=${rate.sf} debajo del mínimo razonable para ${rate.tipo} (${band.min}). Verificá si es slot release asiático o un error.`,
+    };
+  }
+  if (rate.sf > band.max) {
+    if (isFCA) return null; // FCA bundle — high SF expected
+    return {
+      severity: "warning",
+      message: `SF=${rate.sf} por encima del máximo razonable para ${rate.tipo} (${band.max}). ¿Es bundle FCA o inland incluido?`,
+    };
+  }
+  return null;
 }
 
 // Detects whether a text body has the "EBS NOT INCLUDED" stamp repeated in

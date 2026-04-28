@@ -31,16 +31,21 @@ import {
   extractSizeFromKindLabel,
   findSimilarAgent,
   formatDateCl,
+  isAsianPod,
   isDateInPast,
+  isFCARate,
   isLclSheet,
   isParsableNumber,
   isRateNeedsReview,
   matchKindByAlias,
   migrateContainerType,
+  normalizeDateString,
   parseMultiCarrier,
   quartersToDateRange,
+  RateRangeFlag,
   slugifyKindLabel,
   uniqueSuggestions,
+  validateRateRange,
 } from "./constants";
 
 // ============================================================================
@@ -91,15 +96,20 @@ genuinely ambiguous, default to "20'Dry" and append to \`notas\`:
 "Tamaño no especificado, asumido 20'."
 
 HARD RULES:
-1. EBS = EFS. NEVER include them in sf or as a kind. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60. Drop EBS silently.
-2. Thermal Liner / Thermo Liner / Insulado are the SAME concept — emit the original label, frontend canonicalizes via aliases.
-3. Multi-carrier on one row ("OOCL or CMA", "OOCL/EVER", "Carriers: OOCL, EVER"): set sl="OOCL or CMA". DO NOT clone — frontend clones.
-4. Bundle "includes X, Y, Z" / "incluye X, Y, Z": keep sf as ONE number (do not split). Add to notas: "Incluye: <list>". Do NOT invent kinds for the inclusions.
-5. Per-row validity override: set this row's validFrom/validTo from the row text AND add to notas.
-6. Regional add-ons (San Carlos, Tupungato, Rivadavia, San Juan, San Martín, "afuera de Mendoza"): NEVER as a rate row. Append to notas_globales.
-7. Free-day info: notas_globales.
-8. LCL content: skip entirely. Indicators: "Insulation Chile/Argentina" headers, amounts "per pallet/M3/shipment", early "OF" column, no clear POL+POD+Type triple.
-9. Date formats accepted: dd/mm/yyyy, dd/mm (assume current year), "Fin de Junio"/"end of June" (last day of month), "March 31st", "Q2 2026", Excel datetimes. Emit dd/mm/yyyy when possible, else original token.
+1. EBS = EFS. NEVER include them in sf or as a kind. The DEFAULT interpretation when EBS / EFS appears is that it is NOT included in sf — it's an external surcharge billed separately. Disambiguate by phrasing:
+   - "+ EBS [USD X]" / "EBS USD X per teu/ctr/BL" / "EBS NOT INCLUDED" / "Lo unico que tenemos que SUMAR el EBS" → external. Drop from sf, add to notas: "EBS USD X — sumar aparte (no incluido en SF)". Repeat-stamps go to notas_globales.
+   - "with EBS" / "includes EBS" / "EBS bundled" / "EBS included in SF" → bundled in sf, add: "EBS incluido en SF.".
+   - Plain "EBS" mention without one of the above signals → DEFAULT to external (NOT bundled), add: "EBS — confirmar si suma aparte o está incluido."
+2. Thermal Liner / Thermo Liner / Insulado / Discount Insulated are CHARGES (kinds), NEVER rate rows. Emit them in the row's kinds[] field, never as an entry in rates[]. Note: 40'Reefer is a refrigerated container TYPE (rate row valid); Thermal Liner is an insulating kit installed inside a Dry container (charge only). They are conceptually distinct.
+3. DESCRIPTOR LABELS like "Wine/Juice loads", "Dry loads", "Reefer loads", "Cargo type X" are categorization headers that group related rates, NOT charges. NEVER emit them as kinds.
+4. Multi-carrier on one row ("OOCL or CMA", "OOCL/EVER", "Carriers: OOCL, EVER"): set sl="OOCL or CMA". DO NOT clone — frontend clones.
+5. Bundle "includes X, Y, Z" / "incluye X, Y, Z": keep sf as ONE number (do not split). Add to notas: "Incluye: <list>". Do NOT invent kinds for the inclusions.
+6. Per-row validity override: set this row's validFrom/validTo from the row text AND add to notas.
+7. Regional add-ons (San Carlos, Tupungato, Rivadavia, San Juan, San Martín, "afuera de Mendoza", "Add" or "Additional" lines): NEVER as a rate row. Append to notas_globales.
+8. Free-day info: notas_globales.
+9. LCL content: skip entirely. Indicators: "Insulation Chile/Argentina" headers, amounts "per pallet/M3/shipment", early "OF" column, no clear POL+POD+Type triple.
+10. Date formats accepted: dd/mm/yyyy, dd/mm (no year — frontend assumes the batch year), "Fin de Junio"/"end of June" (last day of month), "March 31st", "Q2 2026", Excel datetimes. Emit dd/mm/yyyy when possible, else the original token.
+11. POL is the ocean port of loading. For FCA rates the city in "FCA <city>" is the inland pickup point, NOT the POL — keep POL as the actual ocean port (Valparaíso / San Antonio / Santos / etc.) and put the "FCA <city>" hint in notas. When POL or POD is genuinely ambiguous, emit empty string rather than guessing — the frontend flags empty values for review.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -137,8 +147,8 @@ Each rate row encodes ONE container size + ONE category in \`type\`:
 NEVER emit just "Dry" or "Reefer" without size. Two-size rows split into two RateRows.
 
 HARD RULES:
-1. EBS = EFS. NEVER include them in sf. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60.
-2. Thermal Liner / Thermo Liner / Insulado: emit original label.
+1. EBS = EFS. NEVER include them in sf. Default interpretation: external (not bundled). "+ EBS" / "EBS NOT INCLUDED" / "EBS USD X per teu" → drop from sf, add "EBS USD X — sumar aparte" to notas. "with EBS" / "includes EBS" → bundled, add "EBS incluido en SF.".
+2. Thermal Liner / Thermo Liner / Insulado / Discount Insulated are CHARGES, NEVER rate rows. Emit them in kinds[], not in rates[].
 3. Multi-carrier on one row: set sl="OOCL or CMA". DO NOT clone.
 4. Bundle "includes X, Y, Z": keep sf as one number. Add "Incluye: <list>" to notas.
 5. LCL rows: skip entirely.
@@ -175,7 +185,9 @@ RULES:
 - Free-form market context, free days, regional add-ons → notas_globales (NOT as kinds).
 - If a charge's value is literally "Included" / "Incl." / "Bundled" / "N/A" (no number), do NOT emit a kind for it — that means it's bundled. Mention in notas_globales if relevant ("BAF incluido en SF.").
 - CONSOLIDATION: when the same charge appears across multiple rows split by container size (e.g. "FCA Mendoza | 20'Flexi | 2170", "FCA Mendoza | 20'DC | 2170", "FCA Mendoza | 40'DC | 2270"), emit ONE kind entry. Drop the size token from the label ("FCA Mendoza", not "FCA 40'DC Mendoza") and populate value20 / value40 from the size-tagged rows. When two size-20 rows give the same value, use it once.
-- ADD-ONS: rows like "Add San Carlos US$ 200 on top of Mendoza" / "Add Rivadavia US$ 150 on top of Mendoza" are regional add-ons, NOT kinds. Skip them — frontend captures them via a regex sweep into notas_globales.
+- ADD-ONS: rows like "Add San Carlos US$ 200 on top of Mendoza" / "Additional Rivadavia US$ 100" are regional add-ons, NOT kinds. Skip them — frontend captures them via a regex sweep into notas_globales.
+- DESCRIPTOR LABELS: lines like "Wine/Juice loads", "Dry loads", "Reefer loads", "Cargo type X" are categorization headers used by some agents to separate rate groups, NOT charges. NEVER emit them as kinds. They have no SF / no value of their own.
+- THERMAL LINER vs REEFER: a 40'Reefer is a refrigerated container (rate-row type). Thermal Liner / Insulado is an insulating kit installed in a Dry container (charge / kind only). Never emit Thermal Liner as a rate — only as a kind.
 - If nothing recognizable, return { "kinds": [], "notas_globales": "" }.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
@@ -1391,13 +1403,24 @@ export default function NewRateFlow({
       // Detect kinds + values from the extracted rate rows.
       const detected = detectKindsFromExtracted(extracted.rates);
 
-      // Second pass: extract kinds from the Excel kinds-block — catalog
-      // sheets in full PLUS the right-side blocks of rate sheets. The
-      // rate-extraction prompt was intentionally NOT shown this content.
-      // Append any new kinds + capture extra notas.
+      // Second pass: extract kinds from the source text using the
+      // KINDS_FROM_BLOCK_SYSTEM prompt. Sources that get this pass:
+      //   - excelKindsBlock (catalog sheets + right-side blocks of rate
+      //     sheets — captured by classifySheet at read time)
+      //   - pasteText (full email body)
+      //   - docxText (Word document text)
+      // Image / PDF inputs go through the vision-capable RATE_SYSTEM in
+      // a single pass, so they don't need this second call. Running the
+      // text-only haiku prompt over the full email recovers free-text
+      // patterns like "Flexitank Chile = USD 600" / "Inland FCA Mendoza
+      // 20 = USD 2250" that RATE_SYSTEM often missed.
+      const kindsSourceText =
+        excelKindsBlock.trim() ||
+        (pasteText.trim() ? pasteText.trim() : "") ||
+        (docxText.trim() ? docxText.trim() : "");
       let extraNotas = "";
-      if (excelKindsBlock.trim()) {
-        const blockResult = await extractKindsFromBlock(excelKindsBlock);
+      if (kindsSourceText) {
+        const blockResult = await extractKindsFromBlock(kindsSourceText);
         if (blockResult) {
           const blockDetected = detectKindsFromExtracted([
             { kinds: blockResult.kinds } as RawRate,
@@ -1419,12 +1442,14 @@ export default function NewRateFlow({
       }
 
       // Defense-in-depth sweep: regex over notas_globales + kinds block
-      // + per-rate notas to recover kinds that neither pass picked up. Only
-      // adds kinds whose ids aren't already present.
+      // + paste/docx text + per-rate notas to recover kinds that neither
+      // pass picked up. Only adds kinds whose ids aren't already present.
       const sweepText = [
         extracted.notas_globales ?? "",
         extraNotas,
         excelKindsBlock,
+        pasteText,
+        docxText,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
       ]
         .filter(Boolean)
@@ -1455,11 +1480,15 @@ export default function NewRateFlow({
         detected.preferentialEntries
       );
       // Regex sweeps for free-text patterns the structured extraction passes
-      // commonly miss: regional add-ons ("Add San Carlos US$ 200 on top of
-      // Mendoza") and the IWS-style "EBS NOT INCLUDED" repeat-stamp.
+      // commonly miss: regional add-ons ("Add / Additional San Carlos US$ 200
+      // on top of Mendoza"), IWS-style "EBS NOT INCLUDED" repeat-stamp,
+      // etc. Includes pasteText / docxText as source so emails get the
+      // same sweep coverage Excel sheets already had.
       const fullText = [
         excelText,
         excelKindsBlock,
+        pasteText,
+        docxText,
         extracted.notas_globales ?? "",
         extraNotas,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
@@ -1508,6 +1537,16 @@ export default function NewRateFlow({
       // Multi-carrier rows clone into one row per carrier.
       const expanded = expandMultiCarrier(extracted.rates);
 
+      // Compute the year hint for date normalization: prefer the year of
+      // the batch's effective validity (so "31/6" / "Fin de Junio" land
+      // in the user's intended quarter), fall back to current year.
+      const batchYearHint =
+        (effectiveValidity?.validTo &&
+          parseInt(effectiveValidity.validTo.slice(0, 4), 10)) ||
+        (effectiveValidity?.validFrom &&
+          parseInt(effectiveValidity.validFrom.slice(0, 4), 10)) ||
+        new Date().getFullYear();
+
       // Convert raw rate rows into preview-table records. The needs-review
       // classification is delegated to constants.ts:isRateNeedsReview — see
       // that function for the criteria. SF=0 and SF<0 are PRESERVED as
@@ -1523,45 +1562,77 @@ export default function NewRateFlow({
         const route = toStr(r.route) || (pol && pod ? `${pol} - ${pod}` : pol || pod);
         const sfNum = toNumber(r.sf);
         const sfParseable = isParsableNumber(r.sf);
-        // Default bl_fee to 0 when the source omitted the field entirely
-        // (Excels without a BL Fee column — common for Asian dry routes).
-        // "TBD"/"Ask agent" stays as the original string so isParsableNumber
-        // returns false and the row gets flagged.
+        // BL Fee: a missing field defaults to 0 ONLY for Asian POD dry
+        // routes (where Asian agents commonly bundle BL fee into SF). For
+        // non-Asian PODs, missing BL fee stays unparseable so the row
+        // gets flagged for the user to fill — guards against accidentally
+        // saving a $0 BL fee when the email simply didn't mention one.
         const rawBlFeeField = r.bl_fee ?? r.blFee;
-        const blFeeRaw =
-          rawBlFeeField === undefined || rawBlFeeField === null
+        const blFeeMissing =
+          rawBlFeeField === undefined || rawBlFeeField === null;
+        const blFeeRaw = blFeeMissing
+          ? isAsianPod(pod)
             ? 0
-            : rawBlFeeField;
+            : ""
+          : rawBlFeeField;
         const blFeeNum = toNumber(blFeeRaw);
-        const rateValidFrom = toStr(r.validFrom);
-        const rateValidTo = toStr(r.validTo);
+        const blFeeParseable = isParsableNumber(blFeeRaw);
+        // Normalize per-rate validity strings before comparing or feeding
+        // to isRateNeedsReview. Excel datetime came as "2026-06-30" via
+        // dateNF; emails may have "30/6", "30-Jun", etc. — the year hint
+        // resolves the no-year case.
+        const rateValidFromRaw = toStr(r.validFrom);
+        const rateValidToRaw = toStr(r.validTo);
+        const rateValidFrom = normalizeDateString(
+          rateValidFromRaw,
+          batchYearHint
+        );
+        const rateValidTo = normalizeDateString(
+          rateValidToRaw,
+          batchYearHint
+        );
 
-        // Per-row notes assembly. Order matters for readability:
-        //   1. Claude's per-rate notas (whatever it emitted)
-        //   2. Tipo coercion warning (when source had a non-standard tipo)
-        //   3. SF missing warning (when extraction didn't return a number
-        //      and the row otherwise has rate-shaped data)
-        //   4. Validity-per-rate override (when the row's own validity
-        //      differs from the batch effective validity, including
-        //      "validez vencida")
         const noteParts: string[] = [];
         if (baseNotes) noteParts.push(baseNotes);
         if (tipoOut.note) noteParts.push(tipoOut.note);
         if (!sfParseable && (pol.trim() || pod.trim() || carrier)) {
           noteParts.push("⚠️ SF faltante en archivo — completar manualmente.");
         }
+        if (blFeeMissing && !isAsianPod(pod)) {
+          noteParts.push("⚠️ BL Fee no detectado — confirmar con el agente.");
+        }
+        if (!carrier.trim()) {
+          noteParts.push("⚠️ Carrier no detectado — completar manualmente.");
+        }
+        // EBS ambiguity defense (Bug Ñ): if EBS / EFS is mentioned but
+        // none of the disambiguating tokens appear, default to a
+        // "confirm" annotation. The rate's notas already contain Claude's
+        // emitted text — this only fires when the prompt's logic didn't
+        // attach a clear marker.
+        if (
+          /\b(?:ebs|efs)\b/i.test(noteParts.join("\n")) &&
+          !/(no\s+incluid|sumar\s+aparte|aparte|external|incluid[oa]|bundled|with\s+ebs|includes\s+ebs)/i.test(
+            noteParts.join("\n")
+          )
+        ) {
+          noteParts.push(
+            "⚠️ EBS — confirmar si suma aparte o está incluido en SF."
+          );
+        }
 
-        // Validity-per-rate override note. Compare via datesEqual so a
-        // format mismatch ("2026-06-30" vs "30/06/2026" vs "30-Jun")
-        // doesn't trigger a false-positive "Validez específica" note.
+        // Validity-per-rate override note. datesEqual normalizes both
+        // sides via parseDateValue so format / year-hint mismatches don't
+        // trigger false positives.
         const effFrom = effectiveValidity?.validFrom ?? "";
         const effTo = effectiveValidity?.validTo ?? "";
         const rateHasOwnValidity = !!(rateValidFrom || rateValidTo);
         if (rateHasOwnValidity) {
           const fromDiffers =
-            !!rateValidFrom && !datesEqual(rateValidFrom, effFrom);
+            !!rateValidFrom &&
+            !datesEqual(rateValidFrom, effFrom, batchYearHint);
           const toDiffers =
-            !!rateValidTo && !datesEqual(rateValidTo, effTo);
+            !!rateValidTo &&
+            !datesEqual(rateValidTo, effTo, batchYearHint);
           if (fromDiffers || toDiffers) {
             const segs: string[] = [];
             if (rateValidFrom) segs.push(formatDateCl(rateValidFrom));
@@ -1569,16 +1640,66 @@ export default function NewRateFlow({
             noteParts.push(`Validez específica: ${segs.join(" — ")}`);
           }
         }
-        const expiredEffectiveTo = isDateInPast(rateValidTo || effTo);
+        const expiredEffectiveTo = isDateInPast(
+          rateValidTo || effTo,
+          batchYearHint
+        );
         if (expiredEffectiveTo) {
           const expDate = rateValidTo || effTo;
           noteParts.push(`⚠️ Validez vencida: ${formatDateCl(expDate)}`);
         }
 
+        // Range-band check. Reefer SFs outside 999-10000 are blocked
+        // (almost always typos or Thermal Liner kind values misread as
+        // a rate row); Dry/Flexi out-of-range yield warnings the user
+        // can override. FCA bundles bypass the upper-bound check.
+        const fcaContext = isFCARate({
+          ruta: route,
+          pol,
+          notas: noteParts.join("\n"),
+        });
+        let rangeFlag: RateRangeFlag | null = validateRateRange(
+          { tipo: tipoOut.tipo, sf: sfNum },
+          fcaContext
+        );
+
+        // Bug S frontend defense: if a 40'Reefer rate's SF exactly
+        // matches an insulado_* kind value AND the rate has weak
+        // identifying info (empty carrier or POL or POD), assume it's a
+        // Thermal Liner row that leaked into rates[]. Promote to
+        // blocking with an explanatory message. Keeps legitimate
+        // 40'Reefer rates that happen to match by coincidence safe by
+        // requiring weak identifiers.
+        if (
+          tipoOut.tipo === "40'Reefer" &&
+          (!carrier.trim() || !pol.trim() || !pod.trim())
+        ) {
+          for (const def of detected.kinds) {
+            if (!def.id.startsWith("insulado_")) continue;
+            const kv = detected.kindValues.find((v) => v.kind_id === def.id);
+            if (!kv) continue;
+            if (
+              kv.value20 === sfNum ||
+              kv.value40 === sfNum ||
+              kv.value_unique === sfNum
+            ) {
+              rangeFlag = {
+                severity: "blocking",
+                message: `SF=${sfNum} matchea el kind ${def.label} y la rate tiene carrier/POL/POD vacíos. Probable Thermal Liner extraído como rate fantasma — verificá tipo y monto antes de guardar.`,
+              };
+              break;
+            }
+          }
+        }
+
+        if (rangeFlag) {
+          noteParts.push(
+            (rangeFlag.severity === "blocking" ? "🚫 " : "⚠️ ") +
+              rangeFlag.message
+          );
+        }
+
         const notes = noteParts.join("\n");
-        // Bundle inclusions detection — Claude is instructed to keep SF as
-        // a single number and put "Incluye: ..." in notas; this just confirms
-        // the marker for visibility (no further processing).
         const bundle = detectBundleInclusions(notes);
         const finalNotes = bundle ? notes : notes;
         const needsReview = isRateNeedsReview(
@@ -1590,12 +1711,15 @@ export default function NewRateFlow({
             sfNum,
             blFeeNum,
             sfParseable,
-            blFeeParseable: isParsableNumber(blFeeRaw),
+            blFeeParseable,
             validFrom: rateValidFrom,
             validTo: rateValidTo,
           },
-          effectiveValidity
+          effectiveValidity,
+          batchYearHint
         );
+        const carrierMissing = !carrier.trim();
+        const isBlocking = rangeFlag?.severity === "blocking";
         return {
           carrier,
           pol,
@@ -1608,12 +1732,24 @@ export default function NewRateFlow({
           validFrom: rateValidFrom,
           validTo: rateValidTo,
           notes: finalNotes,
-          _needsReview: needsReview,
+          _needsReview: needsReview || carrierMissing,
+          _blockingError:
+            rangeFlag?.severity === "blocking" ? rangeFlag.message : null,
+          _uncheckByDefault: carrierMissing || isBlocking,
         };
       });
 
       setPreviewRows(rows);
-      setPreviewSelected(new Set(rows.map((_, i) => i)));
+      // Default selection excludes blocked rows + carrier-missing rows.
+      // The user can manually re-check them after editing in Step 2.
+      setPreviewSelected(
+        new Set(
+          rows
+            .map((r, i) => ({ r, i }))
+            .filter(({ r }) => !r._uncheckByDefault)
+            .map(({ i }) => i)
+        )
+      );
       setExtractionDone(true);
 
       // Surface non-blocking info (sheet classifications, kinds + rates count).
@@ -1749,10 +1885,28 @@ export default function NewRateFlow({
       onSaveEdit({ ...updated, id: editingRate.id });
       return;
     }
-    const selected = previewRows.filter((_, i) => previewSelected.has(i));
+    // Save filters out blocked rows even if the user explicitly checked
+    // them — blocking flags (Reefer SF out of band, Thermal Liner
+    // suspected as rate) are intentionally hard-stop. The user must
+    // edit the rate to clear the flag before it can be saved.
+    const selected = previewRows.filter(
+      (r, i) => previewSelected.has(i) && !r._blockingError
+    );
+    const blockedCount = previewRows.filter(
+      (r, i) => previewSelected.has(i) && r._blockingError
+    ).length;
     if (selected.length === 0) {
-      setError("Seleccioná al menos una fila para guardar.");
+      setError(
+        blockedCount > 0
+          ? `Las ${blockedCount} fila${blockedCount === 1 ? "" : "s"} seleccionada${blockedCount === 1 ? "" : "s"} tiene${blockedCount === 1 ? "" : "n"} errores bloqueantes — editalas o desmarcalas antes de guardar.`
+          : "Seleccioná al menos una fila para guardar."
+      );
       return;
+    }
+    if (blockedCount > 0) {
+      setError(
+        `${blockedCount} fila${blockedCount === 1 ? "" : "s"} con error bloqueante NO se guardará${blockedCount === 1 ? "" : "n"} (editá o desmarcá para revisar).`
+      );
     }
     const rates = selected.map((row, idx) =>
       buildRateFromRow(
@@ -2829,12 +2983,23 @@ function PreviewStep({
               const carrier = String(r.carrier ?? "");
               const carrierBg = carrier ? carrierColor(carrier) : undefined;
               const needsReview = r._needsReview === true;
+              const blockingError =
+                typeof r._blockingError === "string" ? r._blockingError : null;
+              // Visual treatment: blocking errors get red, regular needs-
+              // review (warnings, carrier missing, etc.) get amber so the
+              // user can tell apart "must fix" from "should look at".
+              const rowBgClass = blockingError
+                ? "bg-red-100/70"
+                : needsReview
+                  ? "bg-amber-50/60"
+                  : "";
               return (
                 <Fragment key={idx}>
                   <tr
                     className={`text-sm ${
                       isSelected || isEditMode ? "" : "opacity-60"
-                    } ${needsReview ? "bg-red-50/60" : ""}`}
+                    } ${rowBgClass}`}
+                    title={blockingError ?? undefined}
                   >
                     {!isEditMode && (
                       <td className="px-3 py-2 w-10">

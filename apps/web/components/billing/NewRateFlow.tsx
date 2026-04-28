@@ -18,7 +18,6 @@ import {
   Rate,
   carrierColor,
   consolidatePreferentialNotes,
-  datesEqual,
   detectAgencyFee,
   detectAgencyFeeMax,
   detectBundleInclusions,
@@ -39,7 +38,6 @@ import {
   isRateNeedsReview,
   matchKindByAlias,
   migrateContainerType,
-  normalizeDateString,
   parseMultiCarrier,
   quartersToDateRange,
   RateRangeFlag,
@@ -104,7 +102,7 @@ HARD RULES:
 3. DESCRIPTOR LABELS like "Wine/Juice loads", "Dry loads", "Reefer loads", "Cargo type X" are categorization headers that group related rates, NOT charges. NEVER emit them as kinds.
 4. Multi-carrier on one row ("OOCL or CMA", "OOCL/EVER", "Carriers: OOCL, EVER"): set sl="OOCL or CMA". DO NOT clone — frontend clones.
 5. Bundle "includes X, Y, Z" / "incluye X, Y, Z": keep sf as ONE number (do not split). Add to notas: "Incluye: <list>". Do NOT invent kinds for the inclusions.
-6. Per-row validity override: set this row's validFrom/validTo from the row text AND add to notas.
+6. Per-row validity is IGNORED by design. Inter-Tank rates always inherit validity from the batch (Step 1's Q1/Q2/Q3/Q4 picker or date range). Do NOT emit validFrom / validTo per rate even when the source mentions "Validity 30/6" / "valid until X" / a different per-row date. If a row legitimately has different validity, the user's workflow is to create a separate batch. Leave validFrom / validTo OUT of each rate row — only use validity_inferred at the batch level for the overall file's validity hint.
 7. Regional add-ons (San Carlos, Tupungato, Rivadavia, San Juan, San Martín, "afuera de Mendoza", "Add" or "Additional" lines): NEVER as a rate row. Append to notas_globales.
 8. Free-day info: notas_globales.
 9. LCL content: skip entirely. Indicators: "Insulation Chile/Argentina" headers, amounts "per pallet/M3/shipment", early "OF" column, no clear POL+POD+Type triple.
@@ -1577,20 +1575,11 @@ export default function NewRateFlow({
           : rawBlFeeField;
         const blFeeNum = toNumber(blFeeRaw);
         const blFeeParseable = isParsableNumber(blFeeRaw);
-        // Normalize per-rate validity strings before comparing or feeding
-        // to isRateNeedsReview. Excel datetime came as "2026-06-30" via
-        // dateNF; emails may have "30/6", "30-Jun", etc. — the year hint
-        // resolves the no-year case.
-        const rateValidFromRaw = toStr(r.validFrom);
-        const rateValidToRaw = toStr(r.validTo);
-        const rateValidFrom = normalizeDateString(
-          rateValidFromRaw,
-          batchYearHint
-        );
-        const rateValidTo = normalizeDateString(
-          rateValidToRaw,
-          batchYearHint
-        );
+        // Per-row validity is intentionally IGNORED — Inter-Tank rates
+        // always inherit the batch's Q1/Q2/Q3/Q4 (or explicit date range)
+        // from Step 1. Even when a source mentions "Validity 30/6" or
+        // "valid until X" per row, that's discarded. The user creates a
+        // separate batch when the validity actually differs.
 
         const noteParts: string[] = [];
         if (baseNotes) noteParts.push(baseNotes);
@@ -1620,33 +1609,13 @@ export default function NewRateFlow({
           );
         }
 
-        // Validity-per-rate override note. datesEqual normalizes both
-        // sides via parseDateValue so format / year-hint mismatches don't
-        // trigger false positives.
-        const effFrom = effectiveValidity?.validFrom ?? "";
+        // Expired-validity note is a BATCH-level concern. The flag
+        // lands on every row only because we don't have a separate
+        // batch banner today; cleanup pending until the per-row vs
+        // batch UI is split.
         const effTo = effectiveValidity?.validTo ?? "";
-        const rateHasOwnValidity = !!(rateValidFrom || rateValidTo);
-        if (rateHasOwnValidity) {
-          const fromDiffers =
-            !!rateValidFrom &&
-            !datesEqual(rateValidFrom, effFrom, batchYearHint);
-          const toDiffers =
-            !!rateValidTo &&
-            !datesEqual(rateValidTo, effTo, batchYearHint);
-          if (fromDiffers || toDiffers) {
-            const segs: string[] = [];
-            if (rateValidFrom) segs.push(formatDateCl(rateValidFrom));
-            if (rateValidTo) segs.push(formatDateCl(rateValidTo));
-            noteParts.push(`Validez específica: ${segs.join(" — ")}`);
-          }
-        }
-        const expiredEffectiveTo = isDateInPast(
-          rateValidTo || effTo,
-          batchYearHint
-        );
-        if (expiredEffectiveTo) {
-          const expDate = rateValidTo || effTo;
-          noteParts.push(`⚠️ Validez vencida: ${formatDateCl(expDate)}`);
+        if (effTo && isDateInPast(effTo, batchYearHint)) {
+          noteParts.push(`⚠️ Validez del batch vencida: ${formatDateCl(effTo)}`);
         }
 
         // Range-band check. Reefer SFs outside 999-10000 are blocked
@@ -1712,8 +1681,6 @@ export default function NewRateFlow({
             blFeeNum,
             sfParseable,
             blFeeParseable,
-            validFrom: rateValidFrom,
-            validTo: rateValidTo,
           },
           effectiveValidity,
           batchYearHint
@@ -1729,8 +1696,6 @@ export default function NewRateFlow({
           sl,
           sf: sfNum,
           blFee: blFeeNum,
-          validFrom: rateValidFrom,
-          validTo: rateValidTo,
           notes: finalNotes,
           _needsReview: needsReview || carrierMissing,
           _blockingError:

@@ -1004,15 +1004,13 @@ export function isRateNeedsReview(
     // Parseability of the raw source values. False when the source emitted
     // tokens like "TBD" or "Ask agent" that toNumber() would silently
     // coerce to 0 — those need to be flagged distinctly from legitimate 0.
-    // Note: the row converter defaults a missing bl_fee to 0 (parseable) so
-    // Excels without a BL Fee column don't fail this gate.
     sfParseable: boolean;
     blFeeParseable: boolean;
-    // Per-rate validity strings from the extraction. Empty means the rate
-    // didn't carry its own validity and should fall back to batchValidity.
-    validFrom: string;
-    validTo: string;
   },
+  // Validity is now ALWAYS batch-level — Inter-Tank rates inherit the
+  // batch's Q1/Q2/Q3/Q4 (or explicit date range) at save time and a
+  // per-row override is no longer supported. The function uses
+  // batchValidity directly without a per-row fallback.
   batchValidity: { validFrom?: string; validTo?: string } | null,
   batchYearHint?: number
 ): boolean {
@@ -1029,13 +1027,13 @@ export function isRateNeedsReview(
     if (!isAsianPod(input.pod) || isReefer) return true;
   }
 
-  const effFrom = input.validFrom || batchValidity?.validFrom || "";
-  const effTo = input.validTo || batchValidity?.validTo || "";
+  const effFrom = batchValidity?.validFrom ?? "";
+  const effTo = batchValidity?.validTo ?? "";
   if (!isValidDate(effFrom, batchYearHint) || !isValidDate(effTo, batchYearHint))
     return true;
-  // Validity vencida: validTo is before today. The row stays in the bucket
-  // so the user decides whether to drop it or import-and-edit; we don't
-  // skip it automatically.
+  // Validity vencida: when the batch's validTo is before today, every row
+  // of the batch is technically expired. Flagging per-row is consistent
+  // with how the user reviews each rate before saving.
   if (isDateInPast(effTo, batchYearHint)) return true;
 
   return false;

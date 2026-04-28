@@ -23,10 +23,13 @@ import {
   detectBundleInclusions,
   detectDisposal,
   detectDiscountInsulated,
+  detectEbsNotIncluded,
+  detectRegionalAddons,
   detectThermalLinerUnsized,
   extractPreferentialClientsFromLabel,
   findSimilarAgent,
   formatDateCl,
+  isDateInPast,
   isLclSheet,
   isParsableNumber,
   isRateNeedsReview,
@@ -138,6 +141,9 @@ HARD RULES:
 4. Bundle "includes X, Y, Z": keep sf as one number. Add "Incluye: <list>" to notas.
 5. LCL rows: skip entirely.
 6. Compound SF cells like "USD 2540 + USD 60 BL Fee" or "2540/60": parse first number as sf, second as bl_fee.
+7. Any cell whose value reads "USD X per BL" / "USD X xbl" / "USD X / BL" / "USD X per bl" — regardless of column header — IS the rate's bl_fee. Example: a column "(Surcharge 1)" with value "USD 38 per bl" → bl_fee=38, NOT a kind. Multiple per-BL surcharges in the same row → sum them into bl_fee.
+8. Columns labeled BAF / Bunker / Surcharge whose cell value is literally "Included" / "Incl." / "Bundled" / "N/A": these mean the surcharge is bundled into SF. DO NOT emit them as kinds and DO NOT use them as numeric values. Append to that rate's notas: "BAF/Bunker incluido en SF.".
+9. Regional add-on rows like "Add San Carlos US$ 200 on top of Mendoza" → DO NOT emit them as a rate row. Skip; the frontend handles regional add-ons via a separate sweep.
 
 If the chunk is not a rate table, return { "rates": [] }.
 
@@ -164,6 +170,7 @@ RULES:
 - For discounts ("discount of USD 25 if insulated"), emit value_unique as a NEGATIVE number.
 - "Thermal Liner = USD X" without size → value_unique: X. Frontend will copy to both 20' and 40'.
 - Free-form market context, free days, regional add-ons → notas_globales (NOT as kinds).
+- If a charge's value is literally "Included" / "Incl." / "Bundled" / "N/A" (no number), do NOT emit a kind for it — that means it's bundled. Mention in notas_globales if relevant ("BAF incluido en SF.").
 - If nothing recognizable, return { "kinds": [], "notas_globales": "" }.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
@@ -177,14 +184,22 @@ const LARGE_FILE_BYTES = 10 * 1024 * 1024;
 const DOCX_MIME =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+type SheetClassification = "rate" | "catalog" | "lcl";
+
 type ExcelReadResult = {
+  // CSV-like text built from "rate"-classified sheets only. Catalog and LCL
+  // sheets are filtered out at read time so they don't pollute the chunked
+  // rate prompt with non-rate content.
   text: string;
-  // Text from columns located to the right of the first fully-empty column
-  // (per sheet). These are typically free-form Items / kinds / discount /
-  // notes blocks that the rate-extraction prompt should NOT see, but the
-  // kinds-extraction prompt should. Empty string when no right-side block
-  // exists.
-  rightBlock: string;
+  // Combined text fed to the kinds-extraction pass: catalog sheets in full
+  // PLUS the right-side blocks of rate sheets (the column slice past the
+  // first fully-empty separator column). Both are kinds-bearing content
+  // that doesn't belong in the rate prompt.
+  kindsBlock: string;
+  // Per-sheet classification, surfaced for logging in the dev console so
+  // it's easy to confirm during smoke tests which buckets each sheet went
+  // to.
+  classifications: { name: string; type: SheetClassification }[];
   totalRows: number;
   usedRows: number;
   truncated: boolean;
@@ -242,31 +257,105 @@ function csvEscapeCell(s: string): string {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+// Classifies an entire sheet (as a 2D array) into rate / catalog / lcl. The
+// rate path goes through chunked rate-extraction; catalog and lcl bypass it.
+//
+//   "lcl"     — handled by isLclSheet's existing heuristic (per-pallet/M3,
+//               Insulation Chile/Argentina headers, no POL+POD+Type triple).
+//   "rate"    — header rows in the first 5 lines contain POL + POD + Type
+//               (or close synonyms). The default when in doubt — losing a
+//               catalog sheet to the rate path is recoverable (Claude
+//               returns no rates from it), losing a rate sheet to the
+//               catalog path drops 10s-100s of rates silently.
+//   "catalog" — no clear POL+POD+Type triple AND has a Charges/Area/Item
+//               header OR a strong majority of rows match a "<Label>
+//               <USD num> per container/BL/teu" pattern.
+function classifySheet(aoa: unknown[][]): SheetClassification {
+  if (aoa.length === 0) return "rate";
+  const sheetText = aoa
+    .slice(0, 50)
+    .map((r) => r.map((c) => String(c ?? "")).join(" | "))
+    .join("\n");
+  if (isLclSheet(sheetText)) return "lcl";
+
+  const headerArea = aoa.slice(0, 5);
+  const cellMatches = (re: RegExp) =>
+    headerArea.some((r) =>
+      r.some((c) => re.test(String(c ?? "")))
+    );
+  const hasPol = cellMatches(/\bpol\b/i);
+  const hasPod = cellMatches(/\bpod\b/i);
+  const hasType = cellMatches(/\b(type|tipo|equipment|container)\b/i);
+  if (hasPol && hasPod && hasType) return "rate";
+
+  const hasCatalogHeader = headerArea.some((r) =>
+    r.some((c) => /^(charges?|area|item)\b/i.test(String(c ?? "").trim()))
+  );
+  const dataRows = aoa
+    .slice(1)
+    .filter((r) => r.some((c) => String(c ?? "").trim() !== ""));
+  const perContainerRows = dataRows.filter((r) =>
+    r.some((c) =>
+      /per\s+(container|ctr|teu|bl)|x\s*bl|usd\s+[\d.,]+/i.test(String(c ?? ""))
+    )
+  ).length;
+  const catalogPatternMajority =
+    dataRows.length > 0 &&
+    perContainerRows >= Math.ceil(dataRows.length * 0.3);
+
+  if (hasCatalogHeader || catalogPatternMajority) return "catalog";
+  return "rate";
+}
+
 async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   const buffer = await file.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array" });
-  const sheets: string[] = [];
-  const rightBlocks: string[] = [];
+  const rateSheets: string[] = [];
+  const kindsBlocks: string[] = [];
+  const classifications: { name: string; type: SheetClassification }[] = [];
   let totalRows = 0;
   let usedRows = 0;
   for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
     if (!ws) continue;
+    // raw: false applies cell formatting at read time. Excel datetime serial
+    // numbers (45838) become formatted strings ("30/06/2026") which Claude
+    // can parse directly; without it Claude saw raw serials and either
+    // treated them as numbers or guessed wrong.
     const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, {
       header: 1,
       defval: "",
+      raw: false,
     });
     if (aoa.length === 0) continue;
     const maxCols = Math.max(0, ...aoa.map((r) => r.length));
 
-    // Right-boundary detection: stop at the first fully-empty column. Empty
-    // columns are the consistent visual separator agents use between the
-    // rate table (POL/POD/Type/SL/Amount, leftmost) and side blocks (Items
-    // table, free-text discounts, "Please note..." boxes, etc.). Without
-    // this cut, dropping the empty col makes side-block cells adjacent to
-    // rate cells in the CSV and Claude routinely picks the wrong column as
-    // Amount — emitting SF=200 (kind value), SF=0 (no Amount), or SF=-25
-    // (discount text bleeding in).
+    const classification = classifySheet(aoa);
+    classifications.push({ name, type: classification });
+    if (classification === "lcl") continue;
+
+    if (classification === "catalog") {
+      // Whole sheet is a kinds catalog. Send it to the kinds-extraction
+      // pass verbatim (cells joined " | " per row) and skip rate chunking.
+      const lines: string[] = [];
+      for (const r of aoa) {
+        const cells: string[] = [];
+        for (let c = 0; c < maxCols; c++) {
+          const v = String(r[c] ?? "").trim();
+          if (v) cells.push(v);
+        }
+        if (cells.length > 0) lines.push(cells.join(" | "));
+      }
+      if (lines.length > 0) {
+        kindsBlocks.push(`Hoja: ${name}\n${lines.join("\n")}`);
+      }
+      continue;
+    }
+
+    // classification === "rate" — apply right-boundary detection so the
+    // leftmost block (rates) goes to the chunk prompt and the right block
+    // (Items table, free-text discount, "Please note..." boxes) joins the
+    // kinds-extraction pass.
     let rightBoundary = maxCols;
     for (let c = 0; c < maxCols; c++) {
       if (aoa.every((r) => String(r[c] ?? "").trim() === "")) {
@@ -281,8 +370,6 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
     }
     if (keepCols.length === 0) continue;
 
-    // Capture cells beyond the right boundary as a separate text blob, one
-    // line per non-empty source row, joined " | " across columns.
     if (rightBoundary < maxCols) {
       const rightLines: string[] = [];
       for (const r of aoa) {
@@ -294,7 +381,7 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
         if (cells.length > 0) rightLines.push(cells.join(" | "));
       }
       if (rightLines.length > 0) {
-        rightBlocks.push(`Hoja: ${name}\n${rightLines.join("\n")}`);
+        kindsBlocks.push(`Hoja: ${name}\n${rightLines.join("\n")}`);
       }
     }
 
@@ -307,11 +394,20 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
     totalRows += lines.length;
     if (usedRows < EXCEL_MAX_ROWS) {
       const taken = lines.slice(0, EXCEL_MAX_ROWS - usedRows);
-      sheets.push(`Hoja: ${name}\n${taken.join("\n")}`);
+      rateSheets.push(`Hoja: ${name}\n${taken.join("\n")}`);
       usedRows += taken.length;
     }
   }
-  let text = sheets.join("\n\n");
+
+  // Surface the classification in the browser console for smoke-test
+  // observability. One line per sheet so it's easy to scan.
+  if (typeof console !== "undefined") {
+    for (const c of classifications) {
+      console.log(`[rate-extract] Hoja "${c.name}": clasificada como ${c.type}`);
+    }
+  }
+
+  let text = rateSheets.join("\n\n");
   let charTruncated = false;
   if (text.length > EXCEL_MAX_CHARS) {
     text = text.slice(0, EXCEL_MAX_CHARS) + "\n... (truncado)";
@@ -319,7 +415,8 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
   }
   return {
     text,
-    rightBlock: rightBlocks.join("\n\n"),
+    kindsBlock: kindsBlocks.join("\n\n"),
+    classifications,
     totalRows,
     usedRows,
     truncated: totalRows > usedRows,
@@ -663,6 +760,20 @@ function detectKindsFromExtracted(rates: RawRate[]): {
       }
     }
   }
+  // Defense: drop kinds whose value fields are all empty/zero. This filters
+  // false positives from extraction artifacts where Claude emits a kind
+  // because it saw a column header but the actual cell was "Included" /
+  // "Incl." / "Bundled" / blank (BAF column being the canonical case in
+  // IWS). A kind with no usable numbers is just noise in the editor.
+  for (const [id, kv] of valuesById) {
+    const has20 = (kv.value20 ?? 0) !== 0;
+    const has40 = (kv.value40 ?? 0) !== 0;
+    const hasUnique = (kv.value_unique ?? 0) !== 0;
+    if (!has20 && !has40 && !hasUnique) {
+      valuesById.delete(id);
+      kindsById.delete(id);
+    }
+  }
   return {
     kinds: Array.from(kindsById.values()),
     kindValues: Array.from(valuesById.values()),
@@ -690,30 +801,8 @@ function expandMultiCarrier(rates: RawRate[]): RawRate[] {
   return out;
 }
 
-// Splits an Excel CSV blob (the cleaned text we feed Claude) into per-sheet
-// pieces and drops sheets that look like LCL — see isLclSheet for indicators.
-// Returns the surviving text plus the names of dropped sheets so the UI can
-// surface them.
-function dropLclSheetsFromExcelText(text: string): {
-  text: string;
-  droppedSheets: string[];
-} {
-  if (!text.includes("Hoja:")) return { text, droppedSheets: [] };
-  const sheets = text.split(/(?=^Hoja:\s)/m);
-  const kept: string[] = [];
-  const dropped: string[] = [];
-  for (const s of sheets) {
-    if (!s.trim()) continue;
-    const m = s.match(/^Hoja:\s*(.+?)\n/);
-    const name = m ? m[1] ?? "?" : "?";
-    if (isLclSheet(s)) {
-      dropped.push(name);
-    } else {
-      kept.push(s);
-    }
-  }
-  return { text: kept.join("\n\n").trimEnd(), droppedSheets: dropped };
-}
+// (dropLclSheetsFromExcelText was removed — sheet classification + LCL
+// detection now happen at read time inside readExcelAsText.)
 
 // Defense-in-depth sweep: scans free-form text (notas globales, right-side
 // block, per-rate notas) for kind patterns that might have slipped past the
@@ -858,10 +947,18 @@ export default function NewRateFlow({
   >(null);
   const [docxText, setDocxText] = useState("");
   const [excelText, setExcelText] = useState("");
-  // Right-side block (Items, free-text discount, notes) captured per-sheet at
-  // Excel read time. Stored separately from excelText so the rate-extraction
-  // chunks contain ONLY the rate table; the kinds-extraction pass takes this.
-  const [excelRightBlock, setExcelRightBlock] = useState("");
+  // Combined kinds-bearing content captured at Excel read time: catalog
+  // sheets (entire content) + the right-side block of rate sheets (cells
+  // past the first empty separator column). Stored separately from
+  // excelText so the rate-extraction chunks contain ONLY rate-table content;
+  // the kinds-extraction pass takes this. Also fed to the regex sweeps for
+  // regional add-ons / EBS NOT INCLUDED / etc.
+  const [excelKindsBlock, setExcelKindsBlock] = useState("");
+  // Per-sheet classification (rate / catalog / lcl) for surfacing in the
+  // info banner.
+  const [excelSheetClassifications, setExcelSheetClassifications] = useState<
+    { name: string; type: SheetClassification }[]
+  >([]);
   const [excelTruncWarning, setExcelTruncWarning] = useState<string | null>(
     null
   );
@@ -958,7 +1055,8 @@ export default function NewRateFlow({
     setImageData(null);
     setDocxText("");
     setExcelText("");
-    setExcelRightBlock("");
+    setExcelKindsBlock("");
+    setExcelSheetClassifications([]);
     setExtractionDone(false);
     if (file.size > LARGE_FILE_BYTES) {
       const mb = (file.size / (1024 * 1024)).toFixed(1);
@@ -975,7 +1073,8 @@ export default function NewRateFlow({
           return;
         }
         setExcelText(result.text);
-        setExcelRightBlock(result.rightBlock);
+        setExcelKindsBlock(result.kindsBlock);
+        setExcelSheetClassifications(result.classifications);
         const warnings: string[] = [];
         if (result.truncated) {
           warnings.push(
@@ -1140,13 +1239,11 @@ export default function NewRateFlow({
     setExtractionInfo(null);
     try {
       let extracted: ExtractedBatch = { rates: [] };
-      let droppedSheets: string[] = [];
 
       if (excelText) {
-        // Drop LCL sheets silently before sending to Claude.
-        const filtered = dropLclSheetsFromExcelText(excelText);
-        droppedSheets = filtered.droppedSheets;
-        const chunks = chunkExcelCsv(filtered.text);
+        // LCL + catalog sheets were already filtered out at read time —
+        // excelText only contains rate-classified sheet content.
+        const chunks = chunkExcelCsv(excelText);
         const items = chunks.map((c, i) => ({
           index: i + 1,
           content: `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${c}`,
@@ -1194,12 +1291,13 @@ export default function NewRateFlow({
       // Detect kinds + values from the extracted rate rows.
       const detected = detectKindsFromExtracted(extracted.rates);
 
-      // Second pass: extract kinds from the Excel right-side block (Items
-      // table / discount text / notes) that the rate-extraction prompt was
-      // intentionally NOT shown. Append any new kinds + capture extra notas.
+      // Second pass: extract kinds from the Excel kinds-block — catalog
+      // sheets in full PLUS the right-side blocks of rate sheets. The
+      // rate-extraction prompt was intentionally NOT shown this content.
+      // Append any new kinds + capture extra notas.
       let extraNotas = "";
-      if (excelRightBlock.trim()) {
-        const blockResult = await extractKindsFromBlock(excelRightBlock);
+      if (excelKindsBlock.trim()) {
+        const blockResult = await extractKindsFromBlock(excelKindsBlock);
         if (blockResult) {
           const blockDetected = detectKindsFromExtracted([
             { kinds: blockResult.kinds } as RawRate,
@@ -1220,13 +1318,13 @@ export default function NewRateFlow({
         }
       }
 
-      // Defense-in-depth sweep: regex over notas_globales + right-side block
+      // Defense-in-depth sweep: regex over notas_globales + kinds block
       // + per-rate notas to recover kinds that neither pass picked up. Only
       // adds kinds whose ids aren't already present.
       const sweepText = [
         extracted.notas_globales ?? "",
         extraNotas,
-        excelRightBlock,
+        excelKindsBlock,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
       ]
         .filter(Boolean)
@@ -1256,8 +1354,26 @@ export default function NewRateFlow({
       const preferentialLines = consolidatePreferentialNotes(
         detected.preferentialEntries
       );
+      // Regex sweeps for free-text patterns the structured extraction passes
+      // commonly miss: regional add-ons ("Add San Carlos US$ 200 on top of
+      // Mendoza") and the IWS-style "EBS NOT INCLUDED" repeat-stamp.
+      const fullText = [
+        excelText,
+        excelKindsBlock,
+        extracted.notas_globales ?? "",
+        extraNotas,
+        ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const regionalAddons = detectRegionalAddons(fullText);
+      const ebsNotIncludedLine = detectEbsNotIncluded(fullText)
+        ? "EBS no incluido en SF (se factura aparte vía Tabla EBS)."
+        : "";
       const combinedNotasGlobales = [
         ...preferentialLines,
+        ...regionalAddons,
+        ebsNotIncludedLine,
         extracted.notas_globales,
         extraNotas,
       ]
@@ -1300,21 +1416,13 @@ export default function NewRateFlow({
       const rows: Record<string, unknown>[] = expanded.map((r) => {
         const baseNotes = toStr(r.notas ?? r.notes);
         const tipoOut = coerceContainerType(r.type ?? r.tipo);
-        const noteParts: string[] = [];
-        if (baseNotes) noteParts.push(baseNotes);
-        if (tipoOut.note) noteParts.push(tipoOut.note);
-        const notes = noteParts.join("\n");
         const carrier = toStr(r.carrier);
         const sl = toStr(r.sl) || carrier;
         const pol = toStr(r.pol);
         const pod = toStr(r.pod);
         const route = toStr(r.route) || (pol && pod ? `${pol} - ${pod}` : pol || pod);
-        // Bundle inclusions detection — Claude is instructed to keep SF as
-        // a single number and put "Incluye: ..." in notas; this just confirms
-        // the marker for visibility (no further processing).
-        const bundle = detectBundleInclusions(notes);
-        const finalNotes = bundle ? notes : notes;
         const sfNum = toNumber(r.sf);
+        const sfParseable = isParsableNumber(r.sf);
         // Default bl_fee to 0 when the source omitted the field entirely
         // (Excels without a BL Fee column — common for Asian dry routes).
         // "TBD"/"Ask agent" stays as the original string so isParsableNumber
@@ -1327,6 +1435,51 @@ export default function NewRateFlow({
         const blFeeNum = toNumber(blFeeRaw);
         const rateValidFrom = toStr(r.validFrom);
         const rateValidTo = toStr(r.validTo);
+
+        // Per-row notes assembly. Order matters for readability:
+        //   1. Claude's per-rate notas (whatever it emitted)
+        //   2. Tipo coercion warning (when source had a non-standard tipo)
+        //   3. SF missing warning (when extraction didn't return a number
+        //      and the row otherwise has rate-shaped data)
+        //   4. Validity-per-rate override (when the row's own validity
+        //      differs from the batch effective validity, including
+        //      "validez vencida")
+        const noteParts: string[] = [];
+        if (baseNotes) noteParts.push(baseNotes);
+        if (tipoOut.note) noteParts.push(tipoOut.note);
+        if (!sfParseable && (pol.trim() || pod.trim() || carrier)) {
+          noteParts.push("⚠️ SF faltante en archivo — completar manualmente.");
+        }
+
+        // Validity-per-rate override note. Only annotate when the rate has
+        // its OWN validFrom/validTo and either differs from effective
+        // batch dates OR is already past today. Both cases the user wants
+        // to know about explicitly.
+        const effFrom = effectiveValidity?.validFrom ?? "";
+        const effTo = effectiveValidity?.validTo ?? "";
+        const rateHasOwnValidity = !!(rateValidFrom || rateValidTo);
+        if (rateHasOwnValidity) {
+          const fromDiffers = rateValidFrom && rateValidFrom !== effFrom;
+          const toDiffers = rateValidTo && rateValidTo !== effTo;
+          if (fromDiffers || toDiffers) {
+            const segs: string[] = [];
+            if (rateValidFrom) segs.push(formatDateCl(rateValidFrom));
+            if (rateValidTo) segs.push(formatDateCl(rateValidTo));
+            noteParts.push(`Validez específica: ${segs.join(" — ")}`);
+          }
+        }
+        const expiredEffectiveTo = isDateInPast(rateValidTo || effTo);
+        if (expiredEffectiveTo) {
+          const expDate = rateValidTo || effTo;
+          noteParts.push(`⚠️ Validez vencida: ${formatDateCl(expDate)}`);
+        }
+
+        const notes = noteParts.join("\n");
+        // Bundle inclusions detection — Claude is instructed to keep SF as
+        // a single number and put "Incluye: ..." in notas; this just confirms
+        // the marker for visibility (no further processing).
+        const bundle = detectBundleInclusions(notes);
+        const finalNotes = bundle ? notes : notes;
         const needsReview = isRateNeedsReview(
           {
             pol,
@@ -1335,7 +1488,7 @@ export default function NewRateFlow({
             tipoCoerced: !!tipoOut.note,
             sfNum,
             blFeeNum,
-            sfParseable: isParsableNumber(r.sf),
+            sfParseable,
             blFeeParseable: isParsableNumber(blFeeRaw),
             validFrom: rateValidFrom,
             validTo: rateValidTo,
@@ -1362,11 +1515,22 @@ export default function NewRateFlow({
       setPreviewSelected(new Set(rows.map((_, i) => i)));
       setExtractionDone(true);
 
-      // Surface non-blocking info (LCL skipped, kinds detected count).
+      // Surface non-blocking info (sheet classifications, kinds + rates count).
       const infoParts: string[] = [];
-      if (droppedSheets.length > 0) {
+      const lclSheets = excelSheetClassifications
+        .filter((c) => c.type === "lcl")
+        .map((c) => c.name);
+      const catalogSheets = excelSheetClassifications
+        .filter((c) => c.type === "catalog")
+        .map((c) => c.name);
+      if (lclSheets.length > 0) {
         infoParts.push(
-          `${droppedSheets.length} hoja${droppedSheets.length === 1 ? "" : "s"} LCL skipeada${droppedSheets.length === 1 ? "" : "s"} (${droppedSheets.join(", ")})`
+          `${lclSheets.length} hoja${lclSheets.length === 1 ? "" : "s"} LCL skipeada${lclSheets.length === 1 ? "" : "s"} (${lclSheets.join(", ")})`
+        );
+      }
+      if (catalogSheets.length > 0) {
+        infoParts.push(
+          `${catalogSheets.length} hoja${catalogSheets.length === 1 ? "" : "s"} catálogo (${catalogSheets.join(", ")})`
         );
       }
       infoParts.push(

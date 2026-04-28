@@ -820,16 +820,23 @@ export function isParsableNumber(v: unknown): boolean {
 // True when the value parses to a real calendar date. Accepts ISO yyyy-mm-dd
 // or dd/mm/yyyy with optional time component.
 export function isValidDate(v: unknown): boolean {
-  if (v === undefined || v === null) return false;
+  return parseDateValue(v) !== null;
+}
+
+// Parses an ISO yyyy-mm-dd or dd/mm/yyyy string into a Date set to local
+// midnight. Returns null if the value isn't a parseable date format. Shared
+// by isValidDate and isDateInPast so both stay consistent.
+function parseDateValue(v: unknown): Date | null {
+  if (v === undefined || v === null) return null;
   const s = String(v).trim();
-  if (!s) return false;
+  if (!s) return null;
   const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (iso) {
     const [, y, m, d] = iso;
     const dt = new Date(
       `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}T00:00:00`
     );
-    return !Number.isNaN(dt.getTime());
+    return Number.isNaN(dt.getTime()) ? null : dt;
   }
   const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
   if (dmy) {
@@ -837,9 +844,20 @@ export function isValidDate(v: unknown): boolean {
     const dt = new Date(
       `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}T00:00:00`
     );
-    return !Number.isNaN(dt.getTime());
+    return Number.isNaN(dt.getTime()) ? null : dt;
   }
-  return false;
+  return null;
+}
+
+// True when the value parses to a date strictly before today (local
+// midnight). Used by isRateNeedsReview to flag expired rates so the user
+// reviews them before saving.
+export function isDateInPast(v: unknown): boolean {
+  const dt = parseDateValue(v);
+  if (!dt) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return dt.getTime() < today.getTime();
 }
 
 // Single source of truth for the "needs review" classification used by the
@@ -900,6 +918,10 @@ export function isRateNeedsReview(
   const effFrom = input.validFrom || batchValidity?.validFrom || "";
   const effTo = input.validTo || batchValidity?.validTo || "";
   if (!isValidDate(effFrom) || !isValidDate(effTo)) return true;
+  // Validity vencida: validTo is before today. The row stays in the bucket
+  // so the user decides whether to drop it or import-and-edit; we don't
+  // skip it automatically.
+  if (isDateInPast(effTo)) return true;
 
   return false;
 }
@@ -1064,6 +1086,61 @@ export function detectDisposal(text: string): number | null {
     }
   }
   return null;
+}
+
+// Detects free-text add-ons of the form
+//   "Add San Carlos US$ 200 on top of Mendoza"
+// emitted by some IWS-style sheets and returns one canonical line per
+// distinct (city, base) pair so they can be appended to notas_globales:
+//   "Origen alternativo San Carlos: +USD 200 sobre Mendoza."
+// The match is greedy on the city portion (allows multi-word like "San
+// Juan") and rejects amounts that don't parse to a positive number.
+export function detectRegionalAddons(text: string): string[] {
+  if (!text) return [];
+  const lines = new Map<string, string>();
+  const re =
+    /Add\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?)\s+US\$?\s+([\d.,]+)\s+on\s+top\s+of\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][\w\sñ]{1,30}?)(?=[.,;\n]|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const city = (m[1] ?? "").trim().replace(/\s+/g, " ");
+    const amountStr = (m[2] ?? "").trim();
+    const base = (m[3] ?? "").trim().replace(/\s+/g, " ");
+    if (!city || !base) continue;
+    const amount = parseAmount(amountStr);
+    if (!amount || amount <= 0) continue;
+    const key = `${city.toLowerCase()}|${base.toLowerCase()}`;
+    lines.set(key, `Origen alternativo ${city}: +USD ${amount} sobre ${base}.`);
+  }
+  return Array.from(lines.values());
+}
+
+// Detects whether a text body has the "EBS NOT INCLUDED" stamp repeated in
+// many rows (≥3) — the canonical IWS-style remark indicating EBS is billed
+// separately via the EBS table, not bundled into SF. The threshold avoids
+// false positives from a single passing mention.
+export function detectEbsNotIncluded(text: string): boolean {
+  if (!text) return false;
+  const matches = text.match(/EBS\s+NOT\s+INCLUDED/gi);
+  return (matches?.length ?? 0) >= 3;
+}
+
+// Subsequence-of-uppercase abbreviation matcher used to surface "WR" as a
+// suggestion for "WENRAN", "VM" for "Van Moer", etc. Only triggers on short
+// uppercase abbreviations (2-4 chars) that fit as an in-order subsequence
+// of the full name. Restrictive on length to keep noise low.
+export function isSubsequenceOfUppercase(short: string, long: string): boolean {
+  if (!short || !long) return false;
+  const s = short.trim().toUpperCase();
+  const l = long.trim().toUpperCase();
+  if (s.length < 2 || s.length > 4) return false;
+  if (s.length >= l.length) return false;
+  if (!/^[A-Z]+$/.test(s)) return false;
+  let i = 0;
+  for (const ch of l) {
+    if (ch === s[i]) i++;
+    if (i === s.length) return true;
+  }
+  return false;
 }
 
 // "Thermal Liner = USD 350" without a 20'/40' qualifier (CCL fixture case).
@@ -2370,6 +2447,12 @@ export function argClientNameSimilarity(a: string, b: string): number {
   // Substring match after stripping common prefixes catches "Catena Zapata"
   // ⊂ "Bodega Catena Zapata" and "Peñaflor" ⊂ "Grupo Peñaflor".
   if (ca.includes(cb) || cb.includes(ca)) return 0.9;
+  // Uppercase-abbreviation subsequence match: "WR" → "WENRAN", "VM" →
+  // "Van Moer". Only fires on short (2-4 char) all-uppercase abbreviations
+  // that fit as an in-order subsequence of the full name (or vice versa).
+  if (isSubsequenceOfUppercase(a, b) || isSubsequenceOfUppercase(b, a)) {
+    return 0.85;
+  }
   const dist = levenshtein(ca, cb);
   return 1 - dist / Math.max(ca.length, cb.length);
 }

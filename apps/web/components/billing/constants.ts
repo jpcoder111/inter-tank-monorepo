@@ -673,39 +673,119 @@ export const ASIAN_PODS: ReadonlySet<string> = new Set([
   "chongqing",
   "dalian",
   "fuzhou",
+  "guangzhou",
+  "haikou",
   "hong kong",
   "huangpu",
   "jiangyin",
   "jiaoxin",
   "lian hua shan",
+  "lianyungang",
   "nansha",
   "nantong",
   "ningbo",
   "qingdao",
+  "sanya",
   "shanghai",
+  "shantou",
   "shekou",
+  "taizhou",
+  "tianjin",
   "wenzhou",
   "wuhan",
   "xiamen",
   "xingang",
   "yantai",
   "yantian",
+  "zhuhai",
   // Japan
+  "fukuoka",
   "hakata",
+  "hiroshima",
+  "kanazawa",
   "kobe",
+  "kushiro",
+  "moji",
   "nagoya",
   "naha",
+  "niigata",
   "osaka",
   "sendai",
+  "shimizu",
   "tokyo",
   "tomakomai",
+  "toyama",
   "yokohama",
+  // South Korea
+  "busan",
+  "gwangyang",
+  "incheon",
+  "masan",
+  "mokpo",
+  "pyeongtaek",
+  "ulsan",
+  // Taiwan
+  "kaohsiung",
+  "keelung",
+  "taichung",
+  "taipei",
   // Vietnam
+  "cai mep",
   "da nang",
   "haiphong",
   "ho chi minh",
+  "qui nhon",
+  "vung tau",
   // Cambodia
   "sihanoukville",
+  // Thailand
+  "bangkok",
+  "laem chabang",
+  "map ta phut",
+  "songkhla",
+  // Malaysia
+  "bintulu",
+  "johor",
+  "kuantan",
+  "pasir gudang",
+  "penang",
+  "port klang",
+  "tanjung pelepas",
+  // Singapore
+  "jurong",
+  "singapore",
+  // Indonesia
+  "belawan",
+  "jakarta",
+  "semarang",
+  "surabaya",
+  "tanjung perak",
+  "tanjung priok",
+  // Philippines
+  "cebu",
+  "davao",
+  "general santos",
+  "iloilo",
+  "manila",
+  "subic",
+  // Bangladesh
+  "chittagong",
+  "dhaka",
+  "mongla",
+  // India (included: geographically Asia, operationally similar pricing
+  // patterns to SE Asia. Split out if a future agent prices India distinctly.)
+  "chennai",
+  "cochin",
+  "jnpt",
+  "mumbai",
+  "mundra",
+  "nhava sheva",
+  "pipavav",
+  "tuticorin",
+  "vizag",
+  // Sri Lanka
+  "colombo",
+  "hambantota",
 ]);
 
 export function isAsianPod(pod: string): boolean {
@@ -765,9 +845,12 @@ export function isValidDate(v: unknown): boolean {
 //   - sf or bl_fee not parseable as a number
 //   - validFrom / validTo not valid dates (after applying batch defaults)
 //   - sf <= 0 with a NON-Asian POD (Asian POD permits differential rates)
+//   - bl_fee <= 0 with a non-Asian POD OR a Reefer rate (Asian dry/flexi
+//     routes commonly bundle BL fee into SF; reefers always charge it)
 //
-// "Weird but legitimate" — SF=0, SF<0 on Asian routes, empty kinds, long
-// notas, bundle inclusions — DOES NOT trigger review.
+// "Weird but legitimate" — SF=0, SF<0 on Asian routes, BL Fee=0 on Asian
+// dry routes, empty kinds, long notas, bundle inclusions — DOES NOT trigger
+// review.
 export function isRateNeedsReview(
   input: {
     pol: string;
@@ -777,12 +860,14 @@ export function isRateNeedsReview(
     // one of the four v3 ContainerType values (e.g. "20'RF", "40'Flexi",
     // "Dry" without size, blank).
     tipoCoerced?: boolean;
-    // Numeric value already extracted (caller does the parse). Used for the
-    // "<=0 + non-Asian POD" check.
+    // Numeric values already extracted (caller does the parse).
     sfNum: number;
+    blFeeNum: number;
     // Parseability of the raw source values. False when the source emitted
     // tokens like "TBD" or "Ask agent" that toNumber() would silently
     // coerce to 0 — those need to be flagged distinctly from legitimate 0.
+    // Note: the row converter defaults a missing bl_fee to 0 (parseable) so
+    // Excels without a BL Fee column don't fail this gate.
     sfParseable: boolean;
     blFeeParseable: boolean;
     // Per-rate validity strings from the extraction. Empty means the rate
@@ -800,11 +885,101 @@ export function isRateNeedsReview(
 
   if (input.sfNum <= 0 && !isAsianPod(input.pod)) return true;
 
+  if (input.blFeeNum <= 0) {
+    const isReefer = input.tipo === "40'Reefer";
+    if (!isAsianPod(input.pod) || isReefer) return true;
+  }
+
   const effFrom = input.validFrom || batchValidity?.validFrom || "";
   const effTo = input.validTo || batchValidity?.validTo || "";
   if (!isValidDate(effFrom) || !isValidDate(effTo)) return true;
 
   return false;
+}
+
+// ===== Preferential-client kind detection =====
+//
+// Some agents (WENRAN being the canonical case) define alternative kind
+// values restricted to specific customer codes by appending the customer
+// list to the kind label, e.g. "Thermal Liner S&F Chile (ASC - Aussino -
+// EMW)". These should NOT become global kinds of the batch — the
+// preferential rate only applies to those clients. Instead they go to
+// notas_globales as free-form context.
+//
+// Heuristic: the parenthetical content qualifies as a customer list when:
+//   - has at least 4 chars
+//   - contains NO digits (digits would suggest a unit annotation like "20'")
+//   - doesn't contain unit tokens (USD, TEU, CTR, BL, FCL, LCL, 20', 40')
+//
+// Returns the cleaned (paren-stripped) label plus the parsed customer
+// names. Returns null when the label has no parenthetical or the content
+// fails the heuristic.
+export function extractPreferentialClientsFromLabel(label: string): {
+  cleanLabel: string;
+  clients: string[];
+} | null {
+  if (!label) return null;
+  const m = label.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+  if (!m) return null;
+  const base = (m[1] ?? "").trim();
+  const paren = (m[2] ?? "").trim();
+  if (paren.length < 4) return null;
+  if (/\d/.test(paren)) return null;
+  if (/\b(USD|TEU|CTR|BL|FCL|LCL|HC|RF)\b/i.test(paren)) return null;
+  if (/['"′]/.test(paren)) return null;
+  const clients = paren
+    .split(/\s*[-/,;]\s*|\s+y\s+|\s+and\s+/i)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s.length < 40);
+  if (clients.length === 0) return null;
+  return { cleanLabel: base, clients };
+}
+
+// Consolidates a list of preferential-rate entries (one per kind label
+// that carried a (Client A - Client B) suffix) into one human-readable
+// line per distinct client group. Entries sharing the same client list
+// are merged onto one line so the user gets:
+//   "Tarifa preferencial para clientes ASC, Aussino, EMW: Insulado Chile USD 180/280, Insulado Argentina USD 230/330"
+// instead of two separate sentences for the same trio.
+export function consolidatePreferentialNotes(
+  entries: Array<{
+    clients: string[];
+    kindLabel: string;
+    value20?: number;
+    value40?: number;
+    value_unique?: number;
+  }>
+): string[] {
+  if (entries.length === 0) return [];
+  const groups = new Map<
+    string,
+    { clients: string[]; items: typeof entries }
+  >();
+  for (const e of entries) {
+    const key = e.clients.map((c) => c.toLowerCase()).sort().join("|");
+    if (!groups.has(key)) groups.set(key, { clients: e.clients, items: [] });
+    groups.get(key)!.items.push(e);
+  }
+  const lines: string[] = [];
+  for (const { clients, items } of groups.values()) {
+    const parts = items.map((e) => {
+      let val = "";
+      if (e.value20 !== undefined && e.value40 !== undefined) {
+        val = `USD ${e.value20}/${e.value40}`;
+      } else if (e.value20 !== undefined) {
+        val = `USD ${e.value20} (20')`;
+      } else if (e.value40 !== undefined) {
+        val = `USD ${e.value40} (40')`;
+      } else if (e.value_unique !== undefined) {
+        val = `USD ${e.value_unique}`;
+      }
+      return val ? `${e.kindLabel} ${val}` : e.kindLabel;
+    });
+    lines.push(
+      `Tarifa preferencial para clientes ${clients.join(", ")}: ${parts.join(", ")}`
+    );
+  }
+  return lines;
 }
 
 // ===== Free-text kind sweep detectors =====

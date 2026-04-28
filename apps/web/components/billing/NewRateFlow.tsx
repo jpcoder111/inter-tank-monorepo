@@ -17,12 +17,14 @@ import {
   Quarter,
   Rate,
   carrierColor,
+  consolidatePreferentialNotes,
   detectAgencyFee,
   detectAgencyFeeMax,
   detectBundleInclusions,
   detectDisposal,
   detectDiscountInsulated,
   detectThermalLinerUnsized,
+  extractPreferentialClientsFromLabel,
   findSimilarAgent,
   formatDateCl,
   isLclSheet,
@@ -570,14 +572,52 @@ function coerceContainerType(raw: unknown): {
 function detectKindsFromExtracted(rates: RawRate[]): {
   kinds: KindDef[];
   kindValues: KindValue[];
+  preferentialEntries: Array<{
+    clients: string[];
+    kindLabel: string;
+    value20?: number;
+    value40?: number;
+    value_unique?: number;
+  }>;
 } {
   const kindsById = new Map<string, KindDef>();
   const valuesById = new Map<string, KindValue>();
+  const preferentialEntries: Array<{
+    clients: string[];
+    kindLabel: string;
+    value20?: number;
+    value40?: number;
+    value_unique?: number;
+  }> = [];
   for (const r of rates) {
     if (!Array.isArray(r.kinds)) continue;
     for (const k of r.kinds as RawKind[]) {
       const label = toStr(k.label).trim();
       if (!label) continue;
+
+      // Preferential-client kind labels ("Insulado Chile (ASC - Aussino -
+      // EMW)") are routed to notas_globales instead of becoming batch-wide
+      // kinds — the rate only applies to those clients.
+      const pref = extractPreferentialClientsFromLabel(label);
+      if (pref) {
+        const canonicalId = matchKindByAlias(pref.cleanLabel);
+        const canonicalLabel = canonicalId
+          ? PREDEFINED_KINDS.find((p) => p.id === canonicalId)?.label ??
+            pref.cleanLabel
+          : pref.cleanLabel;
+        const v20 = toNumber(k.value20);
+        const v40 = toNumber(k.value40);
+        const vu = toNumber(k.value_unique);
+        preferentialEntries.push({
+          clients: pref.clients,
+          kindLabel: canonicalLabel,
+          value20: v20 || undefined,
+          value40: v40 || undefined,
+          value_unique: vu || undefined,
+        });
+        continue;
+      }
+
       const matchedId = matchKindByAlias(label);
       let kindId: string;
       let def: KindDef;
@@ -626,6 +666,7 @@ function detectKindsFromExtracted(rates: RawRate[]): {
   return {
     kinds: Array.from(kindsById.values()),
     kindValues: Array.from(valuesById.values()),
+    preferentialEntries,
   };
 }
 
@@ -1165,6 +1206,8 @@ export default function NewRateFlow({
               detected.kindValues.push(kv);
             }
           }
+          // Preferential entries from the second pass merge with the first.
+          detected.preferentialEntries.push(...blockDetected.preferentialEntries);
           if (blockResult.notas_globales) extraNotas = blockResult.notas_globales;
         }
       }
@@ -1195,7 +1238,16 @@ export default function NewRateFlow({
       if (extracted.validity_inferred && !validFrom && !validTo) {
         setValidityInferred(extracted.validity_inferred);
       }
-      const combinedNotasGlobales = [extracted.notas_globales, extraNotas]
+      // Consolidate preferential-client kind entries into human-readable
+      // lines that get prepended to the inferred notas_globales banner.
+      const preferentialLines = consolidatePreferentialNotes(
+        detected.preferentialEntries
+      );
+      const combinedNotasGlobales = [
+        ...preferentialLines,
+        extracted.notas_globales,
+        extraNotas,
+      ]
         .filter((s) => s && s.trim())
         .join("\n")
         .trim();
@@ -1229,7 +1281,16 @@ export default function NewRateFlow({
         const bundle = detectBundleInclusions(notes);
         const finalNotes = bundle ? notes : notes;
         const sfNum = toNumber(r.sf);
-        const blFeeRaw = r.bl_fee ?? r.blFee;
+        // Default bl_fee to 0 when the source omitted the field entirely
+        // (Excels without a BL Fee column — common for Asian dry routes).
+        // "TBD"/"Ask agent" stays as the original string so isParsableNumber
+        // returns false and the row gets flagged.
+        const rawBlFeeField = r.bl_fee ?? r.blFee;
+        const blFeeRaw =
+          rawBlFeeField === undefined || rawBlFeeField === null
+            ? 0
+            : rawBlFeeField;
+        const blFeeNum = toNumber(blFeeRaw);
         const rateValidFrom = toStr(r.validFrom);
         const rateValidTo = toStr(r.validTo);
         const needsReview = isRateNeedsReview(
@@ -1239,6 +1300,7 @@ export default function NewRateFlow({
             tipo: tipoOut.tipo,
             tipoCoerced: !!tipoOut.note,
             sfNum,
+            blFeeNum,
             sfParseable: isParsableNumber(r.sf),
             blFeeParseable: isParsableNumber(blFeeRaw),
             validFrom: rateValidFrom,
@@ -1254,7 +1316,7 @@ export default function NewRateFlow({
           tipo: tipoOut.tipo,
           sl,
           sf: sfNum,
-          blFee: toNumber(blFeeRaw),
+          blFee: blFeeNum,
           validFrom: rateValidFrom,
           validTo: rateValidTo,
           notes: finalNotes,

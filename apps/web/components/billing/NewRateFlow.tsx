@@ -262,15 +262,26 @@ function csvEscapeCell(s: string): string {
 //
 //   "lcl"     — handled by isLclSheet's existing heuristic (per-pallet/M3,
 //               Insulation Chile/Argentina headers, no POL+POD+Type triple).
-//   "rate"    — header rows in the first 5 lines contain POL + POD + Type
-//               (or close synonyms). The default when in doubt — losing a
-//               catalog sheet to the rate path is recoverable (Claude
-//               returns no rates from it), losing a rate sheet to the
-//               catalog path drops 10s-100s of rates silently.
-//   "catalog" — no clear POL+POD+Type triple AND has a Charges/Area/Item
-//               header OR a strong majority of rows match a "<Label>
-//               <USD num> per container/BL/teu" pattern.
-function classifySheet(aoa: unknown[][]): SheetClassification {
+//   "catalog" — any of the three patterns below:
+//                 P1: no POL+POD+Type triple AND has a Charges/Area/Item
+//                     header
+//                 P2: no POL+POD+Type triple AND a strong majority of rows
+//                     match a "<Label> <USD num> per container/BL/teu" line
+//                 P3: HAS the POL+POD+Type triple, but POD and POL are both
+//                     undifferentiated across data rows (≤1 unique value
+//                     each) AND a precarriage / inland / trucking / haulage
+//                     label is present (sheet name OR cell content). This
+//                     captures sheets like IWS "Precarriage" that look
+//                     rate-shaped but are really one catalog charge split
+//                     by container size.
+//   "rate"    — default when no catalog pattern matches. Losing a catalog
+//               sheet to the rate path is recoverable (Claude returns no
+//               rates from it); losing a rate sheet to catalog drops
+//               10s-100s of rates silently.
+function classifySheet(
+  aoa: unknown[][],
+  sheetName: string
+): SheetClassification {
   if (aoa.length === 0) return "rate";
   const sheetText = aoa
     .slice(0, 50)
@@ -286,14 +297,62 @@ function classifySheet(aoa: unknown[][]): SheetClassification {
   const hasPol = cellMatches(/\bpol\b/i);
   const hasPod = cellMatches(/\bpod\b/i);
   const hasType = cellMatches(/\b(type|tipo|equipment|container)\b/i);
-  if (hasPol && hasPod && hasType) return "rate";
+  const hasPolPodType = hasPol && hasPod && hasType;
 
-  const hasCatalogHeader = headerArea.some((r) =>
-    r.some((c) => /^(charges?|area|item)\b/i.test(String(c ?? "").trim()))
-  );
   const dataRows = aoa
     .slice(1)
     .filter((r) => r.some((c) => String(c ?? "").trim() !== ""));
+
+  // P3: rate-shaped sheet that is really a single catalog charge tier'd by
+  // container size. Look for POL/POD column indices in the header area, then
+  // check whether their data values collapse to a single unique entry. If
+  // yes, plus a precarriage-style label present, classify as catalog.
+  if (hasPolPodType && dataRows.length > 0) {
+    let podColIdx = -1;
+    let polColIdx = -1;
+    for (const row of headerArea) {
+      for (let j = 0; j < row.length; j++) {
+        const cell = String(row[j] ?? "");
+        if (podColIdx === -1 && /\bpod\b/i.test(cell)) podColIdx = j;
+        if (polColIdx === -1 && /\bpol\b/i.test(cell)) polColIdx = j;
+      }
+    }
+    if (podColIdx !== -1 && polColIdx !== -1) {
+      const uniquePods = new Set(
+        dataRows
+          .map((r) => String(r[podColIdx] ?? "").trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const uniquePols = new Set(
+        dataRows
+          .map((r) => String(r[polColIdx] ?? "").trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const sheetNameMatchesCatalog =
+        /precarriage|inland|trucking|haulage|^fca\b/i.test(sheetName);
+      const dataHasCatalogLabel = dataRows.some((r) =>
+        r.some((c) =>
+          /\b(fca\s+[a-záéíóúñ]+|precarriage|inland|trucking|haulage)\b/i.test(
+            String(c ?? "")
+          )
+        )
+      );
+      if (
+        uniquePods.size <= 1 &&
+        uniquePols.size <= 1 &&
+        (sheetNameMatchesCatalog || dataHasCatalogLabel)
+      ) {
+        return "catalog";
+      }
+    }
+    return "rate";
+  }
+
+  // P1 / P2: no POL+POD+Type triple, look for catalog header or majority
+  // "USD X per ..." rows.
+  const hasCatalogHeader = headerArea.some((r) =>
+    r.some((c) => /^(charges?|area|item)\b/i.test(String(c ?? "").trim()))
+  );
   const perContainerRows = dataRows.filter((r) =>
     r.some((c) =>
       /per\s+(container|ctr|teu|bl)|x\s*bl|usd\s+[\d.,]+/i.test(String(c ?? ""))
@@ -330,7 +389,7 @@ async function readExcelAsText(file: File): Promise<ExcelReadResult> {
     if (aoa.length === 0) continue;
     const maxCols = Math.max(0, ...aoa.map((r) => r.length));
 
-    const classification = classifySheet(aoa);
+    const classification = classifySheet(aoa, name);
     classifications.push({ name, type: classification });
     if (classification === "lcl") continue;
 

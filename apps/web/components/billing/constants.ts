@@ -158,13 +158,71 @@ export const CARRIER_COLORS: Record<string, string> = {
 
 export const CARRIER_COLOR_FALLBACK = "#f3f4f6";
 
+// Maps emails-of-the-wild diminutives ("EVER", "CMA", "YML") to the
+// canonical key in CARRIER_COLORS / CARRIER_SUGGESTIONS. The map is
+// consulted ONLY by carrierColor + carriersMatch — saved Rate.carrier
+// values are NEVER rewritten, so a rate that arrived with carrier="EVER"
+// keeps "EVER" on disk while still rendering with the Evergreen colour.
+//
+// Lookup is case-insensitive and ignores spaces/hyphens (see
+// resolveCarrierAlias below). Add new aliases here as the catalog of
+// agent dialects grows; do not duplicate keys that are already canonical
+// in CARRIER_COLORS.
+export const CARRIER_ALIASES: Record<string, string> = {
+  // CMA-CGM
+  cma: "CMA-CGM",
+  cmacgm: "CMA-CGM",
+  // Evergreen
+  ever: "Evergreen",
+  eg: "Evergreen",
+  evergreen: "Evergreen",
+  // Yang Ming (catalog key is "Yang Ming")
+  yangming: "Yang Ming",
+  yml: "Yang Ming",
+  ym: "Yang Ming",
+  // HMM (catalog key is "HMM")
+  hyundai: "HMM",
+  hyundaimerchantmarine: "HMM",
+  // Hapag-Lloyd (catalog key is "Hapag")
+  "hapag lloyd": "Hapag",
+  "hapag-lloyd": "Hapag",
+  hapaglloyd: "Hapag",
+  hlag: "Hapag",
+};
+
+function carrierKey(c: string): string {
+  return c.toLowerCase().replace(/[\s-]+/g, "").trim();
+}
+
+// Resolves a free-form carrier string to its canonical CARRIER_COLORS key.
+// Returns the original string when no alias / direct hit applies — callers
+// then decide whether to fall back (e.g. carrierColor → neutral grey).
+export function resolveCarrierCanonical(carrier: string): string {
+  if (!carrier) return carrier;
+  if (CARRIER_COLORS[carrier]) return carrier;
+  const key = carrierKey(carrier);
+  // Direct alias hit (case/space/dash-insensitive).
+  for (const aliasKey of Object.keys(CARRIER_ALIASES)) {
+    if (carrierKey(aliasKey) === key) return CARRIER_ALIASES[aliasKey]!;
+  }
+  // Case-insensitive direct hit on a canonical name.
+  for (const canonical of Object.keys(CARRIER_COLORS)) {
+    if (carrierKey(canonical) === key) return canonical;
+  }
+  return carrier;
+}
+
 // Resolves a carrier name to its brand color, tolerant of dash/space variants
-// ("CMA-CGM" vs "CMA CGM" vs "cma cgm"). Returns the neutral fallback for
-// unknown carriers.
+// ("CMA-CGM" vs "CMA CGM" vs "cma cgm") AND of common diminutives ("EVER" →
+// Evergreen, "YML" → Yang Ming). Returns the neutral fallback for unknown
+// carriers.
 export function carrierColor(carrier: string): string {
   if (!carrier) return CARRIER_COLOR_FALLBACK;
   const direct = CARRIER_COLORS[carrier];
   if (direct) return direct;
+  const canonical = resolveCarrierCanonical(carrier);
+  const viaAlias = CARRIER_COLORS[canonical];
+  if (viaAlias) return viaAlias;
   for (const key of Object.keys(CARRIER_COLORS)) {
     if (carriersMatch(key, carrier)) return CARRIER_COLORS[key]!;
   }
@@ -757,15 +815,87 @@ export function isBatchNotesAllowed(line: string): boolean {
 }
 
 // Filters a multi-line batch.notes string by isBatchNotesAllowed and
-// returns the trimmed survivors joined back. Empty-string in / empty-out.
+// returns the trimmed survivors joined back, then dedupes near-duplicate
+// lines (Bullet regression: "14/8 free days at origin/destination" + "14
+// free days at origin/destination" appearing as two lines). Empty-string
+// in / empty-out.
 export function filterBatchNotesText(text: string): string {
   if (!text) return "";
-  return text
+  const filtered = text
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
     .filter(isBatchNotesAllowed)
     .join("\n");
+  return dedupeBatchNotes(filtered);
+}
+
+// Normalization for the dedupe pass: lowercases, drops diacritics, drops
+// punctuation, collapses whitespace. Keeps numbers + letters so "14/8"
+// and "14" still differ on the digit content.
+function normForDup(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Drops near-duplicate lines from a batch-notes string. Strategy:
+//  - Sort lines longest-first so the most informative variant survives
+//    ("14/8 free days of container use at origin/destination" beats
+//    "14 free days of container use at origin/destination").
+//  - For each candidate, drop if any already-accepted line:
+//    * has the same normalized form, OR
+//    * fully contains the candidate's normalized form, OR
+//    * differs by ≤ 5 Levenshtein edits AND is similar in length.
+//  - Restore source order at the end so user-pinned lines keep their
+//    relative position.
+//
+// Substring inclusion is the dominant signal: "14 free days at origin"
+// being a substring of "14/8 free days at origin destination" (after
+// normalize) is a clean dedupe trigger. Levenshtein catches variants
+// that differ only by a punctuation token a normalize misses.
+export function dedupeBatchNotes(text: string): string {
+  if (!text) return "";
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length <= 1) return lines.join("\n");
+  const indexed = lines.map((l, i) => ({ l, i, n: normForDup(l) }));
+  const sorted = [...indexed].sort((a, b) => b.l.length - a.l.length);
+  const accepted: typeof indexed = [];
+  for (const cand of sorted) {
+    let dup = false;
+    for (const acc of accepted) {
+      if (cand.n === acc.n) {
+        dup = true;
+        break;
+      }
+      if (cand.n && acc.n.includes(cand.n)) {
+        dup = true;
+        break;
+      }
+      if (acc.n && cand.n.includes(acc.n)) {
+        dup = true;
+        break;
+      }
+      if (
+        cand.n.length > 12 &&
+        Math.abs(cand.n.length - acc.n.length) <= 6 &&
+        levenshtein(cand.n, acc.n) <= 5
+      ) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) accepted.push(cand);
+  }
+  accepted.sort((a, b) => a.i - b.i);
+  return accepted.map((x) => x.l).join("\n");
 }
 
 // Surfaces "two kinds share the same value" warnings to the operator.
@@ -807,6 +937,82 @@ export function validateKindsValueUniqueness(
     );
   }
   return out;
+}
+
+// Post-process dedupe between predefined and custom kinds. Belt-and-braces
+// for the case where the LLM emits a label like "Flexitank Chile" via a
+// path that hits a predef alias AND another label that doesn't (extra
+// suffix, exotic punctuation, by_size flip), producing both flexitank_chile
+// (predef) and custom_flexitank_chile in the same batch.
+//
+// Two signals trigger removal of a custom kind:
+//   1) The custom's label resolves to a predef alias (matchKindByAlias).
+//      The custom's values are merged into the predef when the predef has
+//      a missing slot — so a "Flexitank Chile = 600" hit that landed on
+//      the custom by accident still lands its 600 on the predef.
+//   2) The custom shares any non-null value with a predef kind. Catches
+//      the rare case where alias matching fails twice but the value is
+//      the tell-tale signal (e.g. "Insulado Chile" custom with value20=350
+//      next to insulado_chile predef value40=350 — same charge, both 350).
+//
+// The function returns a fresh kinds + values pair; callers replace the
+// existing batch state. Order is preserved, predefs come out untouched.
+export function dedupeKindsAgainstPredefined(
+  kinds: KindDef[],
+  values: KindValue[]
+): { kinds: KindDef[]; values: KindValue[] } {
+  const toRemove = new Set<string>();
+  const valuesCopy = values.map((v) => ({ ...v }));
+  for (const kind of kinds) {
+    if (kind.predefined) continue;
+    if (toRemove.has(kind.id)) continue;
+    // Signal 1 — alias hit on a predef that's actually present in the batch.
+    const aliasHit = matchKindByAlias(kind.label);
+    if (aliasHit && kinds.some((k) => k.predefined && k.id === aliasHit)) {
+      toRemove.add(kind.id);
+      const customKv = valuesCopy.find((v) => v.kind_id === kind.id);
+      const predefKv = valuesCopy.find((v) => v.kind_id === aliasHit);
+      if (customKv && predefKv) {
+        if (predefKv.value20 == null && customKv.value20 != null) {
+          predefKv.value20 = customKv.value20;
+        }
+        if (predefKv.value40 == null && customKv.value40 != null) {
+          predefKv.value40 = customKv.value40;
+        }
+        if (predefKv.value_unique == null && customKv.value_unique != null) {
+          predefKv.value_unique = customKv.value_unique;
+        }
+      }
+      continue;
+    }
+    // Signal 2 — value overlap with a predef.
+    const customKv = valuesCopy.find((v) => v.kind_id === kind.id);
+    if (!customKv) continue;
+    const overlap = kinds.some((other) => {
+      if (!other.predefined) return false;
+      const okv = valuesCopy.find((v) => v.kind_id === other.id);
+      if (!okv) return false;
+      const matchPair = (a: number | null | undefined, b: number | null | undefined) =>
+        a != null && b != null && a === b;
+      if (matchPair(customKv.value20, okv.value20)) return true;
+      if (matchPair(customKv.value40, okv.value40)) return true;
+      if (
+        customKv.value_unique != null &&
+        (matchPair(customKv.value_unique, okv.value20) ||
+          matchPair(customKv.value_unique, okv.value40) ||
+          matchPair(customKv.value_unique, okv.value_unique))
+      )
+        return true;
+      return false;
+    });
+    if (overlap) {
+      toRemove.add(kind.id);
+    }
+  }
+  return {
+    kinds: kinds.filter((k) => !toRemove.has(k.id)),
+    values: valuesCopy.filter((v) => !toRemove.has(v.kind_id)),
+  };
 }
 
 // Derives the Incoterm of a rate from whatever signal is available.
@@ -2924,13 +3130,19 @@ export const SEED_LOCAL_EXCEPTIONS: LocalException[] = [
 ];
 
 // ===== Local charge matching =====
-// "CMA-CGM" must equal "CMA CGM" must equal "cma-cgm".
+// "CMA-CGM" must equal "CMA CGM" must equal "cma-cgm". Also matches via
+// alias resolution so "EVER" === "Evergreen" — the rate keeps "EVER" on
+// disk but the matcher treats the two as the same carrier.
 function normalizeCarrier(c: string): string {
   return c.toLowerCase().replace(/[\s-]+/g, "");
 }
 
 export function carriersMatch(a: string, b: string): boolean {
-  return normalizeCarrier(a) === normalizeCarrier(b);
+  if (normalizeCarrier(a) === normalizeCarrier(b)) return true;
+  const ca = resolveCarrierCanonical(a);
+  const cb = resolveCarrierCanonical(b);
+  if (ca === a && cb === b) return false; // neither resolved — already known unequal
+  return normalizeCarrier(ca) === normalizeCarrier(cb);
 }
 
 // True when a shipper name matches the exception's customer field directly OR

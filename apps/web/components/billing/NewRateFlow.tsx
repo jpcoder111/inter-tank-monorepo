@@ -51,6 +51,7 @@ import {
   quartersToDateRange,
   RateRangeFlag,
   slugifyKindLabel,
+  dedupeKindsAgainstPredefined,
   uniqueSuggestions,
   validateKindsValueUniqueness,
   validateRateRange,
@@ -1865,8 +1866,17 @@ export default function NewRateFlow({
         }
       }
 
-      setBatchKinds(detected.kinds);
-      setBatchKindValues(detected.kindValues);
+      // Final dedupe pass: drop custom kinds that shadow a predefined one
+      // (Van Moer / CCL regression where the LLM emitted both
+      // flexitank_chile predef AND a custom "Flexitank Chile" with the same
+      // value). The dedupe also merges any non-conflicting values from the
+      // dropped custom into the predef.
+      const deduped = dedupeKindsAgainstPredefined(
+        detected.kinds,
+        detected.kindValues
+      );
+      setBatchKinds(deduped.kinds);
+      setBatchKindValues(deduped.values);
 
       // Apply user-input precedence: only set inferred slots if user fields
       // are still empty. Never overwrite a non-empty user field.
@@ -2210,12 +2220,22 @@ export default function NewRateFlow({
         };
       });
 
-      setPreviewRows(rows);
+      // Drop phantom rate rows (kind-leaks) from the preview entirely.
+      // _blockingType === "phantom_kind" is set by the row converter when
+      // the rate has no carrier AND its SF matches the value of a
+      // predefined kind in the batch — that's a Flexitank / Insulado /
+      // Agency Fee line that Claude misclassified as a rate. Showing them
+      // as red blocked rows just adds noise; the kind itself is already
+      // captured (Fix A dedupe ensures the kind catalog has it once).
+      const visibleRows = rows.filter(
+        (r) => r._blockingType !== "phantom_kind"
+      );
+      setPreviewRows(visibleRows);
       // Default selection excludes blocked rows + carrier-missing rows.
       // The user can manually re-check them after editing in Step 2.
       setPreviewSelected(
         new Set(
-          rows
+          visibleRows
             .map((r, i) => ({ r, i }))
             .filter(({ r }) => !r._uncheckByDefault)
             .map(({ i }) => i)

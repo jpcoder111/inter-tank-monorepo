@@ -23,6 +23,7 @@ import {
   detectBundleInclusions,
   detectDisposal,
   detectDiscountInsulated,
+  detectExcelBlockKinds,
   detectPrecarriageInline,
   detectRegionalAddons,
   detectSubClientSuffixes,
@@ -1693,16 +1694,17 @@ export default function NewRateFlow({
       const subClientResult = detectSubClientSuffixes(
         pasteText || docxText || ""
       );
-      // Also strip from excelKindsBlock so the second-pass kinds prompt
-      // doesn't double-count.
-      const precarriageHitsFromExcel =
-        detectPrecarriageInline(excelKindsBlock);
-      const subClientFromExcel = detectSubClientSuffixes(excelKindsBlock);
+      // Excel kindsBlock uses pipe-separated rows (Label | val20 | val40)
+      // which the email-style detectors don't match — they require "=".
+      // detectExcelBlockKinds adapts the format and runs the same
+      // detectors on synthetic per-column lines. Returns the hits + the
+      // ORIGINAL (pipe-format) raw lines that need to be stripped from
+      // the block before it goes to the LLM.
+      const excelBlockResult = detectExcelBlockKinds(excelKindsBlock);
       const allRawLinesToStrip = new Set<string>([
         ...precarriageHits.map((h) => h.rawLine.trim()),
         ...subClientResult.rawLines.map((l) => l.trim()),
-        ...precarriageHitsFromExcel.map((h) => h.rawLine.trim()),
-        ...subClientFromExcel.rawLines.map((l) => l.trim()),
+        ...excelBlockResult.rawLinesToStrip,
       ]);
       const stripCapturedLines = (s: string): string => {
         if (!s || allRawLinesToStrip.size === 0) return s;
@@ -1716,11 +1718,11 @@ export default function NewRateFlow({
       const cleanedExcelKindsBlock = stripCapturedLines(excelKindsBlock);
       const allPrecarriageHits = [
         ...precarriageHits,
-        ...precarriageHitsFromExcel,
+        ...excelBlockResult.precarriageHits,
       ];
       const allSubClientNotes = [
         ...subClientResult.noteLines,
-        ...subClientFromExcel.noteLines,
+        ...excelBlockResult.subClientNotes,
       ];
 
       if (excelText) {

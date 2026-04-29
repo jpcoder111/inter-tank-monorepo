@@ -761,6 +761,105 @@ export function detectSubClientSuffixes(text: string): {
   return { noteLines, rawLines };
 }
 
+// Adapts an Excel kinds-block (pipe-separated rows like
+// "FCA Haulage Mendoza to Chile base port | 2170 | 2270") to the existing
+// email-style detectors. The detectors require an "=" or ":" separator in
+// the source line; the Excel pipeline never emits those — values land in
+// distinct cells joined by " | ". This wrapper synthesizes per-column
+// "Label = value" lines, runs the unmodified detectors against them, and
+// rewrites hit.size based on column position so a two-value row produces
+// value20 + value40 on a single kind.
+//
+// Accepts the kindsBlock string built by readExcelAsText (each row joined
+// by " | ", sheets separated by "Hoja: <name>" prefixes). Returns the
+// hits in the same shape used by NewRateFlow's text pipeline so the merge
+// is a drop-in.
+export function detectExcelBlockKinds(block: string): {
+  precarriageHits: PrecarriageHit[];
+  subClientNotes: string[];
+  rawLinesToStrip: Set<string>;
+} {
+  const precarriageHits: PrecarriageHit[] = [];
+  const subClientNotes: string[] = [];
+  const rawLinesToStrip = new Set<string>();
+  if (!block) return { precarriageHits, subClientNotes, rawLinesToStrip };
+
+  const isNumericCell = (s: string): boolean =>
+    /^[-+]?(?:USD|US\$|\$)?\s*[-+]?\s*[\d.,]+$/i.test(s);
+  const stripUsd = (s: string): string =>
+    s.replace(/^(?:USD|US\$|\$)\s*/i, "").trim();
+
+  for (const original of block.split(/\r?\n/)) {
+    const trimmed = original.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("Hoja:")) continue;
+
+    const parts = trimmed.split(/\s*\|\s*/);
+
+    // Single-segment rows: try the raw detectors directly. Covers the rare
+    // case where an email-style "Label = value" line snuck into the right
+    // block (LCL pages, free-text notes columns).
+    if (parts.length < 2) {
+      const directHits = detectPrecarriageInline(trimmed);
+      if (directHits.length > 0) {
+        for (const h of directHits) precarriageHits.push(h);
+        rawLinesToStrip.add(trimmed);
+        continue;
+      }
+      const subHit = extractSubClientSuffix(trimmed);
+      if (subHit) {
+        subClientNotes.push(subHit.noteLine);
+        rawLinesToStrip.add(trimmed);
+      }
+      continue;
+    }
+
+    const label = (parts[0] ?? "").trim();
+    if (!label) continue;
+    const valueCells = parts.slice(1).map((p) => p.trim());
+    // Skip header rows (e.g. "Item | 20 | 40") where no value cell parses
+    // as a number.
+    if (!valueCells.some(isNumericCell)) continue;
+
+    // Sub-client suffix probe FIRST — extractSubClientSuffix only fires
+    // when the base label resolves to a predefined alias AND the parens
+    // hold 2+ client tokens, so non-suffix labels fall through quietly.
+    const valuesJoined = valueCells.filter(Boolean).join("/");
+    const subSyntheticLine = `${label} = ${valuesJoined}`;
+    const subHit = extractSubClientSuffix(subSyntheticLine);
+    if (subHit) {
+      subClientNotes.push(subHit.noteLine);
+      rawLinesToStrip.add(trimmed);
+      continue;
+    }
+
+    // Precarriage probe — one synthetic per numeric cell, with hit.size
+    // overridden from the cell's column index. Excel catalogs in our
+    // corpus consistently lay 20' before 40' in adjacent columns, so
+    // column-0 → 20' and column-1 → 40'.
+    let anyHit = false;
+    for (let i = 0; i < valueCells.length; i++) {
+      const cell = valueCells[i] ?? "";
+      if (!isNumericCell(cell)) continue;
+      const numericPart = stripUsd(cell);
+      const synthetic = `${label} = ${numericPart}`;
+      const hits = detectPrecarriageInline(synthetic);
+      for (const h of hits) {
+        if (i === 0) h.size = 20;
+        else if (i === 1) h.size = 40;
+        // Three+ value columns are vanishingly rare in catalog blocks; if
+        // they appear we leave size as null and let the merge prefer the
+        // first unset slot.
+        precarriageHits.push(h);
+        anyHit = true;
+      }
+    }
+    if (anyHit) rawLinesToStrip.add(trimmed);
+  }
+
+  return { precarriageHits, subClientNotes, rawLinesToStrip };
+}
+
 // Patterns whose presence on a line means "drop from batch.notes". The
 // batch-notes textarea must contain ONLY operationally-billable info
 // (free days, regional add-ons, sub-client values). Comments, narrative,

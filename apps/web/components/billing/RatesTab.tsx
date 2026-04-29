@@ -211,21 +211,35 @@ export default function RatesTab() {
 
   const groups = useMemo<AgentSummary[]>(() => {
     // Key by lowercase-trimmed agent so case variants ("Balguerie" /
-    // "BALGUERIE" / "balguerie") collapse into one card. Display name uses
-    // the casing of the first row encountered for the slot.
-    const map = new Map<string, { display: string; rates: Rate[] }>();
+    // "BALGUERIE" / "balguerie") collapse into one card. The display
+    // casing is the rate-count majority — same heuristic as the v3.3
+    // migration — so the card label stays stable regardless of insertion
+    // order even if the migration hasn't yet run on this browser.
+    const map = new Map<string, Rate[]>();
     for (const r of filtered) {
       const trimmed = r.agent.trim();
       const key = trimmed ? trimmed.toLowerCase() : "(sin agente)";
-      let slot = map.get(key);
-      if (!slot) {
-        slot = { display: trimmed || "(Sin agente)", rates: [] };
-        map.set(key, slot);
-      }
-      slot.rates.push(r);
+      const list = map.get(key) ?? [];
+      list.push(r);
+      map.set(key, list);
     }
-    return Array.from(map.values())
-      .map(({ display, rates }) => summarizeAgent(display, rates))
+    return Array.from(map.entries())
+      .map(([key, rates]) => {
+        const counts = new Map<string, number>();
+        for (const r of rates) {
+          const display = r.agent.trim() || "(Sin agente)";
+          counts.set(display, (counts.get(display) ?? 0) + 1);
+        }
+        let bestDisplay = key;
+        let bestCount = -1;
+        for (const [display, count] of counts) {
+          if (count > bestCount) {
+            bestCount = count;
+            bestDisplay = display;
+          }
+        }
+        return summarizeAgent(bestDisplay, rates);
+      })
       .sort((a, b) => a.agent.localeCompare(b.agent));
   }, [filtered]);
 
@@ -295,11 +309,72 @@ export default function RatesTab() {
     setMode("edit");
   };
 
+  // Mid-quarter adjustment (Fix 8): the operator picks a cutoff date,
+  // every existing rate of the agent is closed at cutoff - 1 day, and
+  // a clone of each is inserted with validFrom = cutoff and the
+  // original validTo preserved. The user then edits the clones via
+  // the existing per-row Editar flow to update SF / BL fee values.
+  const [midQuarterModal, setMidQuarterModal] = useState<{
+    agent: string;
+    rates: Rate[];
+  } | null>(null);
+  const [midQuarterCutoff, setMidQuarterCutoff] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10)
+  );
+
+  const applyMidQuarterAdjustment = () => {
+    if (!midQuarterModal) return;
+    const cutoff = midQuarterCutoff.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoff)) {
+      toast.error("Fecha de corte inválida");
+      return;
+    }
+    const cutoffDate = new Date(cutoff + "T00:00:00");
+    if (Number.isNaN(cutoffDate.getTime())) {
+      toast.error("Fecha de corte inválida");
+      return;
+    }
+    const prev = new Date(cutoffDate);
+    prev.setDate(prev.getDate() - 1);
+    const cutoffMinus1 = prev.toISOString().slice(0, 10);
+    const targetAgentLower = midQuarterModal.agent.trim().toLowerCase();
+    const stamp = Date.now();
+    const clones: Rate[] = midQuarterModal.rates.map((r, i) => ({
+      ...r,
+      id: `rate-${stamp}-${i}-${Math.random().toString(36).slice(2, 8)}`,
+      validFrom: cutoff,
+      // Keep the original validTo so the clone runs from cutoff to the
+      // batch end. Operator can extend or shorten via Editar.
+      validTo: r.validTo,
+    }));
+    setItems((current) => {
+      const closed = current.map((r) =>
+        r.agent.trim().toLowerCase() === targetAgentLower
+          ? { ...r, validTo: cutoffMinus1 }
+          : r
+      );
+      return [...closed, ...clones];
+    });
+    toast.success(
+      `Ajuste mid-quarter creado: ${midQuarterModal.rates.length} cerradas al ${cutoffMinus1}, ${clones.length} clonadas desde ${cutoff}`
+    );
+    setMidQuarterModal(null);
+  };
+
   // Bulk save from NewRateFlow's preview. The component already
-  // pre-generated IDs and applied common defaults (agent, validity, costs),
-  // so all we do here is push.
+  // pre-generated IDs and applied common defaults (agent, validity, costs).
+  // The Fix 7 duplicate flow may stamp existing rate ids onto incoming
+  // rows when the user picks "Replace all" — this loop merges by id so
+  // the existing entry is overwritten instead of duplicated.
   const handleSaveMany = (newRates: Rate[]) => {
-    setItems((prev) => [...prev, ...newRates]);
+    setItems((prev) => {
+      const incoming = new Map<string, Rate>();
+      for (const r of newRates) incoming.set(r.id, r);
+      const replaced = prev.map((r) => incoming.get(r.id) ?? r);
+      const replacedIds = new Set(prev.map((r) => r.id));
+      const fresh = newRates.filter((r) => !replacedIds.has(r.id));
+      return [...replaced, ...fresh];
+    });
     toast.success(
       `${newRates.length} tarifa${newRates.length === 1 ? "" : "s"} guardada${newRates.length === 1 ? "" : "s"}`
     );
@@ -417,7 +492,11 @@ export default function RatesTab() {
         />
       )}
 
-      {groups.length === 0 ? (
+      {/* Hide the agent-grouped catalog while the create/edit flow is open
+          so the operator focuses on the new-rate form. The vertical stack
+          of agent cards below the flow read as a "side panel" of agents
+          and was the source of the persistent sidebar bug report. */}
+      {mode === "list" && (groups.length === 0 ? (
         <div className="bg-white rounded-lg shadow text-center py-8 text-gray-500">
           No hay tarifas
         </div>
@@ -533,6 +612,17 @@ export default function RatesTab() {
                       </span>
                     )}
                   </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMidQuarterModal({ agent: g.agent, rates: g.rates });
+                  }}
+                  className="px-2 py-1 mr-2 text-xs rounded border border-gray-300 bg-white hover:bg-gray-100 cursor-pointer self-center"
+                  title="Cerrá las tarifas actuales en una fecha y cloná las nuevas para editarlas"
+                >
+                  ⏱️ Ajuste mid-Q
                 </button>
                 </div>
 
@@ -665,7 +755,81 @@ export default function RatesTab() {
             );
           })}
         </div>
-      )}
+      ))}
+      {midQuarterModal && (() => {
+        const cutoff = midQuarterCutoff;
+        const validCutoff = /^\d{4}-\d{2}-\d{2}$/.test(cutoff);
+        const previewMinus1 = (() => {
+          if (!validCutoff) return "";
+          const d = new Date(cutoff + "T00:00:00");
+          if (Number.isNaN(d.getTime())) return "";
+          d.setDate(d.getDate() - 1);
+          return d.toISOString().slice(0, 10);
+        })();
+        const sample = midQuarterModal.rates[0];
+        const sampleValidTo = sample?.validTo ?? "";
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+            onClick={() => setMidQuarterModal(null)}
+          >
+            <div
+              className="bg-white rounded-lg shadow-lg max-w-lg w-full mx-4 p-5 flex flex-col gap-3"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h4 className="font-semibold text-base">
+                Ajuste mid-quarter — {midQuarterModal.agent}
+              </h4>
+              <p className="text-sm text-gray-700">
+                Cerrá las {midQuarterModal.rates.length} tarifa
+                {midQuarterModal.rates.length === 1 ? "" : "s"} actuales en
+                una fecha y cloná versiones nuevas desde esa fecha para
+                editar SF / BL Fee.
+              </p>
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="font-medium">Fecha de corte</span>
+                <input
+                  type="date"
+                  value={midQuarterCutoff}
+                  onChange={(e) => setMidQuarterCutoff(e.target.value)}
+                  className="border border-gray-200 rounded-md p-2 h-10"
+                />
+              </label>
+              {validCutoff && previewMinus1 && (
+                <div className="text-xs bg-gray-50 border border-gray-200 rounded-md p-3 flex flex-col gap-1">
+                  <div>
+                    Las {midQuarterModal.rates.length} tarifas actuales se
+                    cerrarán al{" "}
+                    <strong>{formatDateCl(previewMinus1)}</strong>.
+                  </div>
+                  <div>
+                    Se clonarán {midQuarterModal.rates.length} tarifas con{" "}
+                    <strong>validFrom {formatDateCl(cutoff)}</strong>
+                    {sampleValidTo
+                      ? ` y validTo ${formatDateCl(sampleValidTo)}`
+                      : ""}
+                    . Editá SF / BL Fee desde la lista del agente.
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setMidQuarterModal(null)}
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  onClick={applyMidQuarterAdjustment}
+                  disabled={!validCutoff}
+                >
+                  Crear ajuste
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

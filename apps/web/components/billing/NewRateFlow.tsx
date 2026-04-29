@@ -19,6 +19,7 @@ import {
   Rate,
   carrierColor,
   computePendingAgentsByRange,
+  resolvePodCanonical,
   consolidatePreferentialNotes,
   detectAgencyFee,
   detectAgencyFeeMax,
@@ -1158,13 +1159,26 @@ function cleanIndividualNotes(
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
+  // Standalone Incoterm token, optionally with a city suffix
+  // ("FOB San Antonio" / "FCA Mendoza"). Always pure metadata.
   const incotermStandaloneRe =
     /^(FOB|CIF|CFR|FCA|EXW)(?:\s+[A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]*)?$/i;
+  // Single container-type token by itself ("Reefer", "Dry", "Flexi",
+  // "Containers"). The LLM occasionally emits these into notes when the
+  // source spreadsheet has a Type column header echoed in the comments
+  // column. They carry no information beyond what the structured `tipo`
+  // field already conveys.
+  const bareTypeTokenRe = /^(Reefer|Dry|Flexi|Container[s]?)$/i;
   const filtered = lines.filter((line) => {
     if (incNorm && line.toUpperCase() === incNorm) return false;
     if (polNorm && line.toLowerCase() === polNorm) return false;
     if (incotermStandaloneRe.test(line)) return false;
-    if (line.length < 5) return false;
+    if (bareTypeTokenRe.test(line)) return false;
+    // Bumped from 5 → 10 chars: 5 was too permissive (kept tokens like
+    // "FCA AR" or "20'Dry" that survived the other filters). 10 still
+    // lets through legitimate operational notes ("inland inc", "flex
+    // 24klt") while dropping the noisy short fragments.
+    if (line.length < 10) return false;
     return true;
   });
   return filtered.join("\n").trim();
@@ -1449,6 +1463,20 @@ export default function NewRateFlow({
     () => uniqueSuggestions(existingRates.map((r) => r.agent), AGENT_SUGGESTIONS),
     [existingRates]
   );
+
+  // POD catalog derived from every saved rate. Surfaces in the inline-edit
+  // datalist (Fix 9) so typing a partial port name autocompletes against
+  // existing entries — and at commit time we run resolvePodCanonical to
+  // collapse casing variants before they reach storage.
+  const podSuggestions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of existingRates) {
+      const v = (r.pod ?? "").trim();
+      if (v) set.add(v);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [existingRates]);
+  const knownPods = podSuggestions;
 
   // Smart agent detection — runs on every keystroke.
   const agentMatch = useMemo(
@@ -2117,6 +2145,12 @@ export default function NewRateFlow({
         .filter(Boolean)
         .join("\n");
       const regionalAddons = detectRegionalAddons(fullText);
+      if (regionalAddons.length > 0 && typeof console !== "undefined") {
+        console.log(
+          `[rate-extract] regional add-ons captured (${regionalAddons.length}):`,
+          regionalAddons
+        );
+      }
       // Free-day mentions are billing-relevant operational notes (not
       // surcharges). Capture them via a small regex sweep over the
       // unfiltered source so they survive the blacklist filter applied
@@ -2194,6 +2228,25 @@ export default function NewRateFlow({
       const podExpanded = expandMultiPod(equipmentExpanded);
       // Multi-carrier rows clone into one row per carrier.
       const expanded = expandMultiCarrier(podExpanded);
+      // Telemetry — surface the deltas at each expansion stage so smoke
+      // tests can confirm IWS-style multi-POD / equipment-combo / multi-
+      // carrier handling without inspecting individual rows.
+      if (typeof console !== "undefined") {
+        const eqDelta = equipmentExpanded.length - extracted.rates.length;
+        const podDelta = podExpanded.length - equipmentExpanded.length;
+        const carrierDelta = expanded.length - podExpanded.length;
+        if (eqDelta || podDelta || carrierDelta) {
+          console.log("[rate-extract] expansion deltas", {
+            initial: extracted.rates.length,
+            afterEquipment: equipmentExpanded.length,
+            afterPod: podExpanded.length,
+            afterCarrier: expanded.length,
+            equipmentSplits: eqDelta,
+            podSplits: podDelta,
+            carrierSplits: carrierDelta,
+          });
+        }
+      }
       // POD inheritance for FCA / EXW Argentine rates: when the batch
       // has a single unique POD across the maritime (non-FCA) rows, an
       // FCA row without an explicit POD inherits it (Valle Redondo
@@ -2794,6 +2847,15 @@ export default function NewRateFlow({
     setStep("preview");
   };
 
+  // Pending duplicate-confirmation modal state. When the user clicks
+  // Guardar and any of the to-save rates would step on an existing rate
+  // with overlapping validity (Fix 7), we surface a modal that lets them
+  // replace, skip, or cancel before any storage write happens.
+  const [duplicateModal, setDuplicateModal] = useState<{
+    rates: Rate[];
+    overlaps: Array<{ newRate: Rate; existing: Rate }>;
+  } | null>(null);
+
   const saveSelected = () => {
     if (!effectiveValidity) return;
     if (isEditMode && editingRate && onSaveEdit) {
@@ -2849,7 +2911,76 @@ export default function NewRateFlow({
         batchKindValues
       )
     );
+    // Fix 7: detect overlaps with existing rates BEFORE writing. Two
+    // rates conflict when (agent, carrier, pol, pod, tipo) match case-
+    // insensitively AND their [validFrom, validTo] ranges intersect.
+    // Empty validFrom / validTo on the existing side is treated as
+    // unbounded for that endpoint so we don't accidentally let a
+    // legacy rate slip through.
+    const overlaps: Array<{ newRate: Rate; existing: Rate }> = [];
+    for (const newRate of rates) {
+      const match = existingRates.find(
+        (er) =>
+          er.id !== newRate.id &&
+          er.agent.trim().toLowerCase() ===
+            newRate.agent.trim().toLowerCase() &&
+          er.carrier.trim().toLowerCase() ===
+            newRate.carrier.trim().toLowerCase() &&
+          (er.pol ?? "").trim().toLowerCase() ===
+            (newRate.pol ?? "").trim().toLowerCase() &&
+          (er.pod ?? "").trim().toLowerCase() ===
+            (newRate.pod ?? "").trim().toLowerCase() &&
+          er.tipo === newRate.tipo &&
+          (() => {
+            const aFrom = (er.validFrom ?? "").trim() || "0000-01-01";
+            const aTo = (er.validTo ?? "").trim() || "9999-12-31";
+            const bFrom = newRate.validFrom || "0000-01-01";
+            const bTo = newRate.validTo || "9999-12-31";
+            return aFrom <= bTo && aTo >= bFrom;
+          })()
+      );
+      if (match) overlaps.push({ newRate, existing: match });
+    }
+    if (overlaps.length > 0) {
+      setDuplicateModal({ rates, overlaps });
+      return;
+    }
     onSaveMany(rates);
+  };
+
+  // Resolves the duplicate modal with one of three actions:
+  //   "replace"     → save the entire batch; downstream handler removes
+  //                   conflicting existing rates by id before insert
+  //   "skip"        → save only the rates that don't overlap
+  //   "cancel"      → close the modal, no writes
+  const resolveDuplicates = (action: "replace" | "skip") => {
+    const modal = duplicateModal;
+    if (!modal) return;
+    setDuplicateModal(null);
+    if (action === "replace") {
+      // Stamp each conflicting NEW rate with the existing rate's id so
+      // the catalog updates in-place (the local store treats matching
+      // id as upsert). Non-conflicting rates keep their fresh ids.
+      const replaceMap = new Map<string, string>();
+      for (const { newRate, existing } of modal.overlaps) {
+        replaceMap.set(newRate.id, existing.id);
+      }
+      const stamped = modal.rates.map((r) => {
+        const reuseId = replaceMap.get(r.id);
+        return reuseId ? { ...r, id: reuseId } : r;
+      });
+      onSaveMany(stamped);
+    } else {
+      const overlapIds = new Set(modal.overlaps.map((o) => o.newRate.id));
+      const survivors = modal.rates.filter((r) => !overlapIds.has(r.id));
+      if (survivors.length === 0) {
+        setError(
+          "Todas las tarifas seleccionadas se solapan con tarifas existentes. Nada para guardar."
+        );
+        return;
+      }
+      onSaveMany(survivors);
+    }
   };
 
   // ---- Step 2: row update + selection ----
@@ -2947,14 +3078,22 @@ export default function NewRateFlow({
     if (carriers.length <= 1) {
       // Single (or empty) carrier — recompute in-place and close. Empty
       // carrier still goes through recompute so the carrier_missing
-      // block stays active until the user fills the field.
+      // block stays active until the user fills the field. The POD
+      // value also gets canonicalised here so a typed casing variant
+      // ("hong kong" / "HONG KONG") folds into the existing catalog
+      // entry (Fix 9).
       setPreviewRows((prev) => {
         const next = prev.slice();
         const single = carriers[0] ?? "";
+        const rawPod = String(next[idx]?.pod ?? "");
+        const canonicalPod = rawPod
+          ? resolvePodCanonical(rawPod, knownPods)
+          : "";
         const updated = {
           ...next[idx],
           carrier: single,
           sl: String(next[idx]?.sl ?? "").trim() || single,
+          pod: canonicalPod,
         };
         next[idx] = recomputeRowFlags(
           updated,
@@ -3472,28 +3611,118 @@ export default function NewRateFlow({
 
   // step === "preview"
   return (
-    <PreviewStep
-      isEditMode={isEditMode}
-      agent={effectiveAgent}
-      validity={effectiveValidity}
-      kinds={batchKinds}
-      kindValues={batchKindValues}
-      batchNotas={batchNotas}
-      rows={previewRows}
-      selected={previewSelected}
-      editingIdx={editingIdx}
-      stats={stats}
-      onToggle={togglePreview}
-      onToggleAll={toggleAllPreview}
-      onSetEditingIdx={setEditingIdx}
-      onUpdateField={updatePreviewField}
-      onCommitEdit={commitAndCloseEdit}
-      onDelete={deletePreviewRow}
-      onBack={isEditMode ? onCancel : () => setStep("input")}
-      onSave={saveSelected}
-      onCancel={onCancel}
-      error={error}
-    />
+    <>
+      <PreviewStep
+        isEditMode={isEditMode}
+        agent={effectiveAgent}
+        validity={effectiveValidity}
+        kinds={batchKinds}
+        kindValues={batchKindValues}
+        batchNotas={batchNotas}
+        rows={previewRows}
+        selected={previewSelected}
+        editingIdx={editingIdx}
+        stats={stats}
+        podSuggestions={podSuggestions}
+        onToggle={togglePreview}
+        onToggleAll={toggleAllPreview}
+        onSetEditingIdx={setEditingIdx}
+        onUpdateField={updatePreviewField}
+        onCommitEdit={commitAndCloseEdit}
+        onDelete={deletePreviewRow}
+        onBack={isEditMode ? onCancel : () => setStep("input")}
+        onSave={saveSelected}
+        onCancel={onCancel}
+        error={error}
+      />
+      {duplicateModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => setDuplicateModal(null)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-lg max-w-2xl w-full mx-4 p-5 flex flex-col gap-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h4 className="font-semibold text-base">
+              {duplicateModal.overlaps.length} de{" "}
+              {duplicateModal.rates.length} tarifa
+              {duplicateModal.rates.length === 1 ? "" : "s"} se solapa
+              {duplicateModal.overlaps.length === 1 ? "" : "n"} con tarifas
+              existentes
+            </h4>
+            <p className="text-sm text-gray-700">
+              Detectamos coincidencias por (agente, carrier, POL, POD,
+              tipo) cuya validez se superpone con el rango del batch.
+              Decidí qué hacer antes de guardar.
+            </p>
+            <div className="border border-gray-200 rounded-md max-h-64 overflow-y-auto text-xs">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50 sticky top-0">
+                  <tr>
+                    {[
+                      "Carrier",
+                      "Ruta",
+                      "Tipo",
+                      "SF nuevo / existente",
+                      "Vigencia existente",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="px-2 py-1.5 text-left font-medium text-gray-500 uppercase tracking-wider"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {duplicateModal.overlaps.map(({ newRate, existing }) => (
+                    <tr key={newRate.id} className="text-xs">
+                      <td className="px-2 py-1 whitespace-nowrap">
+                        {existing.carrier}
+                      </td>
+                      <td className="px-2 py-1 whitespace-nowrap">
+                        {formatRoute(
+                          existing.pol ?? "",
+                          existing.pod ?? "",
+                          existing.route
+                        )}
+                      </td>
+                      <td className="px-2 py-1 whitespace-nowrap">
+                        {existing.tipo}
+                      </td>
+                      <td className="px-2 py-1 whitespace-nowrap">
+                        ${newRate.sf} / ${existing.sf}
+                      </td>
+                      <td className="px-2 py-1 whitespace-nowrap text-gray-500">
+                        {formatDateCl(existing.validFrom)} —{" "}
+                        {formatDateCl(existing.validTo)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2 flex-wrap">
+              <Button
+                variant="outline"
+                onClick={() => setDuplicateModal(null)}
+              >
+                Cancelar
+              </Button>
+              <Button variant="outline" onClick={() => resolveDuplicates("skip")}>
+                Solo nuevas ({duplicateModal.rates.length -
+                  duplicateModal.overlaps.length})
+              </Button>
+              <Button onClick={() => resolveDuplicates("replace")}>
+                Reemplazar todas ({duplicateModal.rates.length})
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -4179,6 +4408,7 @@ function PreviewStep({
   selected,
   editingIdx,
   stats,
+  podSuggestions,
   onToggle,
   onToggleAll,
   onSetEditingIdx,
@@ -4200,6 +4430,7 @@ function PreviewStep({
   selected: Set<number>;
   editingIdx: number | null;
   stats: { total: number; ok: number; needsReview: number };
+  podSuggestions: string[];
   onToggle: (idx: number) => void;
   onToggleAll: () => void;
   onSetEditingIdx: (idx: number | null) => void;
@@ -4636,6 +4867,7 @@ function PreviewStep({
                             field="pod"
                             onChange={onUpdateField}
                             idx={idx}
+                            list="new-rate-pod-sugg"
                           />
                           <RowField
                             label="Tipo"
@@ -4720,6 +4952,11 @@ function PreviewStep({
       <datalist id="new-rate-tipo-sugg">
         {CONTAINER_TYPES.map((t) => (
           <option key={t} value={t} />
+        ))}
+      </datalist>
+      <datalist id="new-rate-pod-sugg">
+        {podSuggestions.map((p) => (
+          <option key={p} value={p} />
         ))}
       </datalist>
 

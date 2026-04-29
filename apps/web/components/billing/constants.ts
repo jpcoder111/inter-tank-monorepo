@@ -491,25 +491,35 @@ export const INCOTERM_OPTIONS: readonly Incoterm[] = [
   "CFR",
 ] as const;
 
-// Argentine cities that appear as POL on FCA / EXW Inter-Tank rates.
-// Inter-Tank's Mendoza-region trucking covers these. When a rate's POL
-// matches one of these (case-insensitive substring), the Incoterm
-// inference falls to "FCA" by default. Extend manually as new pickup
-// points appear in the field — match is intentionally case-insensitive
-// substring, so prefixed strings like "FCA Mendoza" or "EXW Santa Rita"
-// also match.
-export const ARG_POL_CITIES: readonly string[] = [
-  "mendoza",
-  "san carlos",
-  "tupungato",
-  "rivadavia",
-  "san juan",
-  "san martin",
-  "san martín",
-  "santa rita",
-  "rio negro",
-  "río negro",
+// Argentine cities Inter-Tank serves as POL (FCA / EXW pickup points)
+// AND/OR as precarriage origin charges ("Inland FCA Mendoza", "FCA
+// Haulage San Martín to Chile"). Single source of truth; the legacy
+// ARG_POL_CITIES / ARG_PRECARRIAGE_CITIES exports below are derived
+// arrays so existing callers keep working unchanged. Match on consumer
+// side is case-insensitive substring, so prefixed forms like "FCA
+// Mendoza" and "EXW Santa Rita" still hit. Extend by appending an
+// entry; toggle the flags when a city's role changes (e.g. a new
+// precarriage destination that's not also a POL).
+export const ARG_CITIES: ReadonlyArray<{
+  name: string;
+  isPol: boolean;
+  isPrecarriage: boolean;
+}> = [
+  { name: "mendoza", isPol: true, isPrecarriage: true },
+  { name: "san carlos", isPol: true, isPrecarriage: true },
+  { name: "tupungato", isPol: true, isPrecarriage: true },
+  { name: "rivadavia", isPol: true, isPrecarriage: true },
+  { name: "san juan", isPol: true, isPrecarriage: true },
+  { name: "san martin", isPol: true, isPrecarriage: true },
+  { name: "san martín", isPol: true, isPrecarriage: true },
+  { name: "santa rita", isPol: true, isPrecarriage: true },
+  { name: "rio negro", isPol: true, isPrecarriage: true },
+  { name: "río negro", isPol: true, isPrecarriage: true },
 ] as const;
+
+export const ARG_POL_CITIES: readonly string[] = ARG_CITIES.filter(
+  (c) => c.isPol
+).map((c) => c.name);
 
 // True when a POL string contains any Argentine pickup city. Used by
 // the Incoterm inference + the FCA-pod-inheritance pipeline.
@@ -519,25 +529,9 @@ export function isArgPol(pol: string): boolean {
   return ARG_POL_CITIES.some((city) => norm.includes(city));
 }
 
-// Argentine cities that appear as the origin of inland precarriage charges
-// ("Inland FCA Mendoza", "FCA Haulage San Martín to Chile"). Used by the
-// detectPrecarriageInline sweep to decide whether a captured city becomes
-// a predefined kind id (precarriage_mendoza when the city is Mendoza) or
-// a custom precarriage_<slug>. Same set as ARG_POL_CITIES at present, kept
-// separate so they can diverge later if precarriage geography expands
-// past the FCA pickup catalog.
-export const ARG_PRECARRIAGE_CITIES: readonly string[] = [
-  "mendoza",
-  "santa rita",
-  "rivadavia",
-  "san carlos",
-  "san juan",
-  "tupungato",
-  "san martín",
-  "san martin",
-  "río negro",
-  "rio negro",
-] as const;
+export const ARG_PRECARRIAGE_CITIES: readonly string[] = ARG_CITIES.filter(
+  (c) => c.isPrecarriage
+).map((c) => c.name);
 
 // Strips diacritics + lowercases for case- / accent-insensitive matching.
 // The character class covers Unicode combining marks U+0300-U+036F so
@@ -3417,6 +3411,51 @@ export function uniqueSuggestions(
     if (v) set.add(v);
   }
   return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+// Normalises a free-typed POD value to a canonical casing. Rules:
+//   - empty / whitespace → ""
+//   - ≤ 3 chars → upper case ("nyc" → "NYC")
+//   - otherwise → Title Case word-by-word ("hong kong" → "Hong Kong",
+//     "san antonio" → "San Antonio"). Hyphenated parts also title-case
+//     ("hong-kong" → "Hong-Kong").
+// Used both at edit time (to surface the normalised value to the user)
+// and at save time (so the catalog never grows by casing variants).
+export function normalizePodCasing(raw: string): string {
+  const trimmed = (raw ?? "").trim().replace(/\s+/g, " ");
+  if (!trimmed) return "";
+  if (trimmed.length <= 3) return trimmed.toUpperCase();
+  return trimmed
+    .split(" ")
+    .map((word) =>
+      word
+        .split("-")
+        .map((part) =>
+          part.length === 0
+            ? part
+            : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+        )
+        .join("-")
+    )
+    .join(" ");
+}
+
+// Resolves a free-typed POD against an existing catalog (case-
+// insensitive). When a casing variant is found, the canonical existing
+// spelling wins so the catalog doesn't accumulate "Hong Kong" / "HONG
+// KONG" / "hong kong" siblings. Returns a normalised version of the
+// input when no catalog match exists.
+export function resolvePodCanonical(
+  raw: string,
+  knownPods: ReadonlyArray<string>
+): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return "";
+  const normLower = trimmed.toLowerCase().replace(/\s+/g, " ");
+  for (const known of knownPods) {
+    if (known.trim().toLowerCase() === normLower) return known.trim();
+  }
+  return normalizePodCasing(trimmed);
 }
 
 // ===== Local charges (Gastos Locales) =====

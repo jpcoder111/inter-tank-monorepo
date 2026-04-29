@@ -243,6 +243,15 @@ export const RATE_MIGRATION_FLAG = "rate_schema_v3_migrated";
 // Idempotent: runs once per browser, controlled by the flag.
 export const RATE_MIGRATION_FLAG_V32 = "rate_schema_v3_2_incoterm_migrated";
 export const RATES_STORAGE_KEY_V32_BACKUP = "it_rates_v3_backup_pre_v32";
+// v3.3 — collapses agent-name casing variants ("Bullet" + "BULLET" + "bullet")
+// to a single canonical spelling per group. The canonical pick is the casing
+// with the most rates; ties break on the most recent validTo. Idempotent:
+// once the flag is set the migration is a no-op even if a future export
+// re-introduces a casing variant (those get resolved via case-insensitive
+// agent matching at read time).
+export const RATE_MIGRATION_FLAG_V33 =
+  "rate_schema_v3_3_agent_casing_migrated";
+export const RATES_STORAGE_KEY_V33_BACKUP = "it_rates_v3_backup_pre_v33";
 export const EBS_STORAGE_KEY = "it_ebs_v4";
 export const LOCAL_STD_STORAGE_KEY = "it_local_std";
 export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions_v2";
@@ -2535,6 +2544,99 @@ function ensureRateMigrationV32(): void {
 
 if (typeof window !== "undefined") {
   ensureRateMigrationV32();
+}
+
+// Picks a canonical casing for a group of rates whose agent names differ
+// only in upper/lower case. Rule: the casing carried by the most rates
+// wins; ties break on the most recent validTo. When all entries share the
+// same case, returns that case unchanged.
+function pickCanonicalAgentCasing(rates: Rate[]): string {
+  if (rates.length === 0) return "";
+  const buckets = new Map<string, { count: number; latestTo: string }>();
+  for (const r of rates) {
+    const display = r.agent.trim();
+    if (!display) continue;
+    const slot = buckets.get(display);
+    const validTo = (r.validTo ?? "").trim();
+    if (slot) {
+      slot.count += 1;
+      if (validTo > slot.latestTo) slot.latestTo = validTo;
+    } else {
+      buckets.set(display, { count: 1, latestTo: validTo });
+    }
+  }
+  let best: { display: string; count: number; latestTo: string } | null = null;
+  for (const [display, slot] of buckets) {
+    if (
+      !best ||
+      slot.count > best.count ||
+      (slot.count === best.count && slot.latestTo > best.latestTo)
+    ) {
+      best = { display, count: slot.count, latestTo: slot.latestTo };
+    }
+  }
+  return best?.display ?? rates[0]!.agent.trim();
+}
+
+// v3.3 migration — collapses agent-name casing variants to a single
+// canonical spelling per group. "Bullet" + "BULLET" + "bullet" all rewrite
+// to whichever casing carries the most rates. Idempotent: backed by
+// RATE_MIGRATION_FLAG_V33 so it runs once per browser; the in-memory
+// canonicalisation in canonicalizeAgentName / computePendingAgents covers
+// any new casing variants that arrive after migration without re-running
+// it.
+let _migrationV33Done = false;
+function ensureRateMigrationV33(): void {
+  if (_migrationV33Done) return;
+  if (typeof window === "undefined") return;
+  try {
+    if (window.localStorage.getItem(RATE_MIGRATION_FLAG_V33) === "true") {
+      _migrationV33Done = true;
+      return;
+    }
+    const v3raw = window.localStorage.getItem(RATES_STORAGE_KEY);
+    if (v3raw) {
+      window.localStorage.setItem(RATES_STORAGE_KEY_V33_BACKUP, v3raw);
+      try {
+        const parsed = JSON.parse(v3raw) as Rate[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const groups = new Map<string, Rate[]>();
+          for (const r of parsed) {
+            const key = r.agent.trim().toLowerCase();
+            if (!key) continue;
+            const list = groups.get(key) ?? [];
+            list.push(r);
+            groups.set(key, list);
+          }
+          const canonicalByKey = new Map<string, string>();
+          for (const [key, group] of groups) {
+            canonicalByKey.set(key, pickCanonicalAgentCasing(group));
+          }
+          const migrated = parsed.map((r) => {
+            const key = r.agent.trim().toLowerCase();
+            const canonical = canonicalByKey.get(key);
+            if (!canonical || canonical === r.agent.trim()) return r;
+            return { ...r, agent: canonical };
+          });
+          window.localStorage.setItem(
+            RATES_STORAGE_KEY,
+            JSON.stringify(migrated)
+          );
+        }
+      } catch {
+        // bad parse — backup stays, flag still gets set so we don't loop
+      }
+    }
+    window.localStorage.setItem(RATE_MIGRATION_FLAG_V33, "true");
+  } catch {
+    // localStorage disabled / quota — skip silently
+  } finally {
+    _migrationV33Done = true;
+  }
+}
+
+if (typeof window !== "undefined") {
+  ensureRateMigrationV33();
 }
 
 // Inherit POD on FCA / EXW rate rows from the batch's unique maritime

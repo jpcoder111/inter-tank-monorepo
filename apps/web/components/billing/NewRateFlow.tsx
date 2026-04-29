@@ -2671,15 +2671,30 @@ export default function NewRateFlow({
     const typed = effectiveAgent.trim();
     if (typed) {
       const resolution = resolveAgentCanonical(typed, knownAgentNames);
-      // Skip the modal when the resolver returns nothing (genuinely new
-      // agent) OR when it resolved exactly to what the user typed (no
-      // ambiguity to flag).
-      if (resolution && resolution.canonical.toLowerCase() !== typed.toLowerCase()) {
-        const canonicalRateCount = existingRates.filter(
-          (r) => r.agent.trim().toLowerCase() === resolution.canonical.toLowerCase()
-        ).length;
-        setAgentSuggestion({ typed, resolution, canonicalRateCount });
-        return;
+      if (resolution) {
+        const sameLetters =
+          resolution.canonical.toLowerCase() === typed.toLowerCase();
+        if (sameLetters && resolution.canonical !== typed) {
+          // Pure casing variant ("bullet" while catalog has "Bullet").
+          // Silently rewrite to the existing spelling — no modal — so we
+          // don't accumulate Bullet/BULLET/bullet siblings in storage.
+          // The v3.3 migration handles the historic data; this prevents
+          // re-introduction.
+          setAgent(resolution.canonical);
+          setStep("preview");
+          return;
+        }
+        if (!sameLetters) {
+          // Alias (WR→WENRAN) or Levenshtein typo — show the
+          // confirmation modal so the user can either fold or split.
+          const canonicalRateCount = existingRates.filter(
+            (r) =>
+              r.agent.trim().toLowerCase() ===
+              resolution.canonical.toLowerCase()
+          ).length;
+          setAgentSuggestion({ typed, resolution, canonicalRateCount });
+          return;
+        }
       }
     }
     setStep("preview");

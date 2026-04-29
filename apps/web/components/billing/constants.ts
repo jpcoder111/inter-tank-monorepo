@@ -399,6 +399,12 @@ export const KIND_ALIASES: Record<string, ReadonlyArray<string | RegExp>> = {
     /^thermal\s*liner$/i,
     /^thermo\s*liner$/i,
     /^thermoliner$/i,
+    // IWS V5 General sheet emits "Insulado" (no Chile suffix) for the
+    // Chilean entry — Chile is the default origin so the spreadsheet
+    // omits it explicitly, while the ARG row spells "Insulado
+    // Argentina" so the exception is unambiguous. Anchored regex so we
+    // do NOT collide with "Insulado Argentina" / "Insulado Mendoza".
+    /^insulado$/i,
   ],
   insulado_arg: [
     "thermal liner s&f mendoza",

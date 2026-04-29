@@ -2425,6 +2425,12 @@ export default function NewRateFlow({
           // commit. Multi-carrier expansion in commitAndCloseEdit
           // generates fresh ids for clones.
           _id: previewId,
+          // Raw Comments-column content from the LLM, BEFORE
+          // cleanIndividualNotes stripped excluded-kind phrases /
+          // incoterm tokens. Held only for the immediate post-build
+          // affected_rate_ids scan and deleted right after — never
+          // reaches Step 2 render or buildRateFromRow.
+          _rawComments: rawNotesField,
           carrier,
           pol,
           pod,
@@ -2446,26 +2452,21 @@ export default function NewRateFlow({
         };
       });
 
-      // Fix 1 second pass: walk every preview row's notes scanning for
-      // excluded-kind phrases. Rates whose notes carry "Doesn't included
-      // Disposal USD 190" tag the matching kind's affected_rate_ids
-      // (only kinds that originated from the Excel sweep — paste / docx
-      // hits stay global). Strip the matched phrase from the row's
-      // notes so the user-visible Notas column doesn't repeat it.
+      // Fix 1 second pass: walk every preview row's RAW comments string
+      // scanning for excluded-kind phrases. cleanIndividualNotes already
+      // ran on row.notes during the build map and removed the phrase, so
+      // we have to scan _rawComments (the pre-clean original text) to
+      // attribute the kind to the right rates. Only kinds that
+      // originated from the Excel sweep get per-row tagging — paste /
+      // docx hits stay global. _rawComments is dropped from every row
+      // after the scan so it never reaches the UI or localStorage.
       if (excelExcludedKindIds.size > 0) {
         const affectedByKindId = new Map<string, Set<string>>();
         for (const row of rows) {
-          const rowNotes = String(row.notes ?? "");
-          if (!rowNotes) continue;
-          const detect = detectExcludedKindsFromText(rowNotes);
+          const raw = String(row._rawComments ?? "");
+          if (!raw) continue;
+          const detect = detectExcludedKindsFromText(raw);
           if (detect.hits.length === 0) continue;
-          // Re-clean the now-sanitized notes against the row's incoterm /
-          // pol so any incoterm token that landed alongside the phrase
-          // also gets dropped.
-          row.notes = cleanIndividualNotes(detect.sanitizedText, {
-            incoterm: String(row.incoterm ?? ""),
-            pol: String(row.pol ?? ""),
-          });
           for (const hit of detect.hits) {
             if (!excelExcludedKindIds.has(hit.kindId)) continue;
             let set = affectedByKindId.get(hit.kindId);
@@ -2485,6 +2486,9 @@ export default function NewRateFlow({
             })
           );
         }
+      }
+      for (const row of rows) {
+        delete row._rawComments;
       }
 
       // Drop phantom rate rows (kind-leaks) from the preview entirely.

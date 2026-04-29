@@ -23,10 +23,13 @@ import {
   detectBundleInclusions,
   detectDisposal,
   detectDiscountInsulated,
+  detectPrecarriageInline,
   detectRegionalAddons,
+  detectSubClientSuffixes,
   detectThermalLinerUnsized,
   extractPreferentialClientsFromLabel,
   extractSizeFromKindLabel,
+  filterBatchNotesText,
   findSimilarAgent,
   formatBatchVigencia,
   formatDateCl,
@@ -49,6 +52,7 @@ import {
   RateRangeFlag,
   slugifyKindLabel,
   uniqueSuggestions,
+  validateKindsValueUniqueness,
   validateRateRange,
 } from "./constants";
 
@@ -99,14 +103,33 @@ TWO rate rows — one per size — sharing pol/pod/sl/carrier/kinds. If size is
 genuinely ambiguous, default to "20'Dry" and append to \`notas\`:
 "Tamaño no especificado, asumido 20'."
 
-RATE-ROW GATE (apply this first, before any other rule): A line in the source is a rate row ONLY if it contains the word "Rate", "Rates", "Tarifa", or "Tarifas" (case-insensitive, anywhere in or near the line). Lines without one of those words are NEVER rate rows — they go to the relevant rate's kinds[] (per rule 2) or are ignored entirely. Examples:
-   - "Rate 20 OOCL = USD 580 + USD 40xbl + EBS"   → rate row.
-   - "Rate 40 RF Hapag = USD 4500"                 → rate row.
-   - "Tarifa 20 FOB Manzanillo Flexi = USD 890"    → rate row.
-   - "Flexitank Chile = USD 600"                   → kind (flexitank_chile). NOT a rate.
-   - "Inland FCA Mendoza 20 = USD 2250"            → kind (precarriage_mendoza). NOT a rate.
-   - "Thermal Liner = USD 350"                     → kind (insulado_*). NOT a rate.
-   - "Agentfee Chile = USD 75"                     → kind (agency_fee). NOT a rate.
+RATE-ROW GATE (apply this first, before any other rule): A line is a rate row IF AND ONLY IF BOTH conditions hold:
+   (a) After trimming leading whitespace, the line STARTS with one of these triggers (case-insensitive):
+       Rate words: "Rate" / "Rates" / "Tarifa" / "Tarifas".
+       Incoterms:  "FOB" / "CIF" / "CFR" / "FCA" / "EXW".
+   (b) The line contains "=" or ":" with a USD/$/numeric value AFTER the separator.
+   Lines that do NOT start with one of those triggers are NEVER rate rows even when they contain the word "rate" mid-sentence. They go to kinds[] (per rule 2) or are ignored entirely.
+   Examples — RATE rows (matched by START prefix):
+     - "Rate 20 OOCL = USD 580 + USD 40xbl + EBS"        → rate row (starts "Rate").
+     - "Rate 40 RF Hapag = USD 4500"                      → rate row.
+     - "Tarifa 20 FOB Manzanillo Flexi = USD 890"         → rate row.
+     - "FOB San Antonio - Grangemouth 20' Hapag: US$1600" → rate row (starts "FOB").
+     - "FCA Santa Rita - Rotterdam port: US$ 2905"        → rate row.
+     - "EXW Bodega Sophenia = USD 4500"                   → rate row.
+     - "CIF Antwerp = USD 1850"                           → rate row.
+   Examples — NOT rate rows (start with non-trigger):
+     - "Inland rate for 40 FCA Mendoza ... = USD 2270"    → starts "Inland", NOT a rate. (precarriage kind, handled client-side.)
+     - "Inland FCA Mendoza 20 = USD 2250"                 → starts "Inland".
+     - "FCA Haulage Mendoza to Chile = USD 2170"          → starts "FCA Haulage", treated as precarriage kind, NOT a rate. (See note: client preprocesses these before you see them, but if any leak through, do NOT emit as rate.)
+     - "Flexitank Chile = USD 600"                        → starts "Flexitank" → kind (flexitank_chile).
+     - "Thermal Liner = USD 350"                          → starts "Thermal" → kind (insulado_*).
+     - "Agentfee Chile = USD 75"                          → starts "Agentfee" → kind.
+     - "Carrier OOCL or CMA"                              → starts "Carrier" → metadata, ignore.
+     - "Additional Rivadavia = USD 100"                   → starts "Additional" → notas_globales (regional add-on).
+     - "Hi Chris,"                                        → starts "Hi" → ignore.
+     - "Validity 30/6"                                    → starts "Validity" → ignore.
+     - "14 free days destination"                         → starts with a digit → notas_globales free-day line.
+     - "Rates on the 20 feet + EBS"                       → starts "Rates" but no "=" with value → ignore.
 
 HARD RULES:
 1. EBS / EFS / BAF / Emergency Bunker Surcharge are ALWAYS billed separately via Inter-Tank's EBS table. NEVER include them in sf and DO NOT emit any note about them — drop silently. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60. The mention is noise to ignore.
@@ -128,6 +151,19 @@ HARD RULES:
 6. Per-row validity is IGNORED by design. Inter-Tank rates always inherit validity from the batch (Step 1's Q1/Q2/Q3/Q4 picker or date range). Do NOT emit validFrom / validTo per rate even when the source mentions "Validity 30/6" / "valid until X" / a different per-row date. If a row legitimately has different validity, the user's workflow is to create a separate batch. Leave validFrom / validTo OUT of each rate row — only use validity_inferred at the batch level for the overall file's validity hint.
 7. Regional add-ons (San Carlos, Tupungato, Rivadavia, San Juan, San Martín, "afuera de Mendoza", "Add" or "Additional" lines): NEVER as a rate row. Append to notas_globales.
 8. Free-day info: notas_globales.
+8b. notas_globales is a STRICT operational field. It contains ONLY:
+    - Free-day info (e.g. "14 free days destination", "14/8 free days at origin/destination").
+    - Regional add-ons that affect every rate of the batch.
+    - Sub-client values for predefined kinds (Fix 4 case WENRAN — those are produced client-side; you don't need to emit them).
+    Anything else MUST be left out. NEVER include in notas_globales:
+    - Saludos / despedidas: "Hi Chris", "Best regards", "Cheers", "Hello team".
+    - Comentarios narrativos: "diesel rose 50%", "ME war", "due to fuel increase", "varies per line", "expires march 31st", "subject to changes in bunker", "now USD 256 per 40".
+    - Promesas comerciales: "we are happy to confirm", "sadly we need to increase", "took time but got partial good news".
+    - Validity / expires (already captured by validity_inferred): "Validity 30/6", "Validez fin de junio", "expires march 31st".
+    - EBS / EFS / BAF / Bunker Surcharge / BL Fee mentions of any kind — they have their own dedicated handling.
+    - Section / group headers: "FOB Chile:", "FCA ARG", "Wine/Juice loads:", "MSC", "CMA-CGM", "Reefer loads:".
+    - Carrier listings as plain assignments: "Carrier OOCL or CMA" — that goes to the rate's sl field, never to notas_globales.
+    When in doubt, LEAVE IT OUT. The textarea defaults to empty for a reason.
 9. LCL content: skip entirely. Indicators: "Insulation Chile/Argentina" headers, amounts "per pallet/M3/shipment", early "OF" column, no clear POL+POD+Type triple.
 10. Date formats accepted: dd/mm/yyyy, dd/mm (no year — frontend assumes the batch year), "Fin de Junio"/"end of June" (last day of month), "March 31st", "Q2 2026", Excel datetimes. Emit dd/mm/yyyy when possible, else the original token.
 11. POL / POD extraction by context — Inter-Tank operates from Chile so POL is implicit (chilean) when only one port is mentioned. Apply these three sub-rules in order:
@@ -250,7 +286,8 @@ RULES:
 - Use value20 + value40 when the source distinguishes sizes; otherwise use value_unique.
 - For discounts ("discount of USD 25 if insulated"), emit value_unique as a NEGATIVE number.
 - "Thermal Liner = USD X" without size → value_unique: X. Frontend will copy to both 20' and 40'.
-- Regional add-ons ("Add San Carlos US$ 200 on top of Mendoza") → notas_globales (the frontend's regex sweep also captures these). Other free-form context (market changes, free days, EBS-not-included repeat-stamps, "all water via Caucedo", etc.) is NOT relevant to billing — leave notas_globales empty for those. The user's textarea defaults to empty; only add-ons fill it.
+- Regional add-ons ("Add San Carlos US$ 200 on top of Mendoza") → notas_globales (the frontend's regex sweep also captures these). Free-day lines ("14 free days destination") → notas_globales. Sub-client suffix lines like "Thermal Liner Chile (ASC - Aussino - EMW) = 180/280" are handled client-side BEFORE this prompt sees the text — if any leak through, do NOT emit them as kinds, leave them in notas_globales as raw text.
+- notas_globales is STRICTLY operational. Allowed: free days, regional add-ons, sub-client values, "afueras de <city>" notes. NEVER include: saludations ("Hi Chris", "Best regards"), narrative ("diesel rose", "varies per line", "subject to changes", "now USD 256 per 40"), validity ("Validity 30/6", "expires march 31st", "Fin de junio"), EBS/EFS/BAF/Bunker/BL Fee mentions, section headers ("FOB Chile:", "Wine/Juice loads:", "MSC"), carrier listings ("Carriers: OOCL, EVER"). When in doubt, leave notas_globales EMPTY.
 - If a charge's value is literally "Included" / "Incl." / "Bundled" / "N/A" (no number), do NOT emit a kind for it — that means it's bundled. Mention in notas_globales if relevant ("BAF incluido en SF.").
 - CONSOLIDATION: when the same charge appears across multiple rows split by container size (e.g. "FCA Mendoza | 20'Flexi | 2170", "FCA Mendoza | 20'DC | 2170", "FCA Mendoza | 40'DC | 2270"), emit ONE kind entry. Drop the size token from the label ("FCA Mendoza", not "FCA 40'DC Mendoza") and populate value20 / value40 from the size-tagged rows. When two size-20 rows give the same value, use it once.
 - ADD-ONS: rows like "Add San Carlos US$ 200 on top of Mendoza" / "Additional Rivadavia US$ 100" are regional add-ons, NOT kinds. Skip them — frontend captures them via a regex sweep into notas_globales.
@@ -1626,6 +1663,65 @@ export default function NewRateFlow({
     try {
       let extracted: ExtractedBatch = { rates: [] };
 
+      // ---- Pre-LLM client-side preprocessing (Fix 4 + Fix 5) ----
+      //
+      // Two passes happen BEFORE we call the rate-extraction LLM so the
+      // model never sees lines that we already know belong elsewhere:
+      //
+      //   Fix 5 (precarriage): "Inland FCA Mendoza 20 = USD 2250" /
+      //   "FCA Haulage San Martín to Chile = 2270" → emitted directly
+      //   as kinds (precarriage_<city>). The line is stripped from the
+      //   text so RATE_SYSTEM doesn't try to parse it as a maritime rate
+      //   blocked by pod_missing.
+      //
+      //   Fix 4 (sub-client suffix): "Thermal Liner S&F Chile (ASC -
+      //   Aussino - EMW) = 180/280" → emitted as a note line for the
+      //   batch ("Cliente ASC-Aussino-EMW: Thermal Liner S&F Chile
+      //   180/280") and stripped from the text so KIND_FROM_BLOCK_SYSTEM
+      //   doesn't treat it as a duplicate kind value. The general
+      //   "Thermal Liner S&F Chile" stays in the source for normal kind
+      //   detection.
+      //
+      // Order MUST be Fix 5 → Fix 4 → Fix 3, because "FCA Haulage Mendoza
+      // to Chile" begins with "FCA" which is one of Fix 3's prefix
+      // triggers — if we evaluated Fix 3 first the line would land on
+      // rates[] as a maritime FCA rate blocked POD missing.
+      const precarriageHits = detectPrecarriageInline(
+        pasteText || docxText || ""
+      );
+      const subClientResult = detectSubClientSuffixes(
+        pasteText || docxText || ""
+      );
+      // Also strip from excelKindsBlock so the second-pass kinds prompt
+      // doesn't double-count.
+      const precarriageHitsFromExcel =
+        detectPrecarriageInline(excelKindsBlock);
+      const subClientFromExcel = detectSubClientSuffixes(excelKindsBlock);
+      const allRawLinesToStrip = new Set<string>([
+        ...precarriageHits.map((h) => h.rawLine.trim()),
+        ...subClientResult.rawLines.map((l) => l.trim()),
+        ...precarriageHitsFromExcel.map((h) => h.rawLine.trim()),
+        ...subClientFromExcel.rawLines.map((l) => l.trim()),
+      ]);
+      const stripCapturedLines = (s: string): string => {
+        if (!s || allRawLinesToStrip.size === 0) return s;
+        return s
+          .split(/\r?\n/)
+          .filter((l) => !allRawLinesToStrip.has(l.trim()))
+          .join("\n");
+      };
+      const cleanedPasteText = stripCapturedLines(pasteText);
+      const cleanedDocxText = stripCapturedLines(docxText);
+      const cleanedExcelKindsBlock = stripCapturedLines(excelKindsBlock);
+      const allPrecarriageHits = [
+        ...precarriageHits,
+        ...precarriageHitsFromExcel,
+      ];
+      const allSubClientNotes = [
+        ...subClientResult.noteLines,
+        ...subClientFromExcel.noteLines,
+      ];
+
       if (excelText) {
         // LCL + catalog sheets were already filtered out at read time —
         // excelText only contains rate-classified sheet content.
@@ -1663,14 +1759,14 @@ export default function NewRateFlow({
         ];
         const result = await callExtractApi(content, RATE_SYSTEM);
         extracted = collectBatchFromChunks(result.rows);
-      } else if (docxText) {
+      } else if (cleanedDocxText) {
         const result = await callExtractApi(
-          `Contenido del documento Word:\n\n${docxText}`,
+          `Contenido del documento Word:\n\n${cleanedDocxText}`,
           RATE_SYSTEM
         );
         extracted = collectBatchFromChunks(result.rows);
-      } else if (pasteText.trim()) {
-        const result = await callExtractApi(pasteText, RATE_SYSTEM);
+      } else if (cleanedPasteText.trim()) {
+        const result = await callExtractApi(cleanedPasteText, RATE_SYSTEM);
         extracted = collectBatchFromChunks(result.rows);
       }
 
@@ -1689,9 +1785,9 @@ export default function NewRateFlow({
       // patterns like "Flexitank Chile = USD 600" / "Inland FCA Mendoza
       // 20 = USD 2250" that RATE_SYSTEM often missed.
       const kindsSourceText =
-        excelKindsBlock.trim() ||
-        (pasteText.trim() ? pasteText.trim() : "") ||
-        (docxText.trim() ? docxText.trim() : "");
+        cleanedExcelKindsBlock.trim() ||
+        (cleanedPasteText.trim() ? cleanedPasteText.trim() : "") ||
+        (cleanedDocxText.trim() ? cleanedDocxText.trim() : "");
       let extraNotas = "";
       if (kindsSourceText) {
         const blockResult = await extractKindsFromBlock(kindsSourceText);
@@ -1721,9 +1817,9 @@ export default function NewRateFlow({
       const sweepText = [
         extracted.notas_globales ?? "",
         extraNotas,
-        excelKindsBlock,
-        pasteText,
-        docxText,
+        cleanedExcelKindsBlock,
+        cleanedPasteText,
+        cleanedDocxText,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
       ]
         .filter(Boolean)
@@ -1731,6 +1827,43 @@ export default function NewRateFlow({
       const sweepResult = sweepKindsFromText(sweepText, detected.kinds);
       detected.kinds.push(...sweepResult.kinds);
       detected.kindValues.push(...sweepResult.kindValues);
+
+      // Merge precarriage hits captured by the client-side regex pre-pass
+      // (Fix 5). When multiple hits target the same kind id, accumulate
+      // value20 / value40 so a "Mendoza 20 = 2250" + "Mendoza 40 = 2350"
+      // pair collapses to a single by_size kind. Hits without a size
+      // qualifier default to value20.
+      for (const hit of allPrecarriageHits) {
+        const existingIdx = detected.kinds.findIndex(
+          (k) => k.id === hit.kindId
+        );
+        if (existingIdx === -1) {
+          const pred = PREDEFINED_KINDS.find((p) => p.id === hit.kindId);
+          const def: KindDef = pred ?? {
+            id: hit.kindId,
+            label: hit.kindLabel,
+            scope: "all",
+            by_size: true,
+            predefined: false,
+          };
+          detected.kinds.push(def);
+          const kv: KindValue = { kind_id: hit.kindId };
+          if (hit.size === 40) kv.value40 = hit.value;
+          else kv.value20 = hit.value;
+          detected.kindValues.push(kv);
+        } else {
+          let kv = detected.kindValues.find((v) => v.kind_id === hit.kindId);
+          if (!kv) {
+            kv = { kind_id: hit.kindId };
+            detected.kindValues.push(kv);
+          }
+          if (hit.size === 40) {
+            if (kv.value40 === undefined) kv.value40 = hit.value;
+          } else {
+            if (kv.value20 === undefined) kv.value20 = hit.value;
+          }
+        }
+      }
 
       setBatchKinds(detected.kinds);
       setBatchKindValues(detected.kindValues);
@@ -1763,21 +1896,56 @@ export default function NewRateFlow({
       // they care about.
       const fullText = [
         excelText,
-        excelKindsBlock,
-        pasteText,
-        docxText,
+        cleanedExcelKindsBlock,
+        cleanedPasteText,
+        cleanedDocxText,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
       ]
         .filter(Boolean)
         .join("\n");
       const regionalAddons = detectRegionalAddons(fullText);
-      const combinedNotasGlobales = [
+      // Free-day mentions are billing-relevant operational notes (not
+      // surcharges). Capture them via a small regex sweep over the
+      // unfiltered source so they survive the blacklist filter applied
+      // a few lines below.
+      const freeDayMatches: string[] = [];
+      const freeDayCombined = [
+        excelText,
+        excelKindsBlock,
+        pasteText,
+        docxText,
+        extracted.notas_globales ?? "",
+        extraNotas,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const freeDayRe =
+        /^[^\n]*\b\d+(?:\s*\/\s*\d+)?\s+free\s+days?\b[^\n]*$/gim;
+      let fdm: RegExpExecArray | null;
+      const seenFreeDay = new Set<string>();
+      while ((fdm = freeDayRe.exec(freeDayCombined)) !== null) {
+        const line = fdm[0].trim();
+        const k = line.toLowerCase();
+        if (line && !seenFreeDay.has(k)) {
+          seenFreeDay.add(k);
+          freeDayMatches.push(line);
+        }
+      }
+      const combinedNotasGlobalesRaw = [
         ...preferentialLines,
+        ...allSubClientNotes,
         ...regionalAddons,
+        ...freeDayMatches,
       ]
         .filter((s) => s && s.trim())
         .join("\n")
         .trim();
+      // Final defense: drop any line that matches the batch-notes
+      // blacklist (saludations, narrative, validity, EBS/BL Fee, section
+      // headers, etc.). Whitelist patterns inside filterBatchNotesText
+      // protect free-day / regional / sub-client lines.
+      const combinedNotasGlobales =
+        filterBatchNotesText(combinedNotasGlobalesRaw);
       if (combinedNotasGlobales) {
         setBatchNotas((prev) => {
           let base = prev;
@@ -2251,6 +2419,29 @@ export default function NewRateFlow({
       else next.add(idx);
       return next;
     });
+  // Removes a preview row entirely. Called from PreviewStep's Eliminar
+  // button after the user confirms the modal. Selection indices past the
+  // removed slot shift left by 1; the editing index closes if it was the
+  // removed row, or shifts if past. Only used during preview — the saved
+  // rates listing has its own delete UX in RatesTab.
+  const deletePreviewRow = (idx: number) => {
+    setPreviewRows((prev) => prev.filter((_, i) => i !== idx));
+    setPreviewSelected((prev) => {
+      const next = new Set<number>();
+      for (const i of prev) {
+        if (i < idx) next.add(i);
+        else if (i > idx) next.add(i - 1);
+        // i === idx → drop
+      }
+      return next;
+    });
+    setEditingIdx((cur) => {
+      if (cur == null) return cur;
+      if (cur === idx) return null;
+      if (cur > idx) return cur - 1;
+      return cur;
+    });
+  };
   const toggleAllPreview = () => {
     setPreviewSelected((prev) => {
       const all = previewRows.length > 0 && prev.size === previewRows.length;
@@ -2423,14 +2614,14 @@ export default function NewRateFlow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveValidity?.validFrom, effectiveValidity?.validTo]);
 
-  // Reuse Esc to cancel.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  // ESC does NOT close the Nueva Tarifa flow. Hitting ESC by accident
+  // during a long extraction (Step 1 with text pegado, or Step 2 with
+  // preview) used to wipe everything — generated noise + frustration in
+  // the smoke test. The user closes the flow explicitly via "Cancelar"
+  // (Step 1) or "Volver" (Step 2). Modals (validation, edit-row,
+  // delete-confirm, AddKind, notes) handle their own close UX via the ✕
+  // button or backdrop click — they never installed an ESC listener of
+  // their own, so removing this global one doesn't regress modal close.
 
   // ============== Render ==============
 
@@ -2771,6 +2962,7 @@ export default function NewRateFlow({
       onSetEditingIdx={setEditingIdx}
       onUpdateField={updatePreviewField}
       onCommitEdit={commitAndCloseEdit}
+      onDelete={deletePreviewRow}
       onBack={isEditMode ? onCancel : () => setStep("input")}
       onSave={saveSelected}
       onCancel={onCancel}
@@ -3298,6 +3490,7 @@ function PreviewStep({
   onSetEditingIdx,
   onUpdateField,
   onCommitEdit,
+  onDelete,
   onBack,
   onSave,
   onCancel,
@@ -3318,6 +3511,7 @@ function PreviewStep({
   onSetEditingIdx: (idx: number | null) => void;
   onUpdateField: (idx: number, field: string, value: unknown) => void;
   onCommitEdit: (idx: number) => void;
+  onDelete: (idx: number) => void;
   onBack: () => void;
   onSave: () => void;
   onCancel: () => void;
@@ -3330,7 +3524,17 @@ function PreviewStep({
       : stats.ok === 0
         ? "bg-red-50 border-red-200 text-red-900"
         : "bg-yellow-50 border-yellow-200 text-yellow-900";
+  // Count of rows with a hard blocking error. The Guardar button stays
+  // disabled while this is > 0 so the user can't accidentally drop blocked
+  // rows by saving the rest (Van Moer regression: 3 blocked POD rates were
+  // silently discarded when the user clicked save with only 1 corrected).
+  const blockedCount = rows.filter(
+    (r) => r._blockingError != null && String(r._blockingError).length > 0
+  ).length;
   const [filterToReview, setFilterToReview] = useState(false);
+  // Eliminar-confirmation modal for the Acciones column. null when closed,
+  // otherwise the index of the row pending deletion.
+  const [deleteIdx, setDeleteIdx] = useState<number | null>(null);
   // Index of the row whose notes are open in the modal — null when closed.
   // Modal shows the row's individual notes plus the batch-level globales,
   // each in its own section.
@@ -3348,6 +3552,16 @@ function PreviewStep({
     for (const kv of kindValues) m.set(kv.kind_id, kv);
     return m;
   }, [kindValues]);
+
+  // "Two kinds share the same value" warnings. Empirical analysis showed
+  // collisions are rare and usually legitimate (one IWS file had Thermoliner
+  // Chile 40' = Thermoliner Mendoza 20' both at 300, distinct contexts that
+  // happened to coincide). Surface as informational amber banner — never
+  // blocking. User reviews and proceeds.
+  const dupValueWarnings = useMemo(
+    () => validateKindsValueUniqueness(kinds, kindValues),
+    [kinds, kindValues]
+  );
 
   // Headers for the static columns + one column per kind. Kinds with by_size
   // get two sub-columns (20', 40'); single-value kinds get one.
@@ -3464,6 +3678,13 @@ function PreviewStep({
               </button>
             )}
           </div>
+          {dupValueWarnings.length > 0 && (
+            <div className="text-sm rounded-md px-3 py-2 border bg-yellow-50 border-yellow-200 text-yellow-900 flex flex-col gap-1">
+              {dupValueWarnings.map((w, i) => (
+                <div key={i}>⚠️ {w}</div>
+              ))}
+            </div>
+          )}
         </>
       )}
 
@@ -3663,15 +3884,27 @@ function PreviewStep({
                     })()}
                     <td className="px-3 py-2 whitespace-nowrap">
                       {!isEditMode && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() =>
-                            isEditing ? onCommitEdit(idx) : onSetEditingIdx(idx)
-                          }
-                        >
-                          {isEditing ? "Guardar" : "Editar"}
-                        </Button>
+                        <div className="flex gap-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              isEditing
+                                ? onCommitEdit(idx)
+                                : onSetEditingIdx(idx)
+                            }
+                          >
+                            {isEditing ? "Guardar" : "Editar"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setDeleteIdx(idx)}
+                            className="text-red-700 hover:bg-red-50"
+                          >
+                            Eliminar
+                          </Button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -3790,13 +4023,60 @@ function PreviewStep({
       <div className="flex justify-end gap-2 mt-2">
         <Button
           onClick={onSave}
-          disabled={isEditMode ? false : selected.size === 0}
+          disabled={
+            isEditMode
+              ? false
+              : selected.size === 0 || blockedCount > 0
+          }
+          title={
+            !isEditMode && blockedCount > 0
+              ? `Hay ${blockedCount} ${blockedCount === 1 ? "rate con error" : "rates con errores"}. Corregilas o eliminalas para guardar.`
+              : undefined
+          }
         >
           {isEditMode
             ? "Guardar cambios"
             : `Guardar seleccionadas (${selected.size} de ${rows.length})`}
         </Button>
       </div>
+
+      {deleteIdx !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => setDeleteIdx(null)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-lg max-w-md w-full mx-4 p-5 flex flex-col gap-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h4 className="font-semibold text-base">
+              Eliminar tarifa del preview
+            </h4>
+            <p className="text-sm text-gray-700">
+              ¿Eliminar esta tarifa? Esta acción no afecta tarifas ya
+              guardadas, solo el preview actual.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setDeleteIdx(null)}
+              >
+                Cancelar
+              </Button>
+              <Button
+                onClick={() => {
+                  const target = deleteIdx;
+                  setDeleteIdx(null);
+                  if (target != null) onDelete(target);
+                }}
+                className="bg-red-600 hover:bg-red-700 text-white"
+              >
+                Eliminar
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {notesModalIdx !== null && (() => {
         const row = rows[notesModalIdx];

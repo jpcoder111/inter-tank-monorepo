@@ -314,20 +314,43 @@ export const KIND_ALIASES: Record<string, ReadonlyArray<string | RegExp>> = {
     "thermal liner s&f chile",
     "thermal liner chile",
     "thermoliner chile",
+    "thermo liner chile",
+    "liner térmico chile",
     "insulado chile",
+    // Unsized "Thermal Liner" / "Thermoliner" with no Chile/ARG qualifier
+    // defaults to insulado_chile (~80% of catalog's flexi cargo originates
+    // Chile). User can re-route to insulado_arg manually if the email
+    // context demands it.
     /^thermal\s*liner$/i,
+    /^thermo\s*liner$/i,
+    /^thermoliner$/i,
   ],
   insulado_arg: [
     "thermal liner s&f mendoza",
+    "thermal liner s&f argentina",
     "thermal liner mendoza",
+    "thermal liner argentina",
     "thermoliner mendoza",
+    "thermo liner mendoza",
+    "liner térmico arg",
+    "liner térmico argentina",
     "insulado argentina",
+    "insulado arg",
     "insulado mendoza",
   ],
-  flexitank_chile: ["flexitank chile", "s&f chile", "stuffing chile"],
+  flexitank_chile: [
+    "flexitank chile",
+    "flexi chile",
+    "flexitank s&f chile",
+    "s&f chile",
+    "stuffing chile",
+  ],
   flexitank_arg: [
     "flexitank argentina",
     "flexitank arg",
+    "flexi argentina",
+    "flexi arg",
+    "flexitank s&f argentina",
     "s&f arg",
     "s&f argentina",
     "laf",
@@ -338,12 +361,15 @@ export const KIND_ALIASES: Record<string, ReadonlyArray<string | RegExp>> = {
     "flexibag mendoza",
   ],
   precarriage_mendoza: [
+    "fca haulage mendoza to chile base port",
     "fca haulage mendoza to chile",
+    "haulage mendoza to chile base port",
     "haulage mendoza to chile",
     "fca haulage mendoza",
     "haulage mendoza",
     "fca mendoza",
     "precarriage mendoza",
+    "inland mendoza",
     "inland fca mendoza",
     "inland rate for fca mendoza",
     "tarifa fca mendoza",
@@ -416,6 +442,371 @@ export function isArgPol(pol: string): boolean {
   if (!pol) return false;
   const norm = pol.trim().toLowerCase();
   return ARG_POL_CITIES.some((city) => norm.includes(city));
+}
+
+// Argentine cities that appear as the origin of inland precarriage charges
+// ("Inland FCA Mendoza", "FCA Haulage San Martín to Chile"). Used by the
+// detectPrecarriageInline sweep to decide whether a captured city becomes
+// a predefined kind id (precarriage_mendoza when the city is Mendoza) or
+// a custom precarriage_<slug>. Same set as ARG_POL_CITIES at present, kept
+// separate so they can diverge later if precarriage geography expands
+// past the FCA pickup catalog.
+export const ARG_PRECARRIAGE_CITIES: readonly string[] = [
+  "mendoza",
+  "santa rita",
+  "rivadavia",
+  "san carlos",
+  "san juan",
+  "tupungato",
+  "san martín",
+  "san martin",
+  "río negro",
+  "rio negro",
+] as const;
+
+// Strips diacritics + lowercases for case- / accent-insensitive matching.
+// The character class covers Unicode combining marks U+0300-U+036F so
+// "Río", "São", and "Mendóza" all collapse to ASCII for set lookups.
+function norm(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+// Matches a city string against ARG_PRECARRIAGE_CITIES. Returns the
+// canonical (no-accent, lowercase, single-spaced) form when matched, null
+// otherwise. Used by detectPrecarriageInline to decide kind id mapping.
+export function matchArgPrecarriageCity(city: string): string | null {
+  if (!city) return null;
+  const n = norm(city).replace(/\s+/g, " ");
+  for (const candidate of ARG_PRECARRIAGE_CITIES) {
+    const cn = norm(candidate);
+    if (n === cn) return cn;
+  }
+  return null;
+}
+
+// Result of a successful precarriage line capture. The line itself should
+// be stripped from the text passed to the rate-extraction LLM so it never
+// has a chance to be mis-classified as a maritime rate row.
+export type PrecarriageHit = {
+  rawLine: string;
+  city: string; // canonical lowercased ascii (e.g. "mendoza", "san martin")
+  cityDisplay: string; // original casing from the source ("Mendoza", "San Martín")
+  size: 20 | 40 | null; // null when source omits the size qualifier
+  value: number;
+  kindId: string; // "precarriage_mendoza" or "custom_precarriage_<slug>"
+  kindLabel: string; // "Precarriage Mendoza" or "Precarriage San Martín"
+};
+
+// Detects Inland / FCA Haulage / Haulage precarriage lines anywhere in the
+// input text. Returns one hit per matching line. Caller is expected to
+// strip the captured rawLine substrings from the text before passing it
+// to the rate-extraction LLM so the line doesn't double-count.
+//
+// Pattern A (Inland):
+//   "Inland FCA Mendoza 20 = USD 2250"
+//   "Inland rate for 40 FCA Mendoza including local charges = USD 2270"
+//   "Inland Mendoza = USD 2200"
+//
+// Pattern B (FCA Haulage / Haulage):
+//   "FCA Haulage Mendoza to Chile = USD 2170"
+//   "Haulage Mendoza to Chile base port = USD 2170"
+//   "FCA Haulage San Martín to Chile = 2270"
+//
+// City lookup is accent- and case-insensitive against
+// ARG_PRECARRIAGE_CITIES. Cities outside the catalog still emit a hit but
+// land on a custom kind id (caller may surface a warning). Multi-word
+// cities ("Santa Rita", "San Martín", "Río Negro") are supported.
+export function detectPrecarriageInline(text: string): PrecarriageHit[] {
+  if (!text) return [];
+  const hits: PrecarriageHit[] = [];
+  const lines = text.split(/\r?\n/);
+  // Build the city alternation lazily on first call. Longer cities first
+  // so the regex prefers "santa rita" over "rita".
+  const cityAlt = ARG_PRECARRIAGE_CITIES.slice()
+    .sort((a, b) => b.length - a.length)
+    .map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+
+  // Pattern A — Inland (with optional "rate for", optional size, optional
+  // FCA prefix on city). The size token can appear before OR after the
+  // city: "Inland FCA Mendoza 20 = USD 2250" and "Inland rate for 40 FCA
+  // Mendoza ... = USD 2270" both match.
+  const inlandRe = new RegExp(
+    String.raw`^\s*Inland\s+` +
+      String.raw`(?:rate\s+(?:for\s+)?)?` +
+      String.raw`(?:(?<sizeBefore>20|40)\s+)?` +
+      String.raw`(?:FCA\s+)?` +
+      String.raw`(?<city>${cityAlt})` +
+      String.raw`(?:\s+(?<sizeAfter>20|40))?` +
+      // Allow "including ...", "to <port>", "base port", "Mendoza Region",
+      // any free-text tail before the "=" / ":" separator.
+      String.raw`(?:\s+[^=:]*)?` +
+      String.raw`\s*[=:]\s*(?:USD|US\$|\$)?\s*(?<value>[\d.,]+)`,
+    "i"
+  );
+  // Pattern B — Haulage / FCA Haulage. "<city> to <dest>" with optional
+  // "base port" suffix, value at the end. Size token rare in this form,
+  // not parsed.
+  const haulageRe = new RegExp(
+    String.raw`^\s*(?:FCA\s+)?Haulage\s+` +
+      String.raw`(?<city>${cityAlt})` +
+      String.raw`\s+to\s+[A-Za-zñáéíóúÑÁÉÍÓÚ\s]+?` +
+      String.raw`(?:\s+base\s+port)?` +
+      String.raw`\s*[=:]\s*(?:USD|US\$|\$)?\s*(?<value>[\d.,]+)`,
+    "i"
+  );
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const mA = line.match(inlandRe);
+    if (mA && mA.groups) {
+      const cityRaw = mA.groups.city ?? "";
+      const sizeStr = mA.groups.sizeBefore ?? mA.groups.sizeAfter ?? "";
+      const valStr = mA.groups.value ?? "";
+      const value = parseAmount(valStr);
+      if (value > 0 && cityRaw) {
+        const canonical = matchArgPrecarriageCity(cityRaw);
+        const cityKey = canonical ?? norm(cityRaw).replace(/\s+/g, "_");
+        const display = cityRaw
+          .trim()
+          .replace(/\s+/g, " ")
+          .replace(/(^|\s)\S/g, (s) => s.toUpperCase());
+        hits.push({
+          rawLine: line,
+          city: cityKey,
+          cityDisplay: display,
+          size: sizeStr === "20" ? 20 : sizeStr === "40" ? 40 : null,
+          value,
+          kindId:
+            cityKey === "mendoza"
+              ? "precarriage_mendoza"
+              : `custom_precarriage_${cityKey.replace(/\s+/g, "_")}`,
+          kindLabel:
+            cityKey === "mendoza"
+              ? "Precarriage Mendoza"
+              : `Precarriage ${display}`,
+        });
+        continue;
+      }
+    }
+    const mB = line.match(haulageRe);
+    if (mB && mB.groups) {
+      const cityRaw = mB.groups.city ?? "";
+      const valStr = mB.groups.value ?? "";
+      const value = parseAmount(valStr);
+      if (value > 0 && cityRaw) {
+        const canonical = matchArgPrecarriageCity(cityRaw);
+        const cityKey = canonical ?? norm(cityRaw).replace(/\s+/g, "_");
+        const display = cityRaw
+          .trim()
+          .replace(/\s+/g, " ")
+          .replace(/(^|\s)\S/g, (s) => s.toUpperCase());
+        hits.push({
+          rawLine: line,
+          city: cityKey,
+          cityDisplay: display,
+          size: null, // Haulage form doesn't carry a size token
+          value,
+          kindId:
+            cityKey === "mendoza"
+              ? "precarriage_mendoza"
+              : `custom_precarriage_${cityKey.replace(/\s+/g, "_")}`,
+          kindLabel:
+            cityKey === "mendoza"
+              ? "Precarriage Mendoza"
+              : `Precarriage ${display}`,
+        });
+      }
+    }
+  }
+  return hits;
+}
+
+// Sub-client suffix capture. WENRAN-style lines look like:
+//   "Thermal Liner S&F Chile (ASC - Aussino - EMW) = 180/280"
+//   "Thermal Liner S&F Mendoza (ASC - Aussino - EMW) = 230/330"
+// The base label is a predefined kind, but the parenthetical names
+// specific sub-clients with a different value. Decision (per smoke-test
+// prompt): the predefined kind keeps the GENERAL value (no parenthesis),
+// the sub-client variant goes to batch.notes for the operator to apply
+// at billing time. Lines whose base label is NOT a predefined kind fall
+// through (caller treats them as custom kinds normally).
+//
+// Returns null when no sub-client suffix is detected. When detected,
+// returns the consolidated note line ready for batch.notes:
+//   "Cliente ASC-Aussino-EMW: Thermal Liner Chile 180/280"
+export type SubClientSuffixHit = {
+  rawLine: string;
+  baseLabel: string;
+  clients: string;
+  values: string;
+  noteLine: string;
+};
+
+export function extractSubClientSuffix(line: string): SubClientSuffixHit | null {
+  const m = line.match(/^(.+?)\s*\(([^)]+)\)\s*=\s*(.+?)\s*$/);
+  if (!m) return null;
+  const baseLabel = (m[1] ?? "").trim();
+  const suffix = (m[2] ?? "").trim();
+  const valueStr = (m[3] ?? "").trim();
+  if (!baseLabel || !suffix || !valueStr) return null;
+  // Heuristic: a sub-client suffix typically has 2+ comma- or dash-separated
+  // ALL-CAPS or capitalised tokens. A normal kind annotation like "(20'Flexi)"
+  // has at most one short numeric/size token — skip those.
+  const parts = suffix
+    .split(/[-,/]/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+  // All parts must look like client codes (letters, digits, dots, hyphens,
+  // ampersands, spaces). Reject when any part is purely a number or contains
+  // a size qualifier like "20'" / "40DC" / "Reefer".
+  const looksLikeClient = (p: string) =>
+    /^[A-Za-z][A-Za-z0-9\s.&\-/]*$/.test(p) &&
+    !/^(20|40)['’]?(?:dc|reefer|flexi|dry)?$/i.test(p) &&
+    !/^(reefer|flexi|dry)$/i.test(p);
+  if (!parts.every(looksLikeClient)) return null;
+  // Only fire when the base label resolves to a predefined kind (matchKindByAlias).
+  if (!matchKindByAlias(baseLabel)) return null;
+  const clients = parts.join("-");
+  return {
+    rawLine: line,
+    baseLabel,
+    clients,
+    values: valueStr,
+    noteLine: `Cliente ${clients}: ${baseLabel} ${valueStr}`,
+  };
+}
+
+// Sweeps the full text input for sub-client suffix lines and returns both
+// the noteLines (caller appends them to batch.notes) and the rawLines
+// (caller strips them from the text before sending to the LLM, same way
+// detectPrecarriageInline operates).
+export function detectSubClientSuffixes(text: string): {
+  noteLines: string[];
+  rawLines: string[];
+} {
+  if (!text) return { noteLines: [], rawLines: [] };
+  const noteLines: string[] = [];
+  const rawLines: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const hit = extractSubClientSuffix(line);
+    if (hit) {
+      noteLines.push(hit.noteLine);
+      rawLines.push(hit.rawLine);
+    }
+  }
+  return { noteLines, rawLines };
+}
+
+// Patterns whose presence on a line means "drop from batch.notes". The
+// batch-notes textarea must contain ONLY operationally-billable info
+// (free days, regional add-ons, sub-client values). Comments, narrative,
+// EBS / validity / saludations / market context are noise and get
+// filtered after the LLM run. Whitelist patterns short-circuit: a line
+// matching one of those passes through even if a blacklist also matches
+// (free-day lines often share keywords with narrative).
+const BATCH_NOTES_WHITELIST: RegExp[] = [
+  /\b\d+\s*(?:\/\s*\d+\s*)?\s*free\s+days?\b/i,
+  /\bd[íi]as?\s+libres?\b/i,
+  /\bcliente\s+[\wáéíóúñÁÉÍÓÚÑ\-\s]+:\s/i,
+  /\borigen\s+alternativo\b/i,
+  /\bafueras?\s+de\b/i,
+  /\b(add|additional)\s+[A-Za-zñáéíóúÑÁÉÍÓÚ][\wáéíóúñÁÉÍÓÚÑ\s]+\s+US\$?\s+\d/i,
+  /\bsumar?\s+US\$?\s*\d/i,
+];
+
+const BATCH_NOTES_BLACKLIST: RegExp[] = [
+  // Saludos / despedidas / aperturas de email
+  /^\s*(hi|hello|hola|dear|estimad[oa]s?|saludos|cheers|best\s+regards|kind\s+regards|warm\s+regards|gracias|thanks?|regards|good\s+(morning|afternoon))\b/i,
+  // Promesas / narrativa comercial
+  /^\s*(we\s+(are|will|need|have)|sadly|happily|i('?m|\s+am)\s+happy|took\s+time|got\s+(partial\s+)?good\s+news)/i,
+  /\b(varies\s+per\s+line|subject\s+to\s+changes|now\s+usd?\s*\$?\s*\d+\s+per)\b/i,
+  // Validity / vigencia
+  /^\s*(validity|validez|valid\s+(until|from|to)|expires?|vence|expira|fin\s+de\s+\w+)\b/i,
+  // EBS / surcharges / BL fee — never go to global notes
+  /\b(ebs|efs|baf|emergency\s+bunker|bunker\s+surcharge|bl\s*fee|bill\s+of\s+lading|documentation\s+fee|doc\s+fee)\b/i,
+  // Contexto de mercado
+  /^\s*(diesel|me\s+war|fuel\s+(rose|increase|surcharge)|due\s+to\s+fuel|market\s+(is|has))/i,
+  // Encabezados de sección de carrier
+  /^\s*(msc|cma-?cgm|hapag(\s*-?\s*lloyd)?|maersk|ooc|cosco|one|ever|wan\s*hai|hmm|pil|zim|yang\s*ming)\s*:?\s*$/i,
+  // Encabezados de tipo de carga
+  /^\s*(wine\/?juice|dry|reefer|flexi|frozen|fresh|vegetables|nueces)\s+loads?\s*:?\s*$/i,
+  // Encabezados Incoterm + región
+  /^\s*(fob|cif|cfr|fca|exw)\s+(chile|argentina|arg|mendoza)\s*:?\s*$/i,
+  // Carrier listing as plain assignment
+  /^\s*carriers?\s*:\s*[A-Z]/i,
+];
+
+// True when the line should pass through to batch.notes. Whitelist beats
+// blacklist; an unmatched line passes through too (best-effort filter).
+export function isBatchNotesAllowed(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  for (const re of BATCH_NOTES_WHITELIST) {
+    if (re.test(t)) return true;
+  }
+  for (const re of BATCH_NOTES_BLACKLIST) {
+    if (re.test(t)) return false;
+  }
+  return true;
+}
+
+// Filters a multi-line batch.notes string by isBatchNotesAllowed and
+// returns the trimmed survivors joined back. Empty-string in / empty-out.
+export function filterBatchNotesText(text: string): string {
+  if (!text) return "";
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .filter(isBatchNotesAllowed)
+    .join("\n");
+}
+
+// Surfaces "two kinds share the same value" warnings to the operator.
+// Empirical analysis of 19 catalog files showed value collisions are rare
+// (1/17 kind-bearing files) and the one collision was legitimate — so
+// this is informational, not blocking. Caller renders a yellow banner.
+export function validateKindsValueUniqueness(
+  kinds: KindDef[],
+  values: KindValue[]
+): string[] {
+  const buckets = new Map<number, Array<{ label: string; size: string }>>();
+  for (const kind of kinds) {
+    const kv = values.find((v) => v.kind_id === kind.id);
+    if (!kv) continue;
+    if (kind.by_size) {
+      if (kv.value20 != null) {
+        if (!buckets.has(kv.value20)) buckets.set(kv.value20, []);
+        buckets.get(kv.value20)!.push({ label: kind.label, size: "20'" });
+      }
+      if (kv.value40 != null) {
+        if (!buckets.has(kv.value40)) buckets.set(kv.value40, []);
+        buckets.get(kv.value40)!.push({ label: kind.label, size: "40'" });
+      }
+    } else if (kv.value_unique != null) {
+      if (!buckets.has(kv.value_unique)) buckets.set(kv.value_unique, []);
+      buckets
+        .get(kv.value_unique)!
+        .push({ label: kind.label, size: "único" });
+    }
+  }
+  const out: string[] = [];
+  for (const [value, items] of buckets) {
+    if (items.length < 2) continue;
+    const summary = items
+      .map((it) => `${it.label} (${it.size}=${value})`)
+      .join(" y ");
+    out.push(
+      `Posible kind duplicado: ${summary} comparten valor ${value}. ¿Distintos contextos o duplicación?`
+    );
+  }
+  return out;
 }
 
 // Derives the Incoterm of a rate from whatever signal is available.

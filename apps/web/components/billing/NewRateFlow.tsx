@@ -2452,16 +2452,27 @@ export default function NewRateFlow({
         };
       });
 
-      // Fix 1 second pass: walk every preview row's RAW comments string
-      // scanning for excluded-kind phrases. cleanIndividualNotes already
-      // ran on row.notes during the build map and removed the phrase, so
-      // we have to scan _rawComments (the pre-clean original text) to
-      // attribute the kind to the right rates. Only kinds that
-      // originated from the Excel sweep get per-row tagging — paste /
-      // docx hits stay global. _rawComments is dropped from every row
-      // after the scan so it never reaches the UI or localStorage.
+      // Fix 1 second pass: tag affected_rate_ids on excluded kinds. Two
+      // complementary signals feed the same affectedByKindId map so a
+      // hit found by either source reaches the kind:
+      //
+      //   (a) row._rawComments — the LLM's notas string verbatim. Works
+      //       only when Claude propagated the source Comments cell to
+      //       notas (which happens for short / single-sentence cells).
+      //   (b) excelText line-by-line — the raw CSV from the rate sheet,
+      //       parsed directly without LLM mediation. KATAOKA's Comments
+      //       cell is long enough that Claude often summarises it and
+      //       drops the "Doesn't included Disposal USD 190" tail; scanning
+      //       the source line ourselves recovers the per-row attribution.
+      //
+      // Each excelText line carrying a hit gets correlated to a preview
+      // row by identifying fields (sf as the primary key, plus carrier
+      // and pod for tie-breaking). Score 2/3 is enough — Claude commonly
+      // rewrites carrier names ("OOCL" vs "OOCL Lines") so we tolerate
+      // one missing match.
+      const affectedByKindId = new Map<string, Set<string>>();
+      // (a) _rawComments scan
       if (excelExcludedKindIds.size > 0) {
-        const affectedByKindId = new Map<string, Set<string>>();
         for (const row of rows) {
           const raw = String(row._rawComments ?? "");
           if (!raw) continue;
@@ -2477,14 +2488,77 @@ export default function NewRateFlow({
             set.add(String(row._id));
           }
         }
-        if (affectedByKindId.size > 0) {
-          setBatchKinds((prev) =>
-            prev.map((k) => {
-              const ids = affectedByKindId.get(k.id);
-              if (!ids || ids.size === 0) return k;
-              return { ...k, affected_rate_ids: Array.from(ids) };
-            })
-          );
+      }
+      // (b) excelText line-by-line scan + correlation
+      if (excelText && excelExcludedKindIds.size > 0) {
+        const linesWithHits: Array<{
+          rawLine: string;
+          hits: ReturnType<typeof detectExcludedKindsFromText>["hits"];
+        }> = [];
+        for (const line of excelText.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("Hoja:")) continue;
+          const detect = detectExcludedKindsFromText(trimmed);
+          if (detect.hits.length > 0) {
+            linesWithHits.push({ rawLine: trimmed, hits: detect.hits });
+          }
+        }
+        if (linesWithHits.length > 0) {
+          for (const row of rows) {
+            const carrier = String(row.carrier ?? "").trim().toLowerCase();
+            const pod = String(row.pod ?? "").trim().toLowerCase();
+            const sfNum = Number(row.sf ?? 0);
+            const sfPattern =
+              Number.isFinite(sfNum) && sfNum !== 0
+                ? new RegExp(`(?:^|[^\\d])${sfNum}(?:[^\\d]|$)`)
+                : null;
+            for (const { rawLine, hits } of linesWithHits) {
+              const lineLower = rawLine.toLowerCase();
+              let score = 0;
+              if (carrier && lineLower.includes(carrier)) score++;
+              if (pod && lineLower.includes(pod)) score++;
+              if (sfPattern && sfPattern.test(rawLine)) score++;
+              if (score < 2) continue;
+              for (const hit of hits) {
+                if (!excelExcludedKindIds.has(hit.kindId)) continue;
+                let set = affectedByKindId.get(hit.kindId);
+                if (!set) {
+                  set = new Set<string>();
+                  affectedByKindId.set(hit.kindId, set);
+                }
+                set.add(String(row._id));
+              }
+              break;
+            }
+          }
+        }
+      }
+      if (affectedByKindId.size > 0) {
+        setBatchKinds((prev) =>
+          prev.map((k) => {
+            const ids = affectedByKindId.get(k.id);
+            if (!ids || ids.size === 0) return k;
+            return { ...k, affected_rate_ids: Array.from(ids) };
+          })
+        );
+      }
+      // Debug telemetry — surface the scan outcome in the browser console
+      // so smoke tests can confirm KATAOKA's "🔗 3 de 23" without opening
+      // the kind editor. One line per kind that received at least one
+      // affected rate.
+      if (typeof console !== "undefined") {
+        if (affectedByKindId.size === 0) {
+          if (excelExcludedKindIds.size > 0) {
+            console.log(
+              `[excluded-kinds-scan] 0 rates correlated for ${excelExcludedKindIds.size} excluded kind(s) detected globally`
+            );
+          }
+        } else {
+          for (const [kindId, ids] of affectedByKindId) {
+            console.log(
+              `[excluded-kinds-scan] ${ids.size} rate(s) tagged for kind=${kindId}`
+            );
+          }
         }
       }
       for (const row of rows) {

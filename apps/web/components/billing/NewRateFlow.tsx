@@ -2489,7 +2489,15 @@ export default function NewRateFlow({
           }
         }
       }
-      // (b) excelText line-by-line scan + correlation
+      // (b) excelText line-by-line scan + correlation. Strict AND: every
+      // non-empty identifying field on the rate (carrier, pod, sf) must
+      // appear in the source line for the line to claim that rate. The
+      // earlier 2-of-3 score was too lax — KATAOKA's 23 OOCL/Yokohama
+      // rates all matched on (carrier+pod) even though only 3 carried
+      // the Disposal phrase, leading to "14 rates tagged" when 3 was
+      // correct. Strict AND prefers false negatives over false positives.
+      // Also gate on at least 2 fields populated to avoid taggings driven
+      // by a single weak signal.
       if (excelText && excelExcludedKindIds.size > 0) {
         const linesWithHits: Array<{
           rawLine: string;
@@ -2505,20 +2513,32 @@ export default function NewRateFlow({
         }
         if (linesWithHits.length > 0) {
           for (const row of rows) {
-            const carrier = String(row.carrier ?? "").trim().toLowerCase();
-            const pod = String(row.pod ?? "").trim().toLowerCase();
+            const carrier = String(row.carrier ?? "").trim();
+            const pod = String(row.pod ?? "").trim();
             const sfNum = Number(row.sf ?? 0);
-            const sfPattern =
-              Number.isFinite(sfNum) && sfNum !== 0
-                ? new RegExp(`(?:^|[^\\d])${sfNum}(?:[^\\d]|$)`)
-                : null;
+            const hasCarrier = carrier.length > 0;
+            const hasPod = pod.length > 0;
+            const hasSf = Number.isFinite(sfNum) && sfNum !== 0;
+            const fieldsPresent =
+              (hasCarrier ? 1 : 0) + (hasPod ? 1 : 0) + (hasSf ? 1 : 0);
+            // Skip rates we cannot identify by at least 2 fields — a
+            // single match (carrier alone, or sf alone) isn't enough to
+            // discriminate between siblings on the same lane.
+            if (fieldsPresent < 2) continue;
+            const carrierLower = carrier.toLowerCase();
+            const podLower = pod.toLowerCase();
+            // Word-bounded SF match that excludes thousand-separator
+            // siblings: "750" must not match the "750" inside "24,750".
+            // The anchor uses non-digit / non-comma / non-dot on either
+            // side of the literal value.
+            const sfPattern = hasSf
+              ? new RegExp(`(?:^|[^\\d.,])${sfNum}(?:[^\\d.,]|$)`)
+              : null;
             for (const { rawLine, hits } of linesWithHits) {
               const lineLower = rawLine.toLowerCase();
-              let score = 0;
-              if (carrier && lineLower.includes(carrier)) score++;
-              if (pod && lineLower.includes(pod)) score++;
-              if (sfPattern && sfPattern.test(rawLine)) score++;
-              if (score < 2) continue;
+              if (hasCarrier && !lineLower.includes(carrierLower)) continue;
+              if (hasPod && !lineLower.includes(podLower)) continue;
+              if (sfPattern && !sfPattern.test(rawLine)) continue;
               for (const hit of hits) {
                 if (!excelExcludedKindIds.has(hit.kindId)) continue;
                 let set = affectedByKindId.get(hit.kindId);

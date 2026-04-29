@@ -2052,29 +2052,66 @@ export function detectDisposal(text: string): number | null {
 }
 
 // Detects free-text add-ons of the form
-//   "Add San Carlos US$ 200 on top of Mendoza"
+//   "Add San Carlos US$ 200 on top of Mendoza"      (Arterra-style)
 //   "Additional Rivadavia US$ 100 on top of Mendoza"
-//   "Add San Carlos = US$ 200 on top of Mendoza"  (IWS Excel Precarriage sheet)
+//   "Add San Carlos = US$ 200 on top of Mendoza"   (IWS Precarriage sheet)
+//   "Add San Carlos | US$ 200 | on top of Mendoza" (catalog rows joined
+//                                                    with " | " in
+//                                                    excelKindsBlock)
+//   "Add San Carlos = US$200"                       ("on top of" omitted —
+//                                                    defaults to Mendoza)
 // and returns one canonical line per distinct (city, base) pair, ready
 // to drop into notas_globales:
 //   "Add San Carlos = US$ 200 on top of Mendoza"
-// Accepts both "Add" (IWS-style) and "Additional" (Arterra-style) leads, with
-// or without a "=" separator between city and the USD amount.
+//
+// Robustness over the Bundle 1 regex:
+//   - tolerates a pipe between cells (Excel catalog rows split across
+//     columns end up with " | " in kindsBlock — Bundle 1 regex stalled
+//     on the literal pipe)
+//   - tolerates "US$200" without a space between currency and amount
+//   - "on top of <base>" is optional; defaults to "Mendoza" (the only
+//     base Inter-Tank ever uses for this pattern)
+//   - telemetry log inside the function so smoke testing can confirm
+//     input shape without instrumenting every callsite
 export function detectRegionalAddons(text: string): string[] {
-  if (!text) return [];
+  if (!text) {
+    if (typeof console !== "undefined") {
+      console.log("[regional-addons] empty input — 0 matches");
+    }
+    return [];
+  }
   const lines = new Map<string, string>();
+  // City: at least one letter, then up to 30 letters / spaces / hyphens
+  // / dots (covers "San Martín", "Río Negro", "St-Lucie").
+  // Separator: optional whitespace + optional pipe / equals / colon +
+  // optional whitespace (covers all four spreadsheet shapes above).
+  // Currency: required to anchor the match — "Add San Carlos | 200"
+  // without a USD/US$/$ token would over-trigger on stray rows.
+  // Amount: digit run with optional thousands separators.
+  // Tail: optional " on top of <base>" — captures the base when present.
   const re =
-    /\b(?:add|additional)\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?)\s*(?:=\s*)?US\$?\s+([\d.,]+)\s+on\s+top\s+of\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][\w\sñ]{1,30}?)(?=[.,;\n]|$)/gi;
+    /\b(?:add|additional)\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s.-]{1,30}?)\s*(?:\|\s*|=\s*|:\s*)?(?:US\$|USD|\$)\s*([\d.,]+)(?:[\s|,;]*on\s+top\s+of\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][\w\sñ]{1,30}?))?(?=[\s.,;|\n]|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const city = (m[1] ?? "").trim().replace(/\s+/g, " ");
     const amountStr = (m[2] ?? "").trim();
-    const base = (m[3] ?? "").trim().replace(/\s+/g, " ");
-    if (!city || !base) continue;
+    // Default to Mendoza when the source omits the explicit base. The
+    // IWS Precarriage sheet uses Mendoza as the implicit anchor — every
+    // add-on is layered on top of the Mendoza FCA base. Override when
+    // the source spells out a different base.
+    const baseCaptured = (m[3] ?? "").trim().replace(/\s+/g, " ");
+    const base = baseCaptured || "Mendoza";
+    if (!city) continue;
     const amount = parseAmount(amountStr);
     if (!amount || amount <= 0) continue;
     const key = `${city.toLowerCase()}|${base.toLowerCase()}`;
     lines.set(key, `Add ${city} = US$ ${amount} on top of ${base}`);
+  }
+  if (typeof console !== "undefined") {
+    console.log(
+      `[regional-addons] scanned ${text.length} chars · ${lines.size} match${lines.size === 1 ? "" : "es"}`,
+      Array.from(lines.values())
+    );
   }
   return Array.from(lines.values());
 }

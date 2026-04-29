@@ -1227,38 +1227,6 @@ export function detectRegionalAddons(text: string): string[] {
   return Array.from(lines.values());
 }
 
-// True when a rate looks like an FCA bundle (inland trucking from
-// Mendoza / Santa Rita / Tupungato / etc. + ocean freight in one SF
-// number). Used by validateRateRange so abnormally-high SFs on FCA
-// rates aren't flagged. Matches against the rate's ruta / pol / notas
-// fields. Conservative: only fires when the FCA / inland signal is
-// explicit; misses still fall through as warnings rather than fail
-// silently.
-export function isFCARate(input: {
-  ruta?: string;
-  pol?: string;
-  notas?: string;
-}): boolean {
-  const fields = [input.ruta ?? "", input.pol ?? "", input.notas ?? ""];
-  const text = fields.join(" ");
-  if (/\bFCA\b/i.test(text)) return true;
-  if (
-    /\b(?:argentina|mendoza|santa\s+rita|tupungato|rivadavia|san\s+carlos|san\s+juan)\b/i.test(
-      input.pol ?? ""
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(?:inland|trucking\s+(?:incluido|origin|origen)|local\s+charges\s+at\s+origin|trucking\s+\+\s+ocean)\b/i.test(
-      input.notas ?? ""
-    )
-  ) {
-    return true;
-  }
-  return false;
-}
-
 // ===== Rate-range validation (sanity hard rules) =====
 //
 // Twelve-year-stable price-band heuristics for the shipping rates
@@ -1301,18 +1269,19 @@ export type RateRangeFlag = {
   message: string;
 };
 
-// Applies the RATE_RANGES band check. Skips the upper bound for FCA
-// rates (legitimate high SF when bundling inland trucking). Returns
-// null when the rate looks fine.
-export function validateRateRange(
-  rate: { tipo: string; sf: number },
-  isFCA: boolean
-): RateRangeFlag | null {
+// Applies the RATE_RANGES band check. Returns null when the rate is
+// inside the band. NOTE: the previous FCA-bundle bypass was removed
+// — Inter-Tank's data model does not infer FCA from POL / notas. High
+// SFs on legitimate FCA bundles (Arterra Argentina → Montreal SF=6680,
+// HCL FCA Santa Rita SF=2905) yield warnings the user can dismiss by
+// simply saving — they're informational, not blocking.
+export function validateRateRange(rate: {
+  tipo: string;
+  sf: number;
+}): RateRangeFlag | null {
   const band = RATE_RANGES[rate.tipo];
   if (!band) return null;
 
-  // Reefer block check first — independent of FCA, applies to both
-  // bounds (a 40'Reefer "FCA Mendoza" doesn't exist as a single SF).
   if (band.mode === "blocking") {
     if (rate.sf < band.min || rate.sf > band.max) {
       return {
@@ -1323,7 +1292,6 @@ export function validateRateRange(
     return null;
   }
 
-  // Dry / Flexi warnings.
   if (rate.sf < band.min) {
     return {
       severity: "warning",
@@ -1331,7 +1299,6 @@ export function validateRateRange(
     };
   }
   if (rate.sf > band.max) {
-    if (isFCA) return null; // FCA bundle — high SF expected
     return {
       severity: "warning",
       message: `SF=${rate.sf} por encima del máximo razonable para ${rate.tipo} (${band.max}). ¿Es bundle FCA o inland incluido?`,
@@ -1340,14 +1307,30 @@ export function validateRateRange(
   return null;
 }
 
-// Detects whether a text body has the "EBS NOT INCLUDED" stamp repeated in
-// many rows (≥3) — the canonical IWS-style remark indicating EBS is billed
-// separately via the EBS table, not bundled into SF. The threshold avoids
-// false positives from a single passing mention.
-export function detectEbsNotIncluded(text: string): boolean {
-  if (!text) return false;
-  const matches = text.match(/EBS\s+NOT\s+INCLUDED/gi);
-  return (matches?.length ?? 0) >= 3;
+// True when a string is a country / region label without a specific
+// port — emails sometimes write "Chile" / "Argentina" / "Mendoza" as
+// POL or POD when the source had no actual port name. Used by the
+// phantom-rate defense in NewRateFlow as a signal the row is likely
+// a kind that leaked into rates[]. Match is exact (after trimming /
+// lowercasing); compound strings like "Chile - Hamburg" stay safe.
+const COUNTRY_NOT_PORT = new Set([
+  "chile",
+  "argentina",
+  "arg",
+  "mendoza",
+  "brasil",
+  "brazil",
+  "peru",
+  "colombia",
+  "ecuador",
+  "uruguay",
+  "paraguay",
+  "bolivia",
+]);
+
+export function isCountryNotPort(value: string): boolean {
+  if (!value) return false;
+  return COUNTRY_NOT_PORT.has(value.trim().toLowerCase());
 }
 
 // Subsequence-of-uppercase abbreviation matcher used to surface "WR" as a

@@ -23,7 +23,6 @@ import {
   detectBundleInclusions,
   detectDisposal,
   detectDiscountInsulated,
-  detectEbsNotIncluded,
   detectRegionalAddons,
   detectThermalLinerUnsized,
   extractPreferentialClientsFromLabel,
@@ -31,8 +30,8 @@ import {
   findSimilarAgent,
   formatDateCl,
   isAsianPod,
+  isCountryNotPort,
   isDateInPast,
-  isFCARate,
   isLclSheet,
   isParsableNumber,
   isRateNeedsReview,
@@ -98,7 +97,13 @@ HARD RULES:
    - "+ EBS [USD X]" / "EBS USD X per teu/ctr/BL" / "EBS NOT INCLUDED" / "Lo unico que tenemos que SUMAR el EBS" → external. Drop from sf, add to notas: "EBS USD X — sumar aparte (no incluido en SF)". Repeat-stamps go to notas_globales.
    - "with EBS" / "includes EBS" / "EBS bundled" / "EBS included in SF" → bundled in sf, add: "EBS incluido en SF.".
    - Plain "EBS" mention without one of the above signals → DEFAULT to external (NOT bundled), add: "EBS — confirmar si suma aparte o está incluido."
-2. Thermal Liner / Thermo Liner / Insulado / Discount Insulated are CHARGES (kinds), NEVER rate rows. Emit them in the row's kinds[] field, never as an entry in rates[]. Note: 40'Reefer is a refrigerated container TYPE (rate row valid); Thermal Liner is an insulating kit installed inside a Dry container (charge only). They are conceptually distinct.
+2. The following items are CHARGES (kinds), NEVER rate rows. Emit them only in the rate's kinds[] field; do NOT also emit them as entries in rates[]:
+   - Thermal Liner / Thermo Liner / Insulado / Discount Insulated
+   - Flexitank Chile / Flexitank Argentina / Flexibag / S&F (Stuffing) Chile or Argentina / LAF Mendoza
+   - Inland / Precarriage / Haulage Mendoza / "FCA <city>" when used as a standalone catalog line (e.g. "Inland FCA Mendoza 20 = USD 2250") — that is a charge, not a transport rate
+   - Agency Fee / Agency Fee Max / Agentfee
+   - Disposal / Disposal flexibag / Cargo disposal
+   When the SAME source line appears as both a kind AND something that looks like a rate row (e.g. "Flexitank Chile = USD 600"), emit it ONLY as a kind. Do NOT duplicate as a rate. Note: 40'Reefer is a refrigerated container TYPE (rate row valid); the items above are surcharges or charges, not transport.
 3. DESCRIPTOR LABELS like "Wine/Juice loads", "Dry loads", "Reefer loads", "Cargo type X" are categorization headers that group related rates, NOT charges. NEVER emit them as kinds.
 4. Multi-carrier on one row ("OOCL or CMA", "OOCL/EVER", "Carriers: OOCL, EVER"): set sl="OOCL or CMA". DO NOT clone — frontend clones.
 5. Bundle "includes X, Y, Z" / "incluye X, Y, Z": keep sf as ONE number (do not split). Add to notas: "Incluye: <list>". Do NOT invent kinds for the inclusions.
@@ -107,7 +112,13 @@ HARD RULES:
 8. Free-day info: notas_globales.
 9. LCL content: skip entirely. Indicators: "Insulation Chile/Argentina" headers, amounts "per pallet/M3/shipment", early "OF" column, no clear POL+POD+Type triple.
 10. Date formats accepted: dd/mm/yyyy, dd/mm (no year — frontend assumes the batch year), "Fin de Junio"/"end of June" (last day of month), "March 31st", "Q2 2026", Excel datetimes. Emit dd/mm/yyyy when possible, else the original token.
-11. POL is the ocean port of loading. For FCA rates the city in "FCA <city>" is the inland pickup point, NOT the POL — keep POL as the actual ocean port (Valparaíso / San Antonio / Santos / etc.) and put the "FCA <city>" hint in notas. When POL or POD is genuinely ambiguous, emit empty string rather than guessing — the frontend flags empty values for review.
+11. POL / POD / Incoterms are LITERAL — never inferred. Only emit values that the source mentions verbatim:
+    - Source says "FOB San Antonio - Rotterdam" → POL="San Antonio", POD="Rotterdam"
+    - Source says "Manzanillo" alone → POL="Manzanillo", POD="" (do NOT guess Mexico vs Panama, do NOT add a country)
+    - Source says only "Mendoza" with no port → leave POL empty and put "Mendoza" / "FCA Mendoza" hint in that rate's notas
+    - Source has no POL/POD at all → emit empty strings. Do NOT invent Valparaíso, Santos, etc. The frontend flags empty values for the user to fill.
+    Never write a country name (Chile / Argentina / Brasil / Mendoza-as-region) as POL or POD. If you only know the country, the value is empty.
+12. Bundle inclusions (rule 5) preserve Incoterms LITERALLY: when the source says "FCA Santa Rita ... includes trucking, locales, flexitank, OF + EBS", emit notas like "Incluye: trucking en origen, gastos locales en origen, flexitank, ocean freight. FCA." Same for FOB / CFR / CIF. The Incoterm at the end is critical — it indicates whether the SF includes inland trucking. Only include the Incoterm if it appears literal in the source for that rate.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -146,9 +157,9 @@ NEVER emit just "Dry" or "Reefer" without size. Two-size rows split into two Rat
 
 HARD RULES:
 1. EBS = EFS. NEVER include them in sf. Default interpretation: external (not bundled). "+ EBS" / "EBS NOT INCLUDED" / "EBS USD X per teu" → drop from sf, add "EBS USD X — sumar aparte" to notas. "with EBS" / "includes EBS" → bundled, add "EBS incluido en SF.".
-2. Thermal Liner / Thermo Liner / Insulado / Discount Insulated are CHARGES, NEVER rate rows. Emit them in kinds[], not in rates[].
+2. The following are CHARGES (kinds), NEVER rate rows: Thermal Liner / Insulado / Discount Insulated, Flexitank Chile / Argentina, Flexibag / S&F / LAF Mendoza, Inland / Precarriage / Haulage Mendoza / standalone "FCA <city>" charge lines, Agency Fee / Max, Disposal. Emit them in kinds[]. Never duplicate as rate rows in rates[].
 3. Multi-carrier on one row: set sl="OOCL or CMA". DO NOT clone.
-4. Bundle "includes X, Y, Z": keep sf as one number. Add "Incluye: <list>" to notas.
+4. Bundle "includes X, Y, Z": keep sf as one number. Add "Incluye: <list>" to notas. Preserve FCA / FOB Incoterms at the end of the notas string when the source mentions them literally.
 5. LCL rows: skip entirely.
 6. Compound SF cells like "USD 2540 + USD 60 BL Fee" or "2540/60": parse first number as sf, second as bl_fee.
 7. Any cell whose value reads "USD X per BL" / "USD X xbl" / "USD X / BL" / "USD X per bl" — regardless of column header — IS the rate's bl_fee. Example: a column "(Surcharge 1)" with value "USD 38 per bl" → bl_fee=38, NOT a kind. Multiple per-BL surcharges in the same row → sum them into bl_fee.
@@ -180,7 +191,7 @@ RULES:
 - Use value20 + value40 when the source distinguishes sizes; otherwise use value_unique.
 - For discounts ("discount of USD 25 if insulated"), emit value_unique as a NEGATIVE number.
 - "Thermal Liner = USD X" without size → value_unique: X. Frontend will copy to both 20' and 40'.
-- Free-form market context, free days, regional add-ons → notas_globales (NOT as kinds).
+- Regional add-ons ("Add San Carlos US$ 200 on top of Mendoza") → notas_globales (the frontend's regex sweep also captures these). Other free-form context (market changes, free days, EBS-not-included repeat-stamps, "all water via Caucedo", etc.) is NOT relevant to billing — leave notas_globales empty for those. The user's textarea defaults to empty; only add-ons fill it.
 - If a charge's value is literally "Included" / "Incl." / "Bundled" / "N/A" (no number), do NOT emit a kind for it — that means it's bundled. Mention in notas_globales if relevant ("BAF incluido en SF.").
 - CONSOLIDATION: when the same charge appears across multiple rows split by container size (e.g. "FCA Mendoza | 20'Flexi | 2170", "FCA Mendoza | 20'DC | 2170", "FCA Mendoza | 40'DC | 2270"), emit ONE kind entry. Drop the size token from the label ("FCA Mendoza", not "FCA 40'DC Mendoza") and populate value20 / value40 from the size-tagged rows. When two size-20 rows give the same value, use it once.
 - ADD-ONS: rows like "Add San Carlos US$ 200 on top of Mendoza" / "Additional Rivadavia US$ 100" are regional add-ons, NOT kinds. Skip them — frontend captures them via a regex sweep into notas_globales.
@@ -1477,32 +1488,27 @@ export default function NewRateFlow({
       const preferentialLines = consolidatePreferentialNotes(
         detected.preferentialEntries
       );
-      // Regex sweeps for free-text patterns the structured extraction passes
-      // commonly miss: regional add-ons ("Add / Additional San Carlos US$ 200
-      // on top of Mendoza"), IWS-style "EBS NOT INCLUDED" repeat-stamp,
-      // etc. Includes pasteText / docxText as source so emails get the
-      // same sweep coverage Excel sheets already had.
+      // Regex sweep for the only free-text pattern that's billing-
+      // relevant: regional add-ons ("Add / Additional San Carlos US$ 200
+      // on top of Mendoza"). Other context that the structured prompts
+      // sometimes emit (free days, market changes, EBS-not-included
+      // repeat-stamps, "all water via Caucedo") is operationally
+      // useful but does not affect the rate amounts we charge — the
+      // textarea defaults to empty so the user only sees content
+      // they care about.
       const fullText = [
         excelText,
         excelKindsBlock,
         pasteText,
         docxText,
-        extracted.notas_globales ?? "",
-        extraNotas,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
       ]
         .filter(Boolean)
         .join("\n");
       const regionalAddons = detectRegionalAddons(fullText);
-      const ebsNotIncludedLine = detectEbsNotIncluded(fullText)
-        ? "EBS no incluido en SF (se factura aparte vía Tabla EBS)."
-        : "";
       const combinedNotasGlobales = [
         ...preferentialLines,
         ...regionalAddons,
-        ebsNotIncludedLine,
-        extracted.notas_globales,
-        extraNotas,
       ]
         .filter((s) => s && s.trim())
         .join("\n")
@@ -1621,30 +1627,21 @@ export default function NewRateFlow({
         // Range-band check. Reefer SFs outside 999-10000 are blocked
         // (almost always typos or Thermal Liner kind values misread as
         // a rate row); Dry/Flexi out-of-range yield warnings the user
-        // can override. FCA bundles bypass the upper-bound check.
-        const fcaContext = isFCARate({
-          ruta: route,
-          pol,
-          notas: noteParts.join("\n"),
+        // can dismiss by simply saving.
+        let rangeFlag: RateRangeFlag | null = validateRateRange({
+          tipo: tipoOut.tipo,
+          sf: sfNum,
         });
-        let rangeFlag: RateRangeFlag | null = validateRateRange(
-          { tipo: tipoOut.tipo, sf: sfNum },
-          fcaContext
-        );
 
-        // Bug S frontend defense: if a 40'Reefer rate's SF exactly
-        // matches an insulado_* kind value AND the rate has weak
-        // identifying info (empty carrier or POL or POD), assume it's a
-        // Thermal Liner row that leaked into rates[]. Promote to
-        // blocking with an explanatory message. Keeps legitimate
-        // 40'Reefer rates that happen to match by coincidence safe by
-        // requiring weak identifiers.
-        if (
-          tipoOut.tipo === "40'Reefer" &&
-          (!carrier.trim() || !pol.trim() || !pod.trim())
-        ) {
+        // Phantom-rate defense (generalized Fix B): when a rate row has
+        // an empty carrier AND its sf exactly matches a detected kind
+        // value, treat it as a kind that leaked into rates[]. Covers
+        // Flexitank Chile/Arg → 20'Flexi phantom, Inland FCA Mendoza →
+        // 20'Dry/40'Dry phantom, Insulado → 40'Reefer phantom, Agency
+        // Fee → phantom, etc. Carrier-empty is the strong signal —
+        // legitimate rates always have a carrier.
+        if (!carrier.trim()) {
           for (const def of detected.kinds) {
-            if (!def.id.startsWith("insulado_")) continue;
             const kv = detected.kindValues.find((v) => v.kind_id === def.id);
             if (!kv) continue;
             if (
@@ -1652,13 +1649,35 @@ export default function NewRateFlow({
               kv.value40 === sfNum ||
               kv.value_unique === sfNum
             ) {
+              const matchedValue =
+                kv.value20 === sfNum
+                  ? `${kv.value20} (20')`
+                  : kv.value40 === sfNum
+                    ? `${kv.value40} (40')`
+                    : `${kv.value_unique}`;
               rangeFlag = {
                 severity: "blocking",
-                message: `SF=${sfNum} matchea el kind ${def.label} y la rate tiene carrier/POL/POD vacíos. Probable Thermal Liner extraído como rate fantasma — verificá tipo y monto antes de guardar.`,
+                message: `SF=${sfNum} matchea el kind ${def.label} = ${matchedValue} y la rate tiene carrier vacío. Probable kind extraído como rate fantasma — verificá tipo, ruta y monto antes de guardar.`,
               };
               break;
             }
           }
+        }
+
+        // Phantom-rate defense (Fix C): emails sometimes have POL/POD
+        // emitted as a country / region label ("Chile", "Argentina",
+        // "Mendoza") when the source had no actual port. Block those —
+        // a real rate always has a port name. The user can edit the
+        // POL/POD inline to clear the flag if it's a legitimate rate
+        // they want to save.
+        if (!rangeFlag && (isCountryNotPort(pol) || isCountryNotPort(pod))) {
+          const offending = isCountryNotPort(pol)
+            ? `POL="${pol}"`
+            : `POD="${pod}"`;
+          rangeFlag = {
+            severity: "blocking",
+            message: `${offending} es un país / región, no un puerto. Probable POL/POD inferido erróneamente — completá con el puerto real o eliminá la rate.`,
+          };
         }
 
         if (rangeFlag) {

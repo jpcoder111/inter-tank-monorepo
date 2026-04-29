@@ -93,10 +93,7 @@ genuinely ambiguous, default to "20'Dry" and append to \`notas\`:
 "Tamaño no especificado, asumido 20'."
 
 HARD RULES:
-1. EBS = EFS. NEVER include them in sf or as a kind. The DEFAULT interpretation when EBS / EFS appears is that it is NOT included in sf — it's an external surcharge billed separately. Disambiguate by phrasing:
-   - "+ EBS [USD X]" / "EBS USD X per teu/ctr/BL" / "EBS NOT INCLUDED" / "Lo unico que tenemos que SUMAR el EBS" → external. Drop from sf, add to notas: "EBS USD X — sumar aparte (no incluido en SF)". Repeat-stamps go to notas_globales.
-   - "with EBS" / "includes EBS" / "EBS bundled" / "EBS included in SF" → bundled in sf, add: "EBS incluido en SF.".
-   - Plain "EBS" mention without one of the above signals → DEFAULT to external (NOT bundled), add: "EBS — confirmar si suma aparte o está incluido."
+1. EBS / EFS / BAF / Emergency Bunker Surcharge are ALWAYS billed separately via Inter-Tank's EBS table. NEVER include them in sf and DO NOT emit any note about them — drop silently. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60. The mention is noise to ignore.
 2. The following items are CHARGES (kinds), NEVER rate rows. Emit them only in the rate's kinds[] field; do NOT also emit them as entries in rates[]:
    - Thermal Liner / Thermo Liner / Insulado / Discount Insulated
    - Flexitank Chile / Flexitank Argentina / Flexibag / S&F (Stuffing) Chile or Argentina / LAF Mendoza
@@ -161,7 +158,7 @@ Each rate row encodes ONE container size + ONE category in \`type\`:
 NEVER emit just "Dry" or "Reefer" without size. Two-size rows split into two RateRows.
 
 HARD RULES:
-1. EBS = EFS. NEVER include them in sf. Default interpretation: external (not bundled). "+ EBS" / "EBS NOT INCLUDED" / "EBS USD X per teu" → drop from sf, add "EBS USD X — sumar aparte" to notas. "with EBS" / "includes EBS" → bundled, add "EBS incluido en SF.".
+1. EBS / EFS / BAF / Emergency Bunker Surcharge are ALWAYS billed separately via Inter-Tank's EBS table. NEVER include them in sf and DO NOT emit notes about them — drop silently. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60.
 2. The following are CHARGES (kinds), NEVER rate rows: Thermal Liner / Insulado / Discount Insulated, Flexitank Chile / Argentina, Flexibag / S&F / LAF Mendoza, Inland / Precarriage / Haulage Mendoza / standalone "FCA <city>" charge lines, Agency Fee / Max, Disposal. Emit them in kinds[]. Never duplicate as rate rows in rates[].
 3. Multi-carrier on one row: set sl="OOCL or CMA". DO NOT clone.
 4. Bundle "includes X, Y, Z": keep sf as one number. Add "Incluye: <list>" to notas. Preserve FCA / FOB Incoterms at the end of the notas string when the source mentions them literally.
@@ -1613,24 +1610,9 @@ export default function NewRateFlow({
         if (blFeeMissing && !isAsianPod(pod)) {
           noteParts.push("⚠️ BL Fee no detectado — confirmar con el agente.");
         }
-        if (!carrier.trim()) {
-          noteParts.push("⚠️ Carrier no detectado — completar manualmente.");
-        }
-        // EBS ambiguity defense (Bug Ñ): if EBS / EFS is mentioned but
-        // none of the disambiguating tokens appear, default to a
-        // "confirm" annotation. The rate's notas already contain Claude's
-        // emitted text — this only fires when the prompt's logic didn't
-        // attach a clear marker.
-        if (
-          /\b(?:ebs|efs)\b/i.test(noteParts.join("\n")) &&
-          !/(no\s+incluid|sumar\s+aparte|aparte|external|incluid[oa]|bundled|with\s+ebs|includes\s+ebs)/i.test(
-            noteParts.join("\n")
-          )
-        ) {
-          noteParts.push(
-            "⚠️ EBS — confirmar si suma aparte o está incluido en SF."
-          );
-        }
+        // EBS / EFS / BAF mentions in extracted notes are noise — Inter-
+        // Tank always bills them separately via the EBS table. No note
+        // is emitted; nothing to defend frontend-side.
 
         // Expired-validity note is a BATCH-level concern. The flag
         // lands on every row only because we don't have a separate
@@ -1722,7 +1704,36 @@ export default function NewRateFlow({
           batchYearHint
         );
         const carrierMissing = !carrier.trim();
-        const isBlocking = rangeFlag?.severity === "blocking";
+        // Carrier is REQUIRED. Empty carrier is now a hard block — Inter-
+        // Tank doesn't accept rates without one. The user fixes it via
+        // the inline edit row (Carrier dropdown + free-typing). When the
+        // carrier becomes non-empty, updatePreviewField clears the
+        // blocking flag so the row can be saved.
+        let blockingMessage: string | null = null;
+        let blockingType: string | null = null;
+        if (rangeFlag?.severity === "blocking") {
+          blockingMessage = rangeFlag.message;
+          // Track the source of the block so updatePreviewField can
+          // re-evaluate when the user edits the offending field.
+          if (
+            rangeFlag.message.includes("kind") &&
+            rangeFlag.message.includes("rate fantasma")
+          ) {
+            blockingType = "phantom_kind";
+          } else if (
+            rangeFlag.message.includes("país") ||
+            rangeFlag.message.includes("región")
+          ) {
+            blockingType = "country_not_port";
+          } else if (rangeFlag.message.includes("Reefer")) {
+            blockingType = "reefer_range";
+          }
+        }
+        if (carrierMissing && !blockingMessage) {
+          blockingMessage =
+            "Carrier requerido — completá manualmente para guardar.";
+          blockingType = "carrier_missing";
+        }
         return {
           carrier,
           pol,
@@ -1733,10 +1744,10 @@ export default function NewRateFlow({
           sf: sfNum,
           blFee: blFeeNum,
           notes: finalNotes,
-          _needsReview: needsReview || carrierMissing,
-          _blockingError:
-            rangeFlag?.severity === "blocking" ? rangeFlag.message : null,
-          _uncheckByDefault: carrierMissing || isBlocking,
+          _needsReview: needsReview,
+          _blockingError: blockingMessage,
+          _blockingType: blockingType,
+          _uncheckByDefault: !!blockingMessage,
         };
       });
 
@@ -1943,7 +1954,34 @@ export default function NewRateFlow({
   const updatePreviewField = (idx: number, field: string, value: unknown) => {
     setPreviewRows((prev) => {
       const next = prev.slice();
-      next[idx] = { ...next[idx], [field]: value };
+      const updated: Record<string, unknown> = { ...next[idx], [field]: value };
+      // Re-evaluate the blocking flag when the user fills the
+      // offending field inline. carrier_missing → cleared as soon as
+      // the carrier input is non-empty. country_not_port → cleared
+      // when both POL and POD have non-country port names.
+      const blockingType = updated._blockingType;
+      if (blockingType === "carrier_missing") {
+        const c = String(updated.carrier ?? "").trim();
+        if (c) {
+          updated._blockingError = null;
+          updated._blockingType = null;
+          updated._uncheckByDefault = false;
+        }
+      } else if (blockingType === "country_not_port") {
+        const newPol = String(updated.pol ?? "").trim();
+        const newPod = String(updated.pod ?? "").trim();
+        if (
+          newPol &&
+          newPod &&
+          !isCountryNotPort(newPol) &&
+          !isCountryNotPort(newPod)
+        ) {
+          updated._blockingError = null;
+          updated._blockingType = null;
+          updated._uncheckByDefault = false;
+        }
+      }
+      next[idx] = updated;
       return next;
     });
   };
@@ -3113,7 +3151,7 @@ function PreviewStep({
                       <td colSpan={colCount} className="px-3 py-3">
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                           <RowField
-                            label="Carrier"
+                            label="Carrier *"
                             row={r}
                             field="carrier"
                             onChange={onUpdateField}

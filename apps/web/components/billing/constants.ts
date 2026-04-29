@@ -10,12 +10,17 @@ export const AGENT_SUGGESTIONS = [
 
 export const CARRIER_SUGGESTIONS = [
   "OOCL",
-  "HAPAG",
+  "Hapag",
   "CMA-CGM",
-  "PIL",
-  "COSCO",
-  "Evergreen",
   "MSC",
+  "Evergreen",
+  "COSCO",
+  "ONE",
+  "Maersk",
+  "ZIM",
+  "HMM",
+  "Yang Ming",
+  "PIL",
 ] as const;
 
 // Canonical container-type literals used by the v3 schema. Each rate row

@@ -2153,6 +2153,21 @@ export default function NewRateFlow({
       ]
         .filter(Boolean)
         .join("\n");
+      // Pre-call telemetry — proves we reached the regional-addons call
+      // site at all, paired with the entry log inside the function. If
+      // this log fires but the function's CALLED log does not, the
+      // problem is the import binding or a stale bundle; if neither
+      // fires, the problem is upstream (we never reached this code).
+      if (typeof console !== "undefined") {
+        console.log("[regional-addons] about to call", {
+          fullTextLength: fullText.length,
+          excelText: excelText.length,
+          kindsBlockFinal: cleanedExcelKindsBlockFinal.length,
+          paste: cleanedPasteTextFinal.length,
+          docx: cleanedDocxTextFinal.length,
+          ratesNotasCount: extracted.rates.length,
+        });
+      }
       const regionalAddons = detectRegionalAddons(fullText);
       if (regionalAddons.length > 0 && typeof console !== "undefined") {
         console.log(

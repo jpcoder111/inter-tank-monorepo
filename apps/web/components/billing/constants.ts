@@ -2074,6 +2074,18 @@ export function detectDisposal(text: string): number | null {
 //   - telemetry log inside the function so smoke testing can confirm
 //     input shape without instrumenting every callsite
 export function detectRegionalAddons(text: string): string[] {
+  // Entry telemetry — fires UNCONDITIONALLY before any early return so we
+  // can prove the function was entered even when text is empty / undefined.
+  // Smoke-test follow-up: previous "scanned X chars" log was AFTER the
+  // empty-text early return, so a missing log was ambiguous between "not
+  // called at all" and "called with empty text". This separates the two.
+  if (typeof console !== "undefined") {
+    console.log(
+      `[regional-addons] CALLED with text length: ${
+        typeof text === "string" ? text.length : "not-a-string"
+      }`
+    );
+  }
   if (!text) {
     if (typeof console !== "undefined") {
       console.log("[regional-addons] empty input — 0 matches");

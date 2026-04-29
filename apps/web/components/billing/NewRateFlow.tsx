@@ -28,6 +28,7 @@ import {
   extractPreferentialClientsFromLabel,
   extractSizeFromKindLabel,
   findSimilarAgent,
+  formatBatchVigencia,
   formatDateCl,
   formatRoute,
   inferIncotermFromContext,
@@ -3117,7 +3118,8 @@ function PreviewStep({
         <div>
           <strong>Vigencia:</strong>{" "}
           {validity
-            ? `${formatDateCl(validity.validFrom)} — ${
+            ? formatBatchVigencia(validity.validFrom, validity.validTo) ||
+              `${formatDateCl(validity.validFrom)} — ${
                 validity.validTo ? formatDateCl(validity.validTo) : "sin fin"
               }`
             : "—"}

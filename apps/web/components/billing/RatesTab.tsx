@@ -16,6 +16,7 @@ import {
   ValidityStatus,
   agentColor,
   carrierColor,
+  formatBatchVigencia,
   formatDateCl,
   formatRoute,
   getValidityStatus,
@@ -113,11 +114,35 @@ type AgentSummary = {
   active: number;
   soon: number;
   expired: number;
+  // Most-common (validFrom, validTo) pair across the agent's rates,
+  // formatted via formatBatchVigencia ("Q2 2026" / "15/04/2026 –
+  // 30/06/2026"). Empty when no rate carries validity dates.
+  vigenciaLabel: string;
+  // Status of the dominant vigencia: drives pill color.
+  vigenciaStatus: ValidityStatus;
+  // True when the agent has rates with multiple distinct (from, to)
+  // pairs — happens for legacy data; post-v3.2 batches are uniform.
+  vigenciaIsMixed: boolean;
 };
 
 function summarizeAgent(agent: string, rates: Rate[]): AgentSummary {
   const counts: Record<ValidityStatus, number> = { active: 0, soon: 0, expired: 0 };
   for (const r of rates) counts[getValidityStatus(r.validTo)]++;
+  // Determine the dominant validity pair (most-common across rates).
+  const validityCounts = new Map<string, number>();
+  for (const r of rates) {
+    const key = `${r.validFrom ?? ""}|${r.validTo ?? ""}`;
+    if (key === "|") continue;
+    validityCounts.set(key, (validityCounts.get(key) ?? 0) + 1);
+  }
+  const sortedValidity = Array.from(validityCounts.entries()).sort(
+    (a, b) => b[1] - a[1]
+  );
+  const dominantKey = sortedValidity[0]?.[0] ?? "";
+  const [domFrom = "", domTo = ""] = dominantKey.split("|");
+  const vigenciaLabel = formatBatchVigencia(domFrom, domTo);
+  const vigenciaStatus = domTo ? getValidityStatus(domTo) : "active";
+  const vigenciaIsMixed = sortedValidity.length > 1;
   return {
     agent,
     rates,
@@ -126,6 +151,9 @@ function summarizeAgent(agent: string, rates: Rate[]): AgentSummary {
     active: counts.active,
     soon: counts.soon,
     expired: counts.expired,
+    vigenciaLabel,
+    vigenciaStatus,
+    vigenciaIsMixed,
   };
 }
 
@@ -441,6 +469,34 @@ export default function RatesTab() {
                         <span className="font-medium">{g.topRoutes.join(", ")}</span>
                       </span>
                     )}
+                    {g.vigenciaLabel && (() => {
+                      const isExpired = g.vigenciaStatus === "expired";
+                      const isSoon = g.vigenciaStatus === "soon";
+                      const cls = isExpired
+                        ? "bg-orange-50 text-orange-800 border-orange-200"
+                        : isSoon
+                          ? "bg-yellow-50 text-yellow-800 border-yellow-200"
+                          : "bg-gray-100 text-gray-700 border-gray-200";
+                      const suffix = isExpired
+                        ? " (vencido)"
+                        : isSoon
+                          ? " (vence <30d)"
+                          : "";
+                      return (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${cls}`}
+                          title={
+                            g.vigenciaIsMixed
+                              ? "El agente tiene rates con vigencias mixtas — se muestra la dominante"
+                              : "Vigencia del batch"
+                          }
+                        >
+                          📅 {g.vigenciaLabel}
+                          {suffix}
+                          {g.vigenciaIsMixed ? " · mixto" : ""}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <div className="flex flex-wrap items-center gap-1">
                     {g.active > 0 && (

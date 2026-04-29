@@ -133,20 +133,27 @@ export function agentColor(agent: string): string {
 }
 
 // Colores institucionales suaves por naviera. Se usan como fondo de fila en
-// EbsTab y como chip/cell highlight en el resto de la app donde aparece la
-// naviera.
+// EbsTab y como chip/cell highlight en RatesTab + Step 2 de NewRateFlow.
+// Reglas: tonos pastel salvo Maersk (celeste fuerte, única excepción —
+// pedido del usuario para que destaque). Prohibidos: rojo (reservado a
+// blocking errors), amarillo (warnings), verde saturado (vigente). Cada
+// color tiene que ser visualmente distinguible de los demás — la
+// confusión histórica entre Evergreen y OOCL la causaba un default
+// genérico que ya no existe.
 export const CARRIER_COLORS: Record<string, string> = {
-  OOCL: "#e8eaed",
-  HAPAG: "#fff0e0",
-  "CMA-CGM": "#e8f0fe",
-  "CMA CGM": "#e8f0fe",
-  MSC: "#f5f0e8",
-  Evergreen: "#e0f2e0",
-  PIL: "#fde0e0",
-  ONE: "#fce4ec",
-  "Yang Ming": "#e8f5e9",
-  COSCO: "#e0f0f0",
-  ZIM: "#e8e0f0",
+  OOCL: "#e8eaed",        // gris claro
+  Hapag: "#fff0e0",       // naranja melón claro
+  "CMA-CGM": "#e8f0fe",   // celeste pálido
+  MSC: "#f5f0e8",         // beige crema
+  Evergreen: "#e0f2e0",   // verde menta claro
+  ONE: "#fce4ec",         // rosa claro
+  PIL: "#ede1f5",         // lila / violeta claro (era rojizo, cambia)
+  "Yang Ming": "#d6dfca", // verde musgo apagado (era verde claro, cambia)
+  Maersk: "#93c5fd",      // celeste FUERTE — única excepción a "pasteles"
+  COSCO: "#fde2cf",       // durazno claro
+  ZIM: "#ddd5e8",         // lavanda gris
+  HMM: "#d6e4f0",         // azul-gris claro
+  "Wan Hai": "#d3f0e9",   // mint aqua
 };
 
 export const CARRIER_COLOR_FALLBACK = "#f3f4f6";
@@ -2244,6 +2251,42 @@ export function formatDateCl(value: string | null | undefined): string {
     return `${d!.padStart(2, "0")}/${m!.padStart(2, "0")}/${y}`;
   }
   return trimmed;
+}
+
+// Detects when a (validFrom, validTo) ISO range coincides exactly with one
+// of the four calendar quarters of a year and returns "Q2 2026" or
+// similar. Falls back to "dd/mm/yyyy – dd/mm/yyyy" when the range doesn't
+// align to a quarter boundary. Returns empty string when either side is
+// missing — caller decides whether to render a pill or skip.
+export function formatBatchVigencia(
+  validFrom: string | null | undefined,
+  validTo: string | null | undefined
+): string {
+  const from = (validFrom ?? "").trim();
+  const to = (validTo ?? "").trim();
+  if (!from || !to) return "";
+  const isoFrom = from.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  const isoTo = to.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoFrom && isoTo) {
+    const yearFrom = isoFrom[1];
+    const yearTo = isoTo[1];
+    if (yearFrom === yearTo) {
+      const fromKey = `${isoFrom[1]}-${isoFrom[2]!.padStart(2, "0")}-${isoFrom[3]!.padStart(2, "0")}`;
+      const toKey = `${isoTo[1]}-${isoTo[2]!.padStart(2, "0")}-${isoTo[3]!.padStart(2, "0")}`;
+      const QUARTERS: Record<string, [string, string]> = {
+        Q1: [`${yearFrom}-01-01`, `${yearFrom}-03-31`],
+        Q2: [`${yearFrom}-04-01`, `${yearFrom}-06-30`],
+        Q3: [`${yearFrom}-07-01`, `${yearFrom}-09-30`],
+        Q4: [`${yearFrom}-10-01`, `${yearFrom}-12-31`],
+      };
+      for (const [q, [qFrom, qTo]] of Object.entries(QUARTERS)) {
+        if (fromKey === qFrom && toKey === qTo) {
+          return `${q} ${yearFrom}`;
+        }
+      }
+    }
+  }
+  return `${formatDateCl(from)} – ${formatDateCl(to)}`;
 }
 
 export function uniqueSuggestions(

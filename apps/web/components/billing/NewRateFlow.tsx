@@ -41,6 +41,7 @@ import {
   isLclSheet,
   isParsableNumber,
   isRateNeedsReview,
+  isValidDate,
   matchKindByAlias,
   migrateContainerType,
   parseMultiCarrier,
@@ -1066,6 +1067,160 @@ function sweepKindsFromText(
   return { kinds: newKinds, kindValues: newValues };
 }
 
+// Builds the prefix shown in the Notas column of Step 2 / RatesTab so the
+// user sees WHY a row is red (blocking) or amber (warning) without
+// opening the modal. Reasons for warnings are derived from the row's
+// current values (sf, blFee, pod, tipo) plus the batch validity — not
+// from the rate.notes string. Blocking always wins; placeholder
+// Incoterm "FOB/CIF/CFR" is intentionally NEVER a warning reason.
+function buildWarningPrefix(
+  row: Record<string, unknown>,
+  batchValidity: { validFrom?: string; validTo?: string } | null
+): { prefix: string; severity: "blocking" | "warning" | null } {
+  const blockingError = String(row._blockingError ?? "").trim();
+  if (blockingError) {
+    return { prefix: `🚫 ${blockingError}`, severity: "blocking" };
+  }
+  if (row._needsReview !== true) {
+    return { prefix: "", severity: null };
+  }
+  const reasons: string[] = [];
+  const pod = String(row.pod ?? "");
+  const tipo = String(row.tipo ?? "");
+  const sfVal = row.sf;
+  const blFeeVal = row.blFee;
+  const sfNum = typeof sfVal === "number" ? sfVal : Number(sfVal);
+  const blFeeNum = typeof blFeeVal === "number" ? blFeeVal : Number(blFeeVal);
+
+  if (!Number.isFinite(sfNum)) {
+    reasons.push("SF faltante en archivo");
+  } else if (sfNum <= 0 && !isAsianPod(pod)) {
+    reasons.push("SF ≤ 0 con POD no asiático");
+  }
+
+  if (Number.isFinite(blFeeNum) && blFeeNum <= 0) {
+    const isReefer = tipo === "40'Reefer";
+    if (!isAsianPod(pod) || isReefer) {
+      reasons.push("BL Fee ≤ 0 — revisar");
+    }
+  } else if (!Number.isFinite(blFeeNum)) {
+    reasons.push("BL Fee no detectado");
+  }
+
+  const batchTo = batchValidity?.validTo ?? "";
+  if (batchTo && isDateInPast(batchTo)) {
+    reasons.push("Validez del batch vencida");
+  } else if (!batchTo || !isValidDate(batchTo)) {
+    reasons.push("Validez del batch inválida");
+  }
+
+  // Tipo coerced is already surfaced via the row's notas (the row
+  // converter pushes "Tipo no estándar..." into notes), so we don't
+  // duplicate here.
+
+  if (reasons.length === 0) {
+    return {
+      prefix: "⚠️ Revisar — motivo no especificado",
+      severity: "warning",
+    };
+  }
+  return { prefix: `⚠️ ${reasons.join(" · ")}`, severity: "warning" };
+}
+
+// Recomputes the flag set on a preview row when something at the batch
+// level changed (validity, kinds) — without re-calling the LLM. Used
+// by the useEffect that watches effectiveValidity so a user who clicks
+// Procesar before picking Q2 can fix the batch validity afterwards and
+// see all rows un-flag instantly.
+function recomputeRowFlags(
+  row: Record<string, unknown>,
+  effectiveValidity: { validFrom: string; validTo: string } | null,
+  batchKinds: KindDef[],
+  batchKindValues: KindValue[],
+  batchYearHint: number
+): Record<string, unknown> {
+  const carrier = String(row.carrier ?? "").trim();
+  const pol = String(row.pol ?? "").trim();
+  const pod = String(row.pod ?? "").trim();
+  const tipo = String(row.tipo ?? "");
+  const sfNum = Number(row.sf ?? 0);
+  const blFeeNum = Number(row.blFee ?? 0);
+  const sfParseable = isParsableNumber(row.sf);
+  const blFeeParseable = isParsableNumber(row.blFee);
+
+  // Recompute blocking in priority order matching the row converter.
+  let blockingMessage: string | null = null;
+  let blockingType: string | null = null;
+
+  const range = validateRateRange({ tipo, sf: sfNum });
+  if (range?.severity === "blocking") {
+    blockingMessage = range.message;
+    blockingType = "reefer_range";
+  }
+  if (!blockingMessage && !carrier) {
+    for (const def of batchKinds) {
+      const kv = batchKindValues.find((v) => v.kind_id === def.id);
+      if (!kv) continue;
+      if (
+        kv.value20 === sfNum ||
+        kv.value40 === sfNum ||
+        kv.value_unique === sfNum
+      ) {
+        const matchedValue =
+          kv.value20 === sfNum
+            ? `${kv.value20} (20')`
+            : kv.value40 === sfNum
+              ? `${kv.value40} (40')`
+              : `${kv.value_unique}`;
+        blockingMessage = `SF=${sfNum} matchea el kind ${def.label} = ${matchedValue} y la rate tiene carrier vacío. Probable kind extraído como rate fantasma — verificá tipo, ruta y monto antes de guardar.`;
+        blockingType = "phantom_kind";
+        break;
+      }
+    }
+  }
+  if (!blockingMessage && (isCountryNotPort(pol) || isCountryNotPort(pod))) {
+    const offending = isCountryNotPort(pol)
+      ? `POL="${pol}"`
+      : `POD="${pod}"`;
+    blockingMessage = `${offending} es un país / región, no un puerto. Probable POL/POD inferido erróneamente — completá con el puerto real o eliminá la rate.`;
+    blockingType = "country_not_port";
+  }
+  if (!blockingMessage && !carrier) {
+    blockingMessage =
+      "Carrier requerido — completá manualmente para guardar.";
+    blockingType = "carrier_missing";
+  }
+  if (!blockingMessage && !pod) {
+    blockingMessage =
+      "Puerto de destino (POD) requerido — completá manualmente para guardar.";
+    blockingType = "pod_missing";
+  }
+
+  const tipoCoerced = !(CONTAINER_TYPES as readonly string[]).includes(tipo);
+  const needsReview = isRateNeedsReview(
+    {
+      pol,
+      pod,
+      tipo,
+      tipoCoerced,
+      sfNum,
+      blFeeNum,
+      sfParseable,
+      blFeeParseable,
+    },
+    effectiveValidity,
+    batchYearHint
+  );
+
+  return {
+    ...row,
+    _needsReview: needsReview || !!blockingMessage,
+    _blockingError: blockingMessage,
+    _blockingType: blockingType,
+    _uncheckByDefault: !!blockingMessage,
+  };
+}
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -1205,6 +1360,13 @@ export default function NewRateFlow({
   const [extractionDone, setExtractionDone] = useState(isEditMode);
   const [extractionInfo, setExtractionInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Validation modal shown when the user clicks "Procesar archivo" without
+  // filling the required batch fields (agent + validity). The modal lists
+  // the missing fields and focuses the offending input on close.
+  const [validationModal, setValidationModal] = useState<{
+    fields: string[];
+    focusTarget: "agent" | "validity";
+  } | null>(null);
 
   // Validity resolution from user inputs alone (Step 1 dates/quarter pickers).
   const resolvedValidity = useMemo(() => {
@@ -1429,6 +1591,25 @@ export default function NewRateFlow({
   };
 
   // ---- Step 1: process file/text → populate kinds + preview rows ----
+  // Wrapper for the "Procesar archivo" button. Validates that the batch
+  // has agent + validity filled BEFORE running the (paid) extraction —
+  // otherwise the rates that come back inherit empty defaults and every
+  // row gets flagged for stale reasons. A modal walks the user through
+  // the missing fields and focuses the first one on dismiss.
+  const handleProcessClick = () => {
+    const missing: string[] = [];
+    if (!effectiveAgent.trim()) missing.push("agente");
+    if (!effectiveValidity) missing.push("validez");
+    if (missing.length > 0) {
+      setValidationModal({
+        fields: missing,
+        focusTarget: missing[0] === "agente" ? "agent" : "validity",
+      });
+      return;
+    }
+    void processInput();
+  };
+
   // Pipeline: extract → detect kinds → second-pass kinds from right block →
   // sweep free-text → expand multi-carrier → apply user-input precedence for
   // agent/validity → flag negative SF → set previewRows. The user reviews the
@@ -2168,6 +2349,36 @@ export default function NewRateFlow({
     return { total, ok: total - needsReview, needsReview };
   }, [previewRows]);
 
+  // Live re-evaluation of preview-row flags whenever the batch validity
+  // changes. The user might have clicked Procesar before picking Q2, then
+  // selected the quarter afterwards — without this effect the rows stay
+  // stuck at their original flags ("Validez del batch vencida" yellow on
+  // every row) until they re-process, which costs an LLM call. The
+  // recompute only updates flag fields, never touches the extracted
+  // values or notas, so it's safe to run on every validity tweak.
+  useEffect(() => {
+    if (!extractionDone) return;
+    if (previewRows.length === 0) return;
+    const batchYearHint =
+      (effectiveValidity?.validTo &&
+        parseInt(effectiveValidity.validTo.slice(0, 4), 10)) ||
+      (effectiveValidity?.validFrom &&
+        parseInt(effectiveValidity.validFrom.slice(0, 4), 10)) ||
+      new Date().getFullYear();
+    setPreviewRows((prev) =>
+      prev.map((row) =>
+        recomputeRowFlags(
+          row,
+          effectiveValidity,
+          batchKinds,
+          batchKindValues,
+          batchYearHint
+        )
+      )
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveValidity?.validFrom, effectiveValidity?.validTo]);
+
   // Reuse Esc to cancel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -2421,7 +2632,7 @@ export default function NewRateFlow({
         <div className="flex justify-end gap-2 flex-wrap">
           <Button
             variant={extractionDone ? "outline" : "default"}
-            onClick={processInput}
+            onClick={handleProcessClick}
             disabled={!hasInput || loading}
           >
             {loading
@@ -2449,6 +2660,51 @@ export default function NewRateFlow({
             ))}
           </ul>
         )}
+
+        {validationModal && (() => {
+          const fieldsLabel =
+            validationModal.fields.length === 1
+              ? validationModal.fields[0]!
+              : validationModal.fields.join(" y ");
+          const close = () => {
+            const target = validationModal.focusTarget;
+            setValidationModal(null);
+            // Focus the offending input after the modal unmounts so the
+            // browser doesn't fight the modal's autofocus.
+            requestAnimationFrame(() => {
+              if (target === "agent") {
+                document.getElementById("batch-agent-input")?.focus();
+              } else {
+                document
+                  .getElementById("batch-validity-q-first")
+                  ?.focus();
+              }
+            });
+          };
+          return (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+              onClick={close}
+            >
+              <div
+                className="bg-white rounded-lg shadow-lg max-w-md w-full mx-4 p-5 flex flex-col gap-3"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h4 className="font-semibold text-base">
+                  Falta completar {fieldsLabel}
+                </h4>
+                <p className="text-sm text-gray-700">
+                  Antes de procesar, completá <strong>{fieldsLabel}</strong>{" "}
+                  del batch. Las tarifas extraídas heredan estos datos
+                  automáticamente.
+                </p>
+                <div className="flex justify-end">
+                  <Button onClick={close}>Entendido</Button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   }
@@ -2497,6 +2753,7 @@ function Step1AgentField({
     <label className="flex flex-col gap-1 text-sm">
       <span className="font-medium">Agente</span>
       <input
+        id="batch-agent-input"
         type="text"
         list="new-rate-agent-sugg"
         value={agent}
@@ -2618,8 +2875,8 @@ function Step1ValidityField({
                 className="border border-gray-200 rounded-md p-2 h-10 w-28"
               />
             </label>
-            <div className="flex items-end gap-2 flex-wrap">
-              {QUARTER_LABELS.map((q) => {
+            <div className="flex items-end gap-2 flex-wrap" id="batch-validity-q-picker">
+              {QUARTER_LABELS.map((q, qIdx) => {
                 const checked = picked.has(q);
                 return (
                   <label
@@ -2635,6 +2892,7 @@ function Step1ValidityField({
                       checked={checked}
                       onChange={() => onTogglePicked(q)}
                       className="mr-1"
+                      id={qIdx === 0 ? "batch-validity-q-first" : undefined}
                     />
                     {q}
                   </label>
@@ -3288,22 +3546,17 @@ function PreviewStep({
                       </td>
                     ))}
                     {(() => {
-                      // Compose a display string that surfaces the
-                      // blocking reason (🚫 ...) ahead of the row's own
-                      // notes. The user shouldn't need to open the
-                      // modal to see WHY a row is red. Soft warnings
-                      // already carry their ⚠️ tokens inside the notes
-                      // string from the row converter — those just
-                      // pass through.
+                      // Compose the Notas display: blocking (🚫 red),
+                      // warning (⚠️ amber) or plain notes. The prefix
+                      // is built off the row's flag state via
+                      // buildWarningPrefix; the user sees WHY the row
+                      // is highlighted without opening the modal.
                       const rowNotes = String(r.notes ?? "").trim();
-                      const blockingError =
-                        typeof r._blockingError === "string"
-                          ? r._blockingError
-                          : "";
-                      const composedNotes = blockingError
+                      const warningInfo = buildWarningPrefix(r, validity);
+                      const composedNotes = warningInfo.prefix
                         ? rowNotes
-                          ? `🚫 ${blockingError} · ${rowNotes}`
-                          : `🚫 ${blockingError}`
+                          ? `${warningInfo.prefix} · ${rowNotes}`
+                          : warningInfo.prefix
                         : rowNotes;
                       const hasComposedNotes = composedNotes.length > 0;
                       const truncated = hasComposedNotes
@@ -3313,6 +3566,12 @@ function PreviewStep({
                         : "";
                       const showAnything =
                         hasComposedNotes || hasBatchNotas;
+                      const severityClass =
+                        warningInfo.severity === "blocking"
+                          ? "text-red-700 font-medium"
+                          : warningInfo.severity === "warning"
+                            ? "text-amber-700 font-medium"
+                            : "";
                       return (
                         <td
                           className="px-3 py-2 text-xs"
@@ -3331,7 +3590,7 @@ function PreviewStep({
                             >
                               {hasComposedNotes ? (
                                 <span
-                                  className={`truncate flex-1 ${blockingError ? "text-red-700 font-medium" : ""}`}
+                                  className={`truncate flex-1 ${severityClass}`}
                                 >
                                   {truncated}
                                 </span>
@@ -3496,8 +3755,7 @@ function PreviewStep({
         const row = rows[notesModalIdx];
         if (!row) return null;
         const rowNotes = String(row.notes ?? "").trim();
-        const blockingError =
-          typeof row._blockingError === "string" ? row._blockingError : "";
+        const warningInfo = buildWarningPrefix(row, validity);
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
@@ -3518,13 +3776,23 @@ function PreviewStep({
                   ✕
                 </button>
               </div>
-              {blockingError && (
+              {warningInfo.severity === "blocking" && (
                 <div className="flex flex-col gap-1">
                   <span className="text-xs uppercase tracking-wide text-red-700">
                     Error bloqueante
                   </span>
                   <pre className="text-sm whitespace-pre-wrap font-sans bg-red-50 border border-red-200 rounded p-2">
-                    🚫 {blockingError}
+                    {warningInfo.prefix}
+                  </pre>
+                </div>
+              )}
+              {warningInfo.severity === "warning" && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs uppercase tracking-wide text-amber-700">
+                    Warning
+                  </span>
+                  <pre className="text-sm whitespace-pre-wrap font-sans bg-amber-50 border border-amber-200 rounded p-2">
+                    {warningInfo.prefix}
                   </pre>
                 </div>
               )}
@@ -3538,7 +3806,7 @@ function PreviewStep({
                   </pre>
                 </div>
               ) : (
-                !blockingError && (
+                warningInfo.severity === null && (
                   <div className="text-xs text-gray-500 italic">
                     Sin nota individual para esta rate.
                   </div>

@@ -2259,84 +2259,128 @@ export default function NewRateFlow({
     });
   };
   const updatePreviewField = (idx: number, field: string, value: unknown) => {
+    const yearHint =
+      (effectiveValidity?.validTo &&
+        parseInt(effectiveValidity.validTo.slice(0, 4), 10)) ||
+      (effectiveValidity?.validFrom &&
+        parseInt(effectiveValidity.validFrom.slice(0, 4), 10)) ||
+      new Date().getFullYear();
     setPreviewRows((prev) => {
       const next = prev.slice();
       const updated: Record<string, unknown> = { ...next[idx], [field]: value };
-      // Live re-evaluation of the blocking chain. When the user edits
-      // a field that affects a live blocking condition (carrier, pol,
-      // pod, sf, tipo), recompute and either advance to the next
-      // unsatisfied block, switch to a different block type, or clear
-      // entirely. Persistent blocks set at extraction time
-      // (phantom_kind, reefer_range) re-fire when their underlying
-      // values still match — otherwise they clear too. Order of
-      // priority matches the row converter's initial pass.
-      const carrier = String(updated.carrier ?? "").trim();
-      const pol = String(updated.pol ?? "").trim();
-      const pod = String(updated.pod ?? "").trim();
-      const tipo = String(updated.tipo ?? "");
-      const sfNum = Number(updated.sf ?? 0);
-
-      let newError: string | null = null;
-      let newType: string | null = null;
-
-      // Reefer range: re-check on sf or tipo edit.
-      const range = validateRateRange({ tipo, sf: sfNum });
-      if (range?.severity === "blocking") {
-        newError = range.message;
-        newType = "reefer_range";
-      }
-
-      // Phantom-kind: empty carrier + sf matches a detected kind value.
-      if (!newError && !carrier) {
-        for (const def of batchKinds) {
-          const kv = batchKindValues.find((v) => v.kind_id === def.id);
-          if (!kv) continue;
-          if (
-            kv.value20 === sfNum ||
-            kv.value40 === sfNum ||
-            kv.value_unique === sfNum
-          ) {
-            const matchedValue =
-              kv.value20 === sfNum
-                ? `${kv.value20} (20')`
-                : kv.value40 === sfNum
-                  ? `${kv.value40} (40')`
-                  : `${kv.value_unique}`;
-            newError = `SF=${sfNum} matchea el kind ${def.label} = ${matchedValue} y la rate tiene carrier vacío. Probable kind extraído como rate fantasma — verificá tipo, ruta y monto antes de guardar.`;
-            newType = "phantom_kind";
-            break;
-          }
-        }
-      }
-
-      // Country-not-port (POL or POD as a country / region label).
-      if (!newError && (isCountryNotPort(pol) || isCountryNotPort(pod))) {
-        const offending = isCountryNotPort(pol)
-          ? `POL="${pol}"`
-          : `POD="${pod}"`;
-        newError = `${offending} es un país / región, no un puerto. Probable POL/POD inferido erróneamente — completá con el puerto real o eliminá la rate.`;
-        newType = "country_not_port";
-      }
-
-      // Carrier required.
-      if (!newError && !carrier) {
-        newError = "Carrier requerido — completá manualmente para guardar.";
-        newType = "carrier_missing";
-      }
-
-      // POD required.
-      if (!newError && !pod) {
-        newError =
-          "Puerto de destino (POD) requerido — completá manualmente para guardar.";
-        newType = "pod_missing";
-      }
-
-      updated._blockingError = newError;
-      updated._blockingType = newType;
-      updated._uncheckByDefault = !!newError;
-      next[idx] = updated;
+      // Full live re-evaluation on every keystroke. The recompute helper
+      // walks the blocking priority chain (reefer_range → phantom_kind →
+      // country_not_port → carrier_missing → pod_missing) AND refreshes
+      // _needsReview via isRateNeedsReview, so editing any field
+      // (carrier / pol / pod / sf / blFee / tipo / incoterm) leaves the
+      // row's flags consistent with its current values without needing
+      // a re-process.
+      next[idx] = recomputeRowFlags(
+        updated,
+        effectiveValidity,
+        batchKinds,
+        batchKindValues,
+        yearHint
+      );
       return next;
     });
+  };
+
+  // Closes the inline edit. When the user typed multi-carrier ("OOCL/
+  // Hapag") in the Carrier field, the row at idx is replaced by N rows,
+  // one per carrier, otherwise just the trimmed single carrier survives.
+  // All resulting rows are run through recomputeRowFlags so any
+  // carrier-related blocking (carrier_missing, phantom_kind) clears
+  // immediately. Selection of the original row propagates to all
+  // clones — saveSelected then filters by _blockingError so newly-
+  // unblocked clones go to the save list.
+  const commitAndCloseEdit = (idx: number) => {
+    const yearHint =
+      (effectiveValidity?.validTo &&
+        parseInt(effectiveValidity.validTo.slice(0, 4), 10)) ||
+      (effectiveValidity?.validFrom &&
+        parseInt(effectiveValidity.validFrom.slice(0, 4), 10)) ||
+      new Date().getFullYear();
+    const original = previewRows[idx];
+    if (!original) {
+      setEditingIdx(null);
+      return;
+    }
+    const carrierRaw = String(original.carrier ?? "").trim();
+    const carriers = carrierRaw
+      .split("/")
+      .map((c) => c.trim())
+      .filter(Boolean);
+
+    if (carriers.length <= 1) {
+      // Single (or empty) carrier — recompute in-place and close. Empty
+      // carrier still goes through recompute so the carrier_missing
+      // block stays active until the user fills the field.
+      setPreviewRows((prev) => {
+        const next = prev.slice();
+        const single = carriers[0] ?? "";
+        const updated = {
+          ...next[idx],
+          carrier: single,
+          sl: String(next[idx]?.sl ?? "").trim() || single,
+        };
+        next[idx] = recomputeRowFlags(
+          updated,
+          effectiveValidity,
+          batchKinds,
+          batchKindValues,
+          yearHint
+        );
+        return next;
+      });
+      setEditingIdx(null);
+      return;
+    }
+
+    // Multi-carrier: split into N rows. Selection of the original
+    // row maps to all clones (they share the same identifying fields
+    // beyond carrier). Indices of all rows past idx shift by (N-1).
+    setPreviewRows((prev) => {
+      const next: Record<string, unknown>[] = [];
+      for (let i = 0; i < prev.length; i++) {
+        if (i !== idx) {
+          next.push(prev[i]!);
+          continue;
+        }
+        for (const c of carriers) {
+          const cloned = recomputeRowFlags(
+            {
+              ...prev[i]!,
+              carrier: c,
+              sl: c,
+            },
+            effectiveValidity,
+            batchKinds,
+            batchKindValues,
+            yearHint
+          );
+          next.push(cloned);
+        }
+      }
+      return next;
+    });
+    const oldLength = previewRows.length;
+    setPreviewSelected((prev) => {
+      const wasChecked = prev.has(idx);
+      const out = new Set<number>();
+      for (let i = 0; i < oldLength; i++) {
+        if (i < idx) {
+          if (prev.has(i)) out.add(i);
+        } else if (i > idx) {
+          if (prev.has(i)) out.add(i + (carriers.length - 1));
+        }
+      }
+      if (wasChecked) {
+        for (let k = 0; k < carriers.length; k++) out.add(idx + k);
+      }
+      return out;
+    });
+    setEditingIdx(null);
   };
 
   // ---- Validity stats ----
@@ -2726,6 +2770,7 @@ export default function NewRateFlow({
       onToggleAll={toggleAllPreview}
       onSetEditingIdx={setEditingIdx}
       onUpdateField={updatePreviewField}
+      onCommitEdit={commitAndCloseEdit}
       onBack={isEditMode ? onCancel : () => setStep("input")}
       onSave={saveSelected}
       onCancel={onCancel}
@@ -3252,6 +3297,7 @@ function PreviewStep({
   onToggleAll,
   onSetEditingIdx,
   onUpdateField,
+  onCommitEdit,
   onBack,
   onSave,
   onCancel,
@@ -3271,6 +3317,7 @@ function PreviewStep({
   onToggleAll: () => void;
   onSetEditingIdx: (idx: number | null) => void;
   onUpdateField: (idx: number, field: string, value: unknown) => void;
+  onCommitEdit: (idx: number) => void;
   onBack: () => void;
   onSave: () => void;
   onCancel: () => void;
@@ -3620,10 +3667,10 @@ function PreviewStep({
                           size="sm"
                           variant="outline"
                           onClick={() =>
-                            onSetEditingIdx(isEditing ? null : idx)
+                            isEditing ? onCommitEdit(idx) : onSetEditingIdx(idx)
                           }
                         >
-                          {isEditing ? "Cerrar" : "Editar"}
+                          {isEditing ? "Guardar" : "Editar"}
                         </Button>
                       )}
                     </td>

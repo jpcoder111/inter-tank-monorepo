@@ -200,6 +200,11 @@ OUTPUT: a single JSON object:
 
 A "kind" is a charge or discount that applies to rates: Insulado / Thermal Liner, Flexitank, Agency Fee, Agency Fee Max, Disposal, Discount Insulado, Precarriage, etc. Emit one entry per distinct kind.
 
+EXPLICITLY EXCLUDED from kinds:
+- EBS / EFS / BAF / Emergency Bunker Surcharge / Bunker Surcharge — Inter-Tank tracks these separately in its EBS table, never as a kind. Drop silently. Even when the source says "EBS USD 160 per teu" or "EBS 320", do NOT emit a kind for it.
+- BL Fee / Bill of Lading Fee / Documentation Fee / Doc Fee — these are NATIVE Rate fields populated by the rate-extraction prompt (RATE_SYSTEM), not kinds. Do NOT emit them here.
+Kinds come ONLY from the predefined catalog (flexitank_chile, flexitank_arg, insulado_chile, insulado_arg, precarriage_mendoza, disposal, agency_fee, agency_fee_max, discount_insulated) plus user-defined custom kinds for genuinely new domain concepts. Never EBS, never BL Fee.
+
 RULES:
 - Use value20 + value40 when the source distinguishes sizes; otherwise use value_unique.
 - For discounts ("discount of USD 25 if insulated"), emit value_unique as a NEGATIVE number.
@@ -815,6 +820,19 @@ function detectKindsFromExtracted(rates: RawRate[]): {
       // these — this catches the leak.
       if (
         /^(?:wine(?:\s*\/\s*juice)?|juice|nueces|frozen|fresh|vegetables|bottled|hazardous|dry|reefer|flexi)\s+loads?\b/i.test(
+          label
+        )
+      ) {
+        continue;
+      }
+      // Reject EBS / EFS / BAF / BL Fee / documentation fee — these are
+      // NEVER kinds. EBS is tracked separately in the EBS table; BL Fee
+      // is a native field on the Rate populated by RATE_SYSTEM. Even
+      // when KINDS_FROM_BLOCK_SYSTEM mistakenly emits them, the
+      // frontend drops them here. Match is anchored — "EBS Surcharge"
+      // and "BL Fee 20'" both fall through.
+      if (
+        /^(?:ebs|efs|baf|emergency\s+bunker(?:\s+surcharge)?|bunker\s+surcharge|bl\s*fee|bill\s+of\s+lading(?:\s+fee)?|documentation(?:\s+fee)?|doc\s+fee)\b/i.test(
           label
         )
       ) {

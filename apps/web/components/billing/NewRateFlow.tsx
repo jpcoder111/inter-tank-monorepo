@@ -18,7 +18,7 @@ import {
   Quarter,
   Rate,
   carrierColor,
-  computePendingAgents,
+  computePendingAgentsByRange,
   consolidatePreferentialNotes,
   detectAgencyFee,
   detectAgencyFeeMax,
@@ -3120,8 +3120,16 @@ export default function NewRateFlow({
         />
         <PendingAgentsBadge
           rates={existingRates}
-          quarterYear={quarterYear}
-          picked={quarterPicked}
+          validity={resolvedValidity}
+          label={
+            validityMode === "quarter" && quarterPicked.size > 0
+              ? `${Array.from(quarterPicked).join("/")} ${quarterYear}`
+              : resolvedValidity
+                ? `${formatDateCl(resolvedValidity.validFrom)} – ${formatDateCl(
+                    resolvedValidity.validTo
+                  )}`
+                : ""
+          }
           onPickAgent={(name) => setAgent(name)}
         />
 
@@ -3515,6 +3523,9 @@ function Step1AgentField({
         onChange={(e) => onChange(e.target.value)}
         placeholder="Ej: Balguerie, IWS, Van Moer"
         className="border border-gray-200 rounded-md p-2 h-10"
+        // Suppress the browser's history-based autocomplete so the
+        // PendingAgentsBadge dropdown is the only source of suggestions.
+        autoComplete="off"
       />
       <datalist id="new-rate-agent-sugg">
         {suggestions.map((a) => (
@@ -3549,37 +3560,55 @@ function Step1AgentField({
   );
 }
 
-// Surfaces the list of agents whose rates DON'T overlap the picked
-// quarters, so the operator can quickly load whatever's stale. Hidden
-// entirely when nothing is pending. Click on the badge expands a sorted
-// dropdown (oldest validTo first); click on an entry autocompletes the
-// agent input. Recomputes reactively whenever rates / picked / year
-// change. Alias-canonicalisation collapses "WR" + "WENRAN" so the list
-// doesn't double-count.
+// Surfaces the list of agents whose rates DON'T overlap the chosen
+// validity range, so the operator can quickly load whatever's stale.
+// Works in BOTH validity modes (quarter picker AND explicit date range)
+// because it consumes the resolved {validFrom, validTo} pair, not the
+// quarter set. Hidden when no validity is set or nothing is pending.
+// Click on the badge expands a sorted dropdown (oldest validTo first);
+// click on an entry autocompletes the agent input. Alias-canonicalisation
+// collapses "WR" + "WENRAN" so the list doesn't double-count.
 function PendingAgentsBadge({
   rates,
-  quarterYear,
-  picked,
+  validity,
+  label,
   onPickAgent,
 }: {
   rates: Rate[];
-  quarterYear: number;
-  picked: Set<Quarter>;
+  validity: { validFrom: string; validTo: string } | null;
+  label: string;
   onPickAgent: (name: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const pending = useMemo<PendingAgent[]>(
-    () => computePendingAgents(rates, quarterYear, picked),
-    [rates, quarterYear, picked]
+    () => (validity ? computePendingAgentsByRange(rates, validity) : []),
+    [rates, validity]
   );
+  // Telemetry: lets a smoke-tester confirm the badge's input/output without
+  // opening React devtools. Logs once per (validity, pending.length) pair.
+  useEffect(() => {
+    if (typeof console === "undefined") return;
+    if (!validity) {
+      console.log(
+        "[pending-agents] no validity set yet — badge hidden until user picks a quarter or date range"
+      );
+      return;
+    }
+    console.log("[pending-agents]", {
+      label,
+      validityRange: validity,
+      totalRates: rates.length,
+      pendingCount: pending.length,
+      sample: pending.slice(0, 5).map((p) => p.agent),
+    });
+  }, [validity, label, rates.length, pending]);
   // Reset the expanded panel when the badge shrinks to zero entries
   // (e.g. user just loaded a tariff that filled the gap).
   useEffect(() => {
     if (pending.length === 0) setExpanded(false);
   }, [pending.length]);
-  if (picked.size === 0) return null;
+  if (!validity) return null;
   if (pending.length === 0) return null;
-  const quarterTag = Array.from(picked).join("/") + ` ${quarterYear}`;
   return (
     <div className="flex flex-col gap-1">
       <button
@@ -3595,19 +3624,18 @@ function PendingAgentsBadge({
         <span aria-hidden="true">📋</span>
         <span>
           {pending.length} agente{pending.length === 1 ? "" : "s"} pendiente
-          {pending.length === 1 ? "" : "s"} para {quarterTag}
+          {pending.length === 1 ? "" : "s"} para {label}
         </span>
         <span className="text-gray-400 ml-1">{expanded ? "▾" : "▸"}</span>
       </button>
       {expanded && (
         <div className="border border-gray-200 rounded-md bg-white shadow-sm flex flex-col">
           <div className="text-xs text-gray-500 px-3 py-1.5 border-b border-gray-200 bg-gray-50">
-            Pendientes {quarterTag} ({pending.length}) · ordenados por
-            antigüedad
+            Pendientes {label} ({pending.length}) · ordenados por antigüedad
           </div>
           <ul className="flex flex-col divide-y divide-gray-100 max-h-64 overflow-y-auto">
             {pending.map((p) => {
-              const stale = isStaleVsPicked(p.lastValidTo, quarterYear, picked);
+              const stale = isStaleVsRange(p.lastValidTo, validity.validFrom);
               return (
                 <li key={p.agent}>
                   <button
@@ -3644,13 +3672,12 @@ function PendingAgentsBadge({
 }
 
 // Returns a short staleness label ("vencido hace 2Q") when the agent's
-// last validTo predates the picked quarters by at least one quarter.
+// last validTo predates the chosen range start by at least one quarter.
 // Empty string otherwise. Used inline by PendingAgentsBadge to highlight
 // long-overdue entries.
-function isStaleVsPicked(
+function isStaleVsRange(
   lastValidTo: string | null,
-  pickedYear: number,
-  picked: Set<Quarter>
+  rangeFrom: string
 ): string {
   if (!lastValidTo) return "";
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(lastValidTo);
@@ -3659,15 +3686,15 @@ function isStaleVsPicked(
   const lastMonth = parseInt(m[2]!, 10);
   const lastQ =
     lastMonth <= 3 ? 1 : lastMonth <= 6 ? 2 : lastMonth <= 9 ? 3 : 4;
-  // Earliest picked quarter as a sortable index (year * 10 + q).
-  const pickedIdx = Math.min(
-    ...Array.from(picked).map((q) => {
-      const n = q === "Q1" ? 1 : q === "Q2" ? 2 : q === "Q3" ? 3 : 4;
-      return pickedYear * 10 + n;
-    })
-  );
+  const rm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rangeFrom);
+  if (!rm) return "";
+  const rangeYear = parseInt(rm[1]!, 10);
+  const rangeMonth = parseInt(rm[2]!, 10);
+  const rangeQ =
+    rangeMonth <= 3 ? 1 : rangeMonth <= 6 ? 2 : rangeMonth <= 9 ? 3 : 4;
+  const rangeIdx = rangeYear * 10 + rangeQ;
   const lastIdx = lastYear * 10 + lastQ;
-  const delta = pickedIdx - lastIdx;
+  const delta = rangeIdx - lastIdx;
   if (delta <= 1) return "";
   return `vencido hace ${delta - 1}Q`;
 }

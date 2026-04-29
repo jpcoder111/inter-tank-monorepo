@@ -2885,17 +2885,15 @@ export type PendingAgent = {
 };
 
 // Computes the list of agents that have rates in the catalog but NONE that
-// fall inside the selected quarters' date range. Alias-canonicalises agent
-// names so "WR" + "WENRAN" collapse to a single entry. Sorted by oldest
-// last-validTo first (most stale → most pressing follow-up). Agents that
-// never had a rate in the past also appear with lastValidTo=null.
-export function computePendingAgents(
+// fall inside the supplied validity range. Alias-canonicalises agent names
+// so "WR" + "WENRAN" collapse to a single entry. Sorted by oldest last-
+// validTo first (most stale → most pressing follow-up). Agents that never
+// had a rate in the past also appear with lastValidTo=null.
+export function computePendingAgentsByRange(
   rates: ReadonlyArray<Rate>,
-  selectedYear: number,
-  picked: Set<Quarter>
+  range: { validFrom: string; validTo: string }
 ): PendingAgent[] {
-  const range = quartersToDateRange(selectedYear, picked);
-  if (!range) return [];
+  if (!range || !range.validFrom || !range.validTo) return [];
   // Group rates by canonical agent name. The grouping uses the resolver's
   // "alias" / "exact" sources only; Levenshtein matches are intentionally
   // skipped here because we don't want a typo'd entry to silently fold
@@ -2922,7 +2920,7 @@ export function computePendingAgents(
   }
   const pending: PendingAgent[] = [];
   for (const [key, agentRates] of grouped) {
-    const hasInQ = agentRates.some((r) => {
+    const hasInRange = agentRates.some((r) => {
       const from = (r.validFrom ?? "").trim();
       const to = (r.validTo ?? "").trim();
       if (!from && !to) return false;
@@ -2931,7 +2929,7 @@ export function computePendingAgents(
       const rateTo = to || range.validTo;
       return rateFrom <= range.validTo && rateTo >= range.validFrom;
     });
-    if (hasInQ) continue;
+    if (hasInRange) continue;
     // Pick the most recent rate by validTo for the "último Q cargado"
     // label. Rates without a validTo land at the bottom of the sort.
     const sorted = agentRates.slice().sort((a, b) => {
@@ -2960,6 +2958,21 @@ export function computePendingAgents(
     return a.lastValidTo.localeCompare(b.lastValidTo);
   });
   return pending;
+}
+
+// Quarter-mode wrapper around computePendingAgentsByRange. Resolves the
+// year + picked quarters to a date range and delegates. Returns [] when no
+// quarters are picked. Kept exported for code paths that still hand quarter
+// inputs directly; the badge component itself prefers the by-range form so
+// it works equally well in dates mode.
+export function computePendingAgents(
+  rates: ReadonlyArray<Rate>,
+  selectedYear: number,
+  picked: Set<Quarter>
+): PendingAgent[] {
+  const range = quartersToDateRange(selectedYear, picked);
+  if (!range) return [];
+  return computePendingAgentsByRange(rates, range);
 }
 
 // Quarter helpers. Q1 = 01/01–31/03, Q2 = 01/04–30/06, etc. When the user

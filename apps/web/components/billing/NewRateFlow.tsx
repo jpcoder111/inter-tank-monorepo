@@ -150,11 +150,23 @@ HARD RULES:
 
 12. Bundle inclusions (rule 5) preserve Incoterms LITERALLY: when the source says "FCA Santa Rita ... includes trucking, locales, flexitank, OF + EBS", emit notas like "Incluye: trucking en origen, gastos locales en origen, flexitank, ocean freight. FCA." Same for FOB / CFR / CIF. The Incoterm in the notas is the sentence-end stamp; the structured Incoterm field on the rate (rule 13) carries the canonical value.
 
-13. EXTRACT INCOTERM — emit a literal "incoterm" field on every rate row using one of: "FCA", "EXW", "FOB", "CIF", "CFR", or the placeholder "FOB/CIF/CFR" when the source is ambiguous.
-    - If the rate line literally mentions one of those Incoterms, emit that exact value (uppercase): "Rate 20 FOB Manzanillo" → incoterm="FOB", "Tarifa FCA Mendoza" → incoterm="FCA".
-    - GEOGRAPHIC FALLBACK: when no Incoterm word appears AND the POL is an Argentine pickup city (per rule A3 list), default incoterm="FCA".
-    - DEFAULT: when no Incoterm signal at all (no word in line, no Argentine POL), emit "FOB/CIF/CFR" — that's the placeholder for "ambiguous, resolved at billing time".
-    - NEVER make up an Incoterm that isn't in this six-value enum. If unsure between FOB/CIF/CFR, emit the placeholder rather than guessing.
+13. EXTRACT INCOTERM — emit a literal "incoterm" field on every rate row using one of: "FCA", "EXW", "FOB", "CIF", "CFR", or the placeholder "FOB/CIF/CFR".
+
+    The Incoterm keyword (FCA / EXW / FOB / CIF / CFR, case-insensitive) can appear anywhere in or near the rate line. Look for it in ALL these positions:
+      (a) Standalone before a city: "Tarifa FCA Mendoza Flexi" → incoterm="FCA".
+      (b) Modifier of POD: "Tarifa 20 FOB Manzanillo Flexi = USD 890" → incoterm="FOB". The keyword sits between size and port, but it's still the Incoterm.
+      (c) Modifier of route: "Rate 40 FOB San Antonio - Grangemouth" → incoterm="FOB".
+      (d) After size before port: "Rate 20 CIF Antwerp = USD 1500" → incoterm="CIF".
+    Always emit the matched value uppercase. Match anywhere in the rate line — the Incoterm modifies the rate's commercial terms, not just the POL.
+
+    GEOGRAPHIC FALLBACK: when no Incoterm word appears in the line AND POL matches an Argentine city (Mendoza, Santa Rita, San Carlos, Tupungato, Rivadavia, San Juan, San Martín, Río Negro), default incoterm="FCA".
+
+    PLACEHOLDER "FOB/CIF/CFR" — use ONLY when both:
+      - No FCA/EXW/FOB/CIF/CFR keyword anywhere in the line, AND
+      - POL is empty or a Chilean port (San Antonio / Valparaíso / etc.)
+    The placeholder represents a rate that resolves to one of FOB/CIF/CFR at billing time against the customer's quote sheet. NEVER use it when the line literally contains an Incoterm word.
+
+    NEVER make up an Incoterm outside this six-value enum.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -205,7 +217,7 @@ HARD RULES:
 9. Regional add-on rows like "Add San Carlos US$ 200 on top of Mendoza" → DO NOT emit them as a rate row. Skip; the frontend handles regional add-ons via a separate sweep.
 10. Rows whose SF cell is blank / missing / "TBD" / "Ask agent" but the row otherwise has POL+POD+Type+SL filled → STILL emit them. Set sf to null (NOT 0). The frontend flags these for user review rather than letting them disappear silently. The same applies to expired-validity rows (datetime in the past) — emit them; the frontend annotates and flags.
 
-7. EXTRACT INCOTERM — emit a literal "incoterm" on every rate row, one of "FCA" / "EXW" / "FOB" / "CIF" / "CFR" or the placeholder "FOB/CIF/CFR" for ambiguous. When a row is on a sheet whose POL column shows an Argentine pickup city (Mendoza, Santa Rita, San Carlos, Tupungato, Rivadavia, San Juan, San Martín, Río Negro) and no explicit Incoterm appears, default to "FCA". Otherwise default to "FOB/CIF/CFR". Never invent an Incoterm outside the six-value enum.
+7. EXTRACT INCOTERM — emit a literal "incoterm" on every rate row, one of "FCA" / "EXW" / "FOB" / "CIF" / "CFR" or the placeholder "FOB/CIF/CFR". The Incoterm keyword can appear anywhere in the row (column header, POL cell, dedicated Incoterm column, free text in a remarks column). Always pick the literal value (uppercase). When the row is on a sheet whose POL column shows an Argentine pickup city (Mendoza, Santa Rita, San Carlos, Tupungato, Rivadavia, San Juan, San Martín, Río Negro) and no explicit Incoterm word appears, default to "FCA". Otherwise default to "FOB/CIF/CFR". Never invent an Incoterm outside the six-value enum.
 
 If the chunk is not a rate table, return { "rates": [] }.
 
@@ -1837,7 +1849,11 @@ export default function NewRateFlow({
           sf: sfNum,
           blFee: blFeeNum,
           notes: finalNotes,
-          _needsReview: needsReview,
+          // _needsReview includes blocking rows so the Step 2 banner
+          // counts them in "Requieren revisión" alongside soft warnings.
+          // The blocking visual (red bg) takes precedence over the
+          // warning visual (amber) at render time.
+          _needsReview: needsReview || !!blockingMessage,
           _blockingError: blockingMessage,
           _blockingType: blockingType,
           _uncheckByDefault: !!blockingMessage,
@@ -3270,14 +3286,31 @@ function PreviewStep({
                       </td>
                     ))}
                     {(() => {
+                      // Compose a display string that surfaces the
+                      // blocking reason (🚫 ...) ahead of the row's own
+                      // notes. The user shouldn't need to open the
+                      // modal to see WHY a row is red. Soft warnings
+                      // already carry their ⚠️ tokens inside the notes
+                      // string from the row converter — those just
+                      // pass through.
                       const rowNotes = String(r.notes ?? "").trim();
-                      const hasRowNotes = rowNotes.length > 0;
-                      const truncated = hasRowNotes
-                        ? rowNotes.length > 30
-                          ? rowNotes.slice(0, 30) + "…"
-                          : rowNotes
+                      const blockingError =
+                        typeof r._blockingError === "string"
+                          ? r._blockingError
+                          : "";
+                      const composedNotes = blockingError
+                        ? rowNotes
+                          ? `🚫 ${blockingError} · ${rowNotes}`
+                          : `🚫 ${blockingError}`
+                        : rowNotes;
+                      const hasComposedNotes = composedNotes.length > 0;
+                      const truncated = hasComposedNotes
+                        ? composedNotes.length > 30
+                          ? composedNotes.slice(0, 30) + "…"
+                          : composedNotes
                         : "";
-                      const showAnything = hasRowNotes || hasBatchNotas;
+                      const showAnything =
+                        hasComposedNotes || hasBatchNotas;
                       return (
                         <td
                           className="px-3 py-2 text-xs"
@@ -3289,13 +3322,15 @@ function PreviewStep({
                               onClick={() => setNotesModalIdx(idx)}
                               className="text-left flex items-center gap-1 hover:underline cursor-pointer w-full"
                               title={
-                                hasRowNotes
-                                  ? rowNotes
+                                hasComposedNotes
+                                  ? composedNotes
                                   : "Aplica nota global del batch"
                               }
                             >
-                              {hasRowNotes ? (
-                                <span className="truncate flex-1">
+                              {hasComposedNotes ? (
+                                <span
+                                  className={`truncate flex-1 ${blockingError ? "text-red-700 font-medium" : ""}`}
+                                >
                                   {truncated}
                                 </span>
                               ) : (
@@ -3459,6 +3494,8 @@ function PreviewStep({
         const row = rows[notesModalIdx];
         if (!row) return null;
         const rowNotes = String(row.notes ?? "").trim();
+        const blockingError =
+          typeof row._blockingError === "string" ? row._blockingError : "";
         return (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
@@ -3479,6 +3516,16 @@ function PreviewStep({
                   ✕
                 </button>
               </div>
+              {blockingError && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs uppercase tracking-wide text-red-700">
+                    Error bloqueante
+                  </span>
+                  <pre className="text-sm whitespace-pre-wrap font-sans bg-red-50 border border-red-200 rounded p-2">
+                    🚫 {blockingError}
+                  </pre>
+                </div>
+              )}
               {rowNotes ? (
                 <div className="flex flex-col gap-1">
                   <span className="text-xs uppercase tracking-wide text-gray-500">
@@ -3489,9 +3536,11 @@ function PreviewStep({
                   </pre>
                 </div>
               ) : (
-                <div className="text-xs text-gray-500 italic">
-                  Sin nota individual para esta rate.
-                </div>
+                !blockingError && (
+                  <div className="text-xs text-gray-500 italic">
+                    Sin nota individual para esta rate.
+                  </div>
+                )
               )}
               {hasBatchNotas && (
                 <div className="flex flex-col gap-1">

@@ -1146,7 +1146,11 @@ export function isRateNeedsReview(
   batchValidity: { validFrom?: string; validTo?: string } | null,
   batchYearHint?: number
 ): boolean {
-  if (!input.pol.trim() || !input.pod.trim()) return true;
+  // POL is allowed to be empty (chilean implicit per the v3.2 POL/POD-by-
+  // context rules — see RATE_SYSTEM rule 11.A1). Only POD is enforced
+  // here; missing POD also has its own _blockingError path that takes
+  // priority over the yellow needs-review highlight.
+  if (!input.pod.trim()) return true;
   if (input.tipoCoerced) return true;
   if (!(CONTAINER_TYPES as readonly string[]).includes(input.tipo)) return true;
   if (!input.sfParseable) return true;

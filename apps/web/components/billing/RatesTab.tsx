@@ -17,6 +17,7 @@ import {
   agentColor,
   carrierColor,
   formatDateCl,
+  formatRoute,
   getValidityStatus,
   normalizeRate,
   uniqueSuggestions,
@@ -473,6 +474,7 @@ export default function RatesTab() {
                             "Carrier",
                             "Ruta",
                             "Tipo",
+                            "Incoterm",
                             "SF",
                             "BL Fee",
                             ...(showKinds ? ["Kinds"] : []),
@@ -513,8 +515,34 @@ export default function RatesTab() {
                                 "—"
                               )}
                             </td>
-                            <td className="px-4 py-2 whitespace-nowrap">{r.route}</td>
+                            <td className="px-4 py-2 whitespace-nowrap">
+                              {formatRoute(r.pol, r.pod, r.route)}
+                            </td>
                             <td className="px-4 py-2 whitespace-nowrap">{r.tipo}</td>
+                            <td className="px-4 py-2 whitespace-nowrap">
+                              {(() => {
+                                const inc = (r.incoterm ?? "").toString();
+                                if (!inc)
+                                  return <span className="text-gray-300">—</span>;
+                                const isAmbiguous = inc === "FOB/CIF/CFR";
+                                return (
+                                  <span
+                                    className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                                      isAmbiguous
+                                        ? "bg-gray-100 text-gray-700"
+                                        : "bg-indigo-50 text-indigo-800"
+                                    }`}
+                                    title={
+                                      isAmbiguous
+                                        ? "Ambiguo: se resuelve al facturar"
+                                        : `Incoterm: ${inc}`
+                                    }
+                                  >
+                                    {inc}
+                                  </span>
+                                );
+                              })()}
+                            </td>
                             <td className="px-4 py-2 whitespace-nowrap">${r.sf}</td>
                             <td className="px-4 py-2 whitespace-nowrap">${r.blFee}</td>
                             {showKinds && (

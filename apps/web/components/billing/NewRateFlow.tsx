@@ -29,6 +29,11 @@ import {
   extractSizeFromKindLabel,
   findSimilarAgent,
   formatDateCl,
+  formatRoute,
+  inferIncotermFromContext,
+  inheritPodForFcaRates,
+  Incoterm,
+  INCOTERM_OPTIONS,
   isAsianPod,
   isCountryNotPort,
   isDateInPast,
@@ -123,13 +128,33 @@ HARD RULES:
 8. Free-day info: notas_globales.
 9. LCL content: skip entirely. Indicators: "Insulation Chile/Argentina" headers, amounts "per pallet/M3/shipment", early "OF" column, no clear POL+POD+Type triple.
 10. Date formats accepted: dd/mm/yyyy, dd/mm (no year — frontend assumes the batch year), "Fin de Junio"/"end of June" (last day of month), "March 31st", "Q2 2026", Excel datetimes. Emit dd/mm/yyyy when possible, else the original token.
-11. POL / POD / Incoterms are LITERAL — never inferred. Only emit values that the source mentions verbatim:
-    - Source says "FOB San Antonio - Rotterdam" → POL="San Antonio", POD="Rotterdam"
-    - Source says "Manzanillo" alone → POL="Manzanillo", POD="" (do NOT guess Mexico vs Panama, do NOT add a country)
-    - Source says only "Mendoza" with no port → leave POL empty and put "Mendoza" / "FCA Mendoza" hint in that rate's notas
-    - Source has no POL/POD at all → emit empty strings. Do NOT invent Valparaíso, Santos, etc. The frontend flags empty values for the user to fill.
-    Never write a country name (Chile / Argentina / Brasil / Mendoza-as-region) as POL or POD. If you only know the country, the value is empty.
-12. Bundle inclusions (rule 5) preserve Incoterms LITERALLY: when the source says "FCA Santa Rita ... includes trucking, locales, flexitank, OF + EBS", emit notas like "Incluye: trucking en origen, gastos locales en origen, flexitank, ocean freight. FCA." Same for FOB / CFR / CIF. The Incoterm at the end is critical — it indicates whether the SF includes inland trucking. Only include the Incoterm if it appears literal in the source for that rate.
+11. POL / POD extraction by context — Inter-Tank operates from Chile so POL is implicit (chilean) when only one port is mentioned. Apply these three sub-rules in order:
+
+    A1. Single port WITHOUT a separator ("→", " - ", " to ") → that port is the POD. POL stays empty.
+        - "Rate 40 FOB Manzanillo OOCL = USD 695"   → pol="", pod="Manzanillo"
+        - "Tarifa 20 FOB Antwerp Hapag = USD 1600"  → pol="", pod="Antwerp"
+        - "Rate 20 OOCL = USD 580" (no port)        → pol="", pod="" (the frontend flags pod_missing)
+
+    A2. Two ports with a separator → first is POL, second is POD.
+        - "FOB San Antonio - Grangemouth"      → pol="San Antonio", pod="Grangemouth"
+        - "FCA Santa Rita - Rotterdam"         → pol="FCA Santa Rita", pod="Rotterdam"  (FCA prefix preserved on POL)
+        - "From San Antonio to Antwerp"        → pol="San Antonio", pod="Antwerp"
+
+    A3. FCA / EXW Argentine origin (Mendoza, Santa Rita, San Carlos, Tupungato, Rivadavia, San Juan, San Martín, Río Negro):
+        - POL = "FCA <ciudad>" (or "EXW <ciudad>"), preserving the original capitalization.
+        - POD = empty if not mentioned per-rate; the frontend's inheritPodForFcaRates step copies the batch's unique maritime POD when one exists.
+        - "Tarifa FCA Mendoza Flexi = USD 3070" in a Manzanillo-batch → pol="FCA Mendoza", pod="" (frontend inherits "Manzanillo")
+        - "Rate 40 FCA Santa Rita - Rotterdam" → pol="FCA Santa Rita", pod="Rotterdam" (literal both)
+
+    Never write a country / region name alone (Chile / Argentina / Brasil / Mendoza-as-region) as POL or POD. If only the country is known, leave the field empty. Do NOT invent Valparaíso / Santos / etc.
+
+12. Bundle inclusions (rule 5) preserve Incoterms LITERALLY: when the source says "FCA Santa Rita ... includes trucking, locales, flexitank, OF + EBS", emit notas like "Incluye: trucking en origen, gastos locales en origen, flexitank, ocean freight. FCA." Same for FOB / CFR / CIF. The Incoterm in the notas is the sentence-end stamp; the structured Incoterm field on the rate (rule 13) carries the canonical value.
+
+13. EXTRACT INCOTERM — emit a literal "incoterm" field on every rate row using one of: "FCA", "EXW", "FOB", "CIF", "CFR", or the placeholder "FOB/CIF/CFR" when the source is ambiguous.
+    - If the rate line literally mentions one of those Incoterms, emit that exact value (uppercase): "Rate 20 FOB Manzanillo" → incoterm="FOB", "Tarifa FCA Mendoza" → incoterm="FCA".
+    - GEOGRAPHIC FALLBACK: when no Incoterm word appears AND the POL is an Argentine pickup city (per rule A3 list), default incoterm="FCA".
+    - DEFAULT: when no Incoterm signal at all (no word in line, no Argentine POL), emit "FOB/CIF/CFR" — that's the placeholder for "ambiguous, resolved at billing time".
+    - NEVER make up an Incoterm that isn't in this six-value enum. If unsure between FOB/CIF/CFR, emit the placeholder rather than guessing.
 
 ${STRICT_RESPONSE_RULES_NO_LIMIT}`;
 
@@ -179,6 +204,8 @@ HARD RULES:
 8. Columns labeled BAF / Bunker / Surcharge whose cell value is literally "Included" / "Incl." / "Bundled" / "N/A": these mean the surcharge is bundled into SF. DO NOT emit them as kinds and DO NOT use them as numeric values. Append to that rate's notas: "BAF/Bunker incluido en SF.".
 9. Regional add-on rows like "Add San Carlos US$ 200 on top of Mendoza" → DO NOT emit them as a rate row. Skip; the frontend handles regional add-ons via a separate sweep.
 10. Rows whose SF cell is blank / missing / "TBD" / "Ask agent" but the row otherwise has POL+POD+Type+SL filled → STILL emit them. Set sf to null (NOT 0). The frontend flags these for user review rather than letting them disappear silently. The same applies to expired-validity rows (datetime in the past) — emit them; the frontend annotates and flags.
+
+7. EXTRACT INCOTERM — emit a literal "incoterm" on every rate row, one of "FCA" / "EXW" / "FOB" / "CIF" / "CFR" or the placeholder "FOB/CIF/CFR" for ambiguous. When a row is on a sheet whose POL column shows an Argentine pickup city (Mendoza, Santa Rita, San Carlos, Tupungato, Rivadavia, San Juan, San Martín, Río Negro) and no explicit Incoterm appears, default to "FCA". Otherwise default to "FOB/CIF/CFR". Never invent an Incoterm outside the six-value enum.
 
 If the chunk is not a rate table, return { "rates": [] }.
 
@@ -737,6 +764,7 @@ type RawRate = {
   kinds?: unknown;
   notas?: unknown;
   notes?: unknown;
+  incoterm?: unknown;
 };
 
 type RawKind = {
@@ -1583,6 +1611,18 @@ export default function NewRateFlow({
 
       // Multi-carrier rows clone into one row per carrier.
       const expanded = expandMultiCarrier(extracted.rates);
+      // POD inheritance for FCA / EXW Argentine rates: when the batch
+      // has a single unique POD across the maritime (non-FCA) rows, an
+      // FCA row without an explicit POD inherits it (Valle Redondo
+      // pattern). When there's no unique maritime POD, the FCA rows
+      // stay POD-empty and the frontend's pod_missing block fires.
+      const expandedTyped = expanded.map((r) => ({
+        ...r,
+        pol: toStr(r.pol),
+        pod: toStr(r.pod),
+        notas: toStr(r.notas ?? r.notes),
+      }));
+      const expandedWithPod = inheritPodForFcaRates(expandedTyped);
 
       // Compute the year hint for date normalization: prefer the year of
       // the batch's effective validity (so "31/6" / "Fin de Junio" land
@@ -1599,14 +1639,32 @@ export default function NewRateFlow({
       // that function for the criteria. SF=0 and SF<0 are PRESERVED as
       // legitimate values; the asian-POD exception lets differential rates
       // through without flagging.
-      const rows: Record<string, unknown>[] = expanded.map((r) => {
+      const rows: Record<string, unknown>[] = expandedWithPod.map((r) => {
         const baseNotes = toStr(r.notas ?? r.notes);
         const tipoOut = coerceContainerType(r.type ?? r.tipo);
         const carrier = toStr(r.carrier);
         const sl = toStr(r.sl) || carrier;
         const pol = toStr(r.pol);
         const pod = toStr(r.pod);
+        // route stays as a legacy fallback for display when neither pol
+        // nor pod is filled. Step 2 / RatesTab render via formatRoute
+        // which prefers pol/pod over this string.
         const route = toStr(r.route) || (pol && pod ? `${pol} - ${pod}` : pol || pod);
+        // Incoterm: prefer the literal value Claude emitted, then fall
+        // back to the geographic / notas heuristic. Always lands on one
+        // of the six valid Incoterm values; never undefined.
+        const rawIncoterm = toStr(r.incoterm).toUpperCase().trim();
+        const validIncoterm = (INCOTERM_OPTIONS as readonly string[]).includes(
+          rawIncoterm
+        )
+          ? (rawIncoterm as Incoterm)
+          : null;
+        const incoterm: Incoterm =
+          validIncoterm ??
+          inferIncotermFromContext({
+            pol,
+            notas: baseNotes,
+          });
         const sfNum = toNumber(r.sf);
         const sfParseable = isParsableNumber(r.sf);
         // BL Fee: a missing field defaults to 0 ONLY for Asian POD dry
@@ -1774,6 +1832,7 @@ export default function NewRateFlow({
           pod,
           route,
           tipo: tipoOut.tipo,
+          incoterm,
           sl,
           sf: sfNum,
           blFee: blFeeNum,
@@ -1879,6 +1938,21 @@ export default function NewRateFlow({
         : tipoOut.note
       : baseNotes;
     const trimmedBatchNotas = batchNotas.trim();
+    // Incoterm: trust the row's already-resolved value (set by the row
+    // converter in processInput, with Claude's literal + heuristic
+    // fallback). The inline edit row also writes this field via the
+    // dropdown, so by the time we get here it's always one of the six
+    // valid Incoterms. Defensive fallback: re-infer from the saved
+    // pol/notas if for some reason it's missing.
+    const rowIncoterm = toStr(row.incoterm).toUpperCase().trim();
+    const incoterm: Incoterm = (
+      INCOTERM_OPTIONS as readonly string[]
+    ).includes(rowIncoterm)
+      ? (rowIncoterm as Incoterm)
+      : inferIncotermFromContext({
+          pol: toStr(row.pol),
+          notas: notes,
+        });
     return {
       id: `rate-${stamp}-${idx}-${rand}`,
       agent: common.agent.trim(),
@@ -1887,6 +1961,7 @@ export default function NewRateFlow({
       pod: toStr(row.pod),
       route: toStr(row.route),
       tipo: tipoOut.tipo,
+      incoterm,
       sl: toStr(row.sl) || toStr(row.carrier),
       sf: toNumber(row.sf),
       blFee: toNumber(row.blFee),
@@ -2991,7 +3066,7 @@ function PreviewStep({
     return kv.value_unique === undefined ? "—" : `$${kv.value_unique}`;
   };
 
-  const baseHeaders = ["Carrier", "Ruta", "Tipo", "SF", "BL Fee"];
+  const baseHeaders = ["Carrier", "Ruta", "Tipo", "Incoterm", "SF", "BL Fee"];
   const allHeaders = [
     ...baseHeaders,
     ...kindColumns.map((c) => c.label),
@@ -3142,12 +3217,43 @@ function PreviewStep({
                       )}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {String(r.route ?? "") || (
-                        <span className="text-red-600">—</span>
-                      )}
+                      {(() => {
+                        const display = formatRoute(
+                          String(r.pol ?? ""),
+                          String(r.pod ?? ""),
+                          String(r.route ?? "")
+                        );
+                        if (display === "—") {
+                          return <span className="text-red-600">—</span>;
+                        }
+                        return display;
+                      })()}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       {String(r.tipo ?? "") || "—"}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {(() => {
+                        const inc = String(r.incoterm ?? "").trim();
+                        if (!inc) return <span className="text-gray-300">—</span>;
+                        const isAmbiguous = inc === "FOB/CIF/CFR";
+                        return (
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                              isAmbiguous
+                                ? "bg-gray-100 text-gray-700"
+                                : "bg-indigo-50 text-indigo-800"
+                            }`}
+                            title={
+                              isAmbiguous
+                                ? "Ambiguo: se resuelve al facturar"
+                                : `Incoterm: ${inc}`
+                            }
+                          >
+                            {inc}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       ${Number(r.sf ?? 0)}
@@ -3253,13 +3359,6 @@ function PreviewStep({
                             idx={idx}
                           />
                           <RowField
-                            label="Ruta"
-                            row={r}
-                            field="route"
-                            onChange={onUpdateField}
-                            idx={idx}
-                          />
-                          <RowField
                             label="Tipo"
                             row={r}
                             field="tipo"
@@ -3267,6 +3366,22 @@ function PreviewStep({
                             idx={idx}
                             list="new-rate-tipo-sugg"
                           />
+                          <label className="flex flex-col gap-1">
+                            Incoterm
+                            <select
+                              value={String(r.incoterm ?? "FOB/CIF/CFR")}
+                              onChange={(e) =>
+                                onUpdateField(idx, "incoterm", e.target.value)
+                              }
+                              className="border border-gray-200 rounded p-1.5 h-8 bg-white"
+                            >
+                              {INCOTERM_OPTIONS.map((opt) => (
+                                <option key={opt} value={opt}>
+                                  {opt}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
                           <RowField
                             label="SL"
                             row={r}

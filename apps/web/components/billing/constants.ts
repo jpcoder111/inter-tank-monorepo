@@ -173,6 +173,11 @@ export const RATES_STORAGE_KEY = "it_rates_v3";
 export const RATES_STORAGE_KEY_V2 = "it_rates_v2";
 export const RATES_STORAGE_KEY_V2_BACKUP = "it_rates_v2_backup_pre_v3";
 export const RATE_MIGRATION_FLAG = "rate_schema_v3_migrated";
+// v3.2 — adds Rate.incoterm. Backup the v3 blob before stamping each rate
+// with a derived incoterm (default "FOB/CIF/CFR" when no signal exists).
+// Idempotent: runs once per browser, controlled by the flag.
+export const RATE_MIGRATION_FLAG_V32 = "rate_schema_v3_2_incoterm_migrated";
+export const RATES_STORAGE_KEY_V32_BACKUP = "it_rates_v3_backup_pre_v32";
 export const EBS_STORAGE_KEY = "it_ebs_v4";
 export const LOCAL_STD_STORAGE_KEY = "it_local_std";
 export const LOCAL_EXCEPTIONS_STORAGE_KEY = "it_local_exceptions_v2";
@@ -357,6 +362,105 @@ export const KIND_ALIASES: Record<string, ReadonlyArray<string | RegExp>> = {
   ],
 };
 
+// ===== Incoterm and POL/POD geography =====
+//
+// The Inter-Tank workflow needs the Incoterm explicitly because invoicing
+// resolves "what's included in SF" (inland trucking vs port-to-port) by
+// the Incoterm of the rate. The literal taxonomy is the small ICC set —
+// FCA / EXW / FOB / CIF / CFR — plus a sentinel "FOB/CIF/CFR" used when
+// the source didn't disclose which of the three applies; the placeholder
+// is resolved at billing time against the customer's quote sheet.
+export type Incoterm = "FCA" | "EXW" | "FOB" | "CIF" | "CFR" | "FOB/CIF/CFR";
+
+// Order matters: the dropdown surfaces "FOB/CIF/CFR" first because it's
+// the default for ambiguous rates and the most frequent picked value.
+export const INCOTERM_OPTIONS: readonly Incoterm[] = [
+  "FOB/CIF/CFR",
+  "FCA",
+  "EXW",
+  "FOB",
+  "CIF",
+  "CFR",
+] as const;
+
+// Argentine cities that appear as POL on FCA / EXW Inter-Tank rates.
+// Inter-Tank's Mendoza-region trucking covers these. When a rate's POL
+// matches one of these (case-insensitive substring), the Incoterm
+// inference falls to "FCA" by default. Extend manually as new pickup
+// points appear in the field — match is intentionally case-insensitive
+// substring, so prefixed strings like "FCA Mendoza" or "EXW Santa Rita"
+// also match.
+export const ARG_POL_CITIES: readonly string[] = [
+  "mendoza",
+  "san carlos",
+  "tupungato",
+  "rivadavia",
+  "san juan",
+  "san martin",
+  "san martín",
+  "santa rita",
+  "rio negro",
+  "río negro",
+] as const;
+
+// True when a POL string contains any Argentine pickup city. Used by
+// the Incoterm inference + the FCA-pod-inheritance pipeline.
+export function isArgPol(pol: string): boolean {
+  if (!pol) return false;
+  const norm = pol.trim().toLowerCase();
+  return ARG_POL_CITIES.some((city) => norm.includes(city));
+}
+
+// Derives the Incoterm of a rate from whatever signal is available.
+// Order of priority (each step short-circuits):
+//   1. POL prefixed "FCA " or "EXW "
+//   2. POL matches an Argentine pickup city → "FCA"
+//   3. notas mention "EXW" → "EXW"
+//   4. notas mention "FCA" → "FCA"
+//   5. notas mention exactly one of FOB / CIF / CFR → that one
+//   6. fallback → "FOB/CIF/CFR"
+export function inferIncotermFromContext(input: {
+  pol?: string;
+  notas?: string;
+}): Incoterm {
+  const pol = (input.pol ?? "").trim();
+  const notas = input.notas ?? "";
+  if (/^FCA\b/i.test(pol)) return "FCA";
+  if (/^EXW\b/i.test(pol)) return "EXW";
+  if (isArgPol(pol)) return "FCA";
+  if (/\bEXW\b/i.test(notas)) return "EXW";
+  if (/\bFCA\b/i.test(notas)) return "FCA";
+  const fobMatch = /\bFOB\b/i.test(notas);
+  const cifMatch = /\bCIF\b/i.test(notas);
+  const cfrMatch = /\bCFR\b/i.test(notas);
+  const matchCount = [fobMatch, cifMatch, cfrMatch].filter(Boolean).length;
+  if (matchCount === 1) {
+    if (fobMatch) return "FOB";
+    if (cifMatch) return "CIF";
+    if (cfrMatch) return "CFR";
+  }
+  return "FOB/CIF/CFR";
+}
+
+// Renders a rate's route for display in the Step 2 preview table and the
+// RatesTab listing. Priority: pol AND pod with arrow → pod alone → pol
+// alone → legacy `route` field (for pre-v3 rates that never had pol/pod
+// split out) → em-dash.
+export function formatRoute(
+  pol: string | undefined,
+  pod: string | undefined,
+  fallbackRoute?: string | undefined
+): string {
+  const p = (pol ?? "").trim();
+  const d = (pod ?? "").trim();
+  if (p && d) return `${p} → ${d}`;
+  if (d) return d;
+  if (p) return p;
+  const fb = (fallbackRoute ?? "").trim();
+  if (fb) return fb;
+  return "—";
+}
+
 export type Rate = {
   id: string;
   agent: string;
@@ -390,6 +494,11 @@ export type Rate = {
   // either reader works. Free-form bullet-style notes (validity overrides,
   // bundle inclusions, market context). PER-RATE — specific to this row.
   notas?: string;
+  // v3.2 — billing-relevant trade term resolving "what's included in SF"
+  // (port-to-port vs inland-trucking-included). Optional in the type so
+  // pre-v3.2 records still type-check; migrateRateV32 stamps every rate
+  // with at least "FOB/CIF/CFR" via inferIncotermFromContext.
+  incoterm?: Incoterm;
   // Denormalized copy of the batch's notas_globales. Stored on each rate
   // saved in a single batch so the rate is self-contained for invoicing /
   // listing without needing a separate batch lookup table. UI should show
@@ -1591,6 +1700,99 @@ function ensureRateMigration(): void {
 
 if (typeof window !== "undefined") {
   ensureRateMigration();
+}
+
+// v3.2 migration — stamps Rate.incoterm on records that pre-date the
+// field. Idempotent: backed by RATE_MIGRATION_FLAG_V32 so it runs once
+// per browser. On a fresh wipe (it_rates_v3 = []) this just sets the
+// flag and returns; new rates created post-wipe get incoterm at
+// extraction time and don't need migration.
+export function migrateRateV32(rate: Rate): Rate {
+  if (rate.incoterm) return rate;
+  return {
+    ...rate,
+    incoterm: inferIncotermFromContext({
+      pol: rate.pol,
+      notas: rate.notas ?? rate.notes ?? "",
+    }),
+  };
+}
+
+let _migrationV32Done = false;
+function ensureRateMigrationV32(): void {
+  if (_migrationV32Done) return;
+  if (typeof window === "undefined") return;
+  try {
+    if (window.localStorage.getItem(RATE_MIGRATION_FLAG_V32) === "true") {
+      _migrationV32Done = true;
+      return;
+    }
+    const v3raw = window.localStorage.getItem(RATES_STORAGE_KEY);
+    if (v3raw) {
+      window.localStorage.setItem(RATES_STORAGE_KEY_V32_BACKUP, v3raw);
+      try {
+        const parsed = JSON.parse(v3raw) as unknown[];
+        if (Array.isArray(parsed)) {
+          const migrated = parsed.map((r) =>
+            migrateRateV32(r as Rate)
+          );
+          window.localStorage.setItem(
+            RATES_STORAGE_KEY,
+            JSON.stringify(migrated)
+          );
+        }
+      } catch {
+        // bad parse — backup stays, flag still gets set so we don't loop
+      }
+    }
+    window.localStorage.setItem(RATE_MIGRATION_FLAG_V32, "true");
+  } catch {
+    // localStorage disabled / quota — skip silently
+  } finally {
+    _migrationV32Done = true;
+  }
+}
+
+if (typeof window !== "undefined") {
+  ensureRateMigrationV32();
+}
+
+// Inherit POD on FCA / EXW rate rows from the batch's unique maritime
+// POD when it exists. Inter-Tank emails sometimes list the FCA Mendoza
+// rate without an explicit POD because the batch's other rate rows
+// already establish the destination port (Valle Redondo: 6 FOB
+// Manzanillo + 2 FCA Mendoza, the FCA rates inherit "Manzanillo"
+// silently). When the batch has multiple distinct PODs across maritime
+// rates, no inheritance happens and the FCA row stays POD-empty so the
+// pod_missing block fires.
+export function inheritPodForFcaRates<
+  T extends { pol?: string; pod?: string; notas?: string }
+>(rates: T[]): T[] {
+  const isFcaOrExw = (pol: string) =>
+    /^(?:FCA|EXW)\b/i.test(pol) || isArgPol(pol);
+  const maritimePods = new Set<string>();
+  for (const r of rates) {
+    const pol = (r.pol ?? "").trim();
+    const pod = (r.pod ?? "").trim();
+    if (isFcaOrExw(pol)) continue;
+    if (pod) maritimePods.add(pod);
+  }
+  if (maritimePods.size !== 1) return rates;
+  const inheritedPod = Array.from(maritimePods)[0]!;
+  return rates.map((r) => {
+    const pol = (r.pol ?? "").trim();
+    const pod = (r.pod ?? "").trim();
+    if (!isFcaOrExw(pol)) return r;
+    if (pod) return r;
+    const baseNotas = r.notas ?? "";
+    const heritageNote = "POD heredado del batch";
+    const newNotas = baseNotas
+      ? baseNotas.includes(heritageNote)
+        ? baseNotas
+        : `${baseNotas}\n${heritageNote}`
+      : heritageNote;
+    return { ...r, pod: inheritedPod, notas: newNotas };
+  });
 }
 
 // True if a rate has a 20'/40' cost of the given kind. Convenience for

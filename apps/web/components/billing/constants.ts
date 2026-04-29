@@ -339,6 +339,14 @@ export type KindDef = {
   by_size: boolean;
   // false for user-created custom kinds; true for the hardcoded catalog below.
   predefined: boolean;
+  // Optional per-rate restriction. When defined, the kind applies ONLY to
+  // rates whose id is listed here. When undefined, the kind applies to every
+  // rate of the batch (modulo the existing dry/reefer/all scope filter).
+  // Populated by the Fix 1 sweep that detects "Doesn't include Disposal
+  // USD 190" phrases sitting on specific Excel rows (KATAOKA fixture):
+  // those rates carry the kind, the rest do not. Legacy rates that lack
+  // the field continue to behave as scope-all.
+  affected_rate_ids?: string[];
 };
 
 export type KindValue = {
@@ -2617,6 +2625,239 @@ export function findSimilarAgent(
   }
   scored.sort((a, b) => b.score - a.score);
   return { exactMatch: null, similar: scored.map((s) => s.name) };
+}
+
+// Hardcoded shorthand → canonical agent name table. The catalog grows when
+// the operations team confirms that two strings refer to the same agent.
+// Lookup is case-insensitive (the resolver upper-cases the input). Adding a
+// new pair consolidates pending-Q computations and prevents duplicate agent
+// folders in localStorage.
+export const AGENT_ALIASES: Record<string, string> = {
+  WR: "WENRAN",
+  BLG: "BALGUERIE",
+  KTK: "KATAOKA",
+  VM: "Van Moer",
+  VR: "Valle Redondo",
+};
+
+// Standard Levenshtein edit distance with a small early-exit when the
+// length delta already exceeds the cap. Used by resolveAgentCanonical to
+// bridge typos like "Wenrn" → "WENRAN" without introducing an alias.
+// (Suffix `Capped` because constants.ts already has a private uncapped
+// `levenshtein` for argClient name similarity scoring.)
+export function levenshteinCapped(a: string, b: string, cap = 6): number {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > cap) return cap + 1;
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= n; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,         // deletion
+        curr[j - 1] + 1,      // insertion
+        prev[j - 1] + cost    // substitution
+      );
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > cap) return cap + 1;
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+export type AgentResolution = {
+  canonical: string;
+  source: "alias" | "exact" | "levenshtein";
+  confidence: number;
+  distance?: number;
+};
+
+// Resolves a free-form agent input to the canonical name already in the
+// catalog (or in AGENT_ALIASES). Three escalating sources:
+//   - "alias"      → AGENT_ALIASES match (hardcoded shorthand)
+//   - "exact"      → case-insensitive direct hit on a known agent
+//   - "levenshtein"→ edit distance ≤ 2 against any known agent (typo bridge)
+// Returns null when the input is genuinely a new agent — the caller then
+// proceeds without prompting.
+export function resolveAgentCanonical(
+  input: string,
+  knownAgents: ReadonlyArray<string>
+): AgentResolution | null {
+  const normalized = input.trim();
+  if (!normalized) return null;
+  const upper = normalized.toUpperCase();
+  const aliasHit = AGENT_ALIASES[upper];
+  if (aliasHit) {
+    return { canonical: aliasHit, source: "alias", confidence: 1 };
+  }
+  const lower = normalized.toLowerCase();
+  for (const known of knownAgents) {
+    if (known.trim().toLowerCase() === lower) {
+      return { canonical: known.trim(), source: "exact", confidence: 1 };
+    }
+  }
+  let best: { canonical: string; distance: number } | null = null;
+  for (const known of knownAgents) {
+    const cand = known.trim();
+    if (!cand) continue;
+    const d = levenshteinCapped(lower, cand.toLowerCase(), 2);
+    if (d <= 2 && (!best || d < best.distance)) {
+      best = { canonical: cand, distance: d };
+    }
+  }
+  if (best) {
+    return {
+      canonical: best.canonical,
+      source: "levenshtein",
+      confidence: 0.8,
+      distance: best.distance,
+    };
+  }
+  return null;
+}
+
+// Returns the canonical agent for a free-form name when the resolver finds
+// one, or the trimmed input otherwise. Used by computePendingAgents to
+// dedupe alias variants when listing known agents.
+export function canonicalizeAgentName(
+  input: string,
+  knownAgents: ReadonlyArray<string>
+): string {
+  const trimmed = input.trim();
+  if (!trimmed) return trimmed;
+  const upper = trimmed.toUpperCase();
+  if (AGENT_ALIASES[upper]) return AGENT_ALIASES[upper];
+  const resolved = resolveAgentCanonical(trimmed, knownAgents);
+  if (resolved && resolved.source !== "levenshtein") return resolved.canonical;
+  return trimmed;
+}
+
+// Derives a quarter label ("Q2 2026") from a (validFrom, validTo) pair when
+// the dates land exactly on quarter boundaries. Falls back to a literal
+// dd/mm/yyyy – dd/mm/yyyy range when the dates don't match a single quarter
+// (cross-quarter spans, partial months, etc.). Used by computePendingAgents
+// to label "último Q cargado" in the badge dropdown.
+export function deriveQuarterFromDates(
+  validFrom: string | null | undefined,
+  validTo: string | null | undefined
+): string {
+  const from = (validFrom ?? "").trim();
+  const to = (validTo ?? "").trim();
+  if (!from || !to) return "Sin tarifas previas";
+  const fromMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(from);
+  const toMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(to);
+  if (fromMatch && toMatch && fromMatch[1] === toMatch[1]) {
+    const year = fromMatch[1]!;
+    const fmonth = parseInt(fromMatch[2]!, 10);
+    const fday = parseInt(fromMatch[3]!, 10);
+    const tmonth = parseInt(toMatch[2]!, 10);
+    const tday = parseInt(toMatch[3]!, 10);
+    for (const q of QUARTER_ORDER) {
+      const range = QUARTER_RANGES[q];
+      if (
+        fmonth === range.startMonth &&
+        fday === range.startDay &&
+        tmonth === range.endMonth &&
+        tday === range.endDay
+      ) {
+        return `${q} ${year}`;
+      }
+    }
+  }
+  return `${formatDateCl(from)} – ${formatDateCl(to)}`;
+}
+
+export type PendingAgent = {
+  agent: string;
+  lastQuarterLabel: string;
+  lastValidTo: string | null;
+  rateCount: number;
+};
+
+// Computes the list of agents that have rates in the catalog but NONE that
+// fall inside the selected quarters' date range. Alias-canonicalises agent
+// names so "WR" + "WENRAN" collapse to a single entry. Sorted by oldest
+// last-validTo first (most stale → most pressing follow-up). Agents that
+// never had a rate in the past also appear with lastValidTo=null.
+export function computePendingAgents(
+  rates: ReadonlyArray<Rate>,
+  selectedYear: number,
+  picked: Set<Quarter>
+): PendingAgent[] {
+  const range = quartersToDateRange(selectedYear, picked);
+  if (!range) return [];
+  // Group rates by canonical agent name. The grouping uses the resolver's
+  // "alias" / "exact" sources only; Levenshtein matches are intentionally
+  // skipped here because we don't want a typo'd entry to silently fold
+  // into a different agent's bucket without user confirmation.
+  const display = new Map<string, string>();
+  for (const r of rates) {
+    const a = r.agent.trim();
+    if (!a) continue;
+    const upper = a.toUpperCase();
+    const canonical = AGENT_ALIASES[upper] ?? a;
+    const key = canonical.toLowerCase();
+    if (!display.has(key)) display.set(key, canonical);
+  }
+  const grouped = new Map<string, Rate[]>();
+  for (const r of rates) {
+    const a = r.agent.trim();
+    if (!a) continue;
+    const upper = a.toUpperCase();
+    const canonical = AGENT_ALIASES[upper] ?? a;
+    const key = canonical.toLowerCase();
+    const list = grouped.get(key) ?? [];
+    list.push(r);
+    grouped.set(key, list);
+  }
+  const pending: PendingAgent[] = [];
+  for (const [key, agentRates] of grouped) {
+    const hasInQ = agentRates.some((r) => {
+      const from = (r.validFrom ?? "").trim();
+      const to = (r.validTo ?? "").trim();
+      if (!from && !to) return false;
+      // Overlap test: rate's [from..to] intersects the picked range.
+      const rateFrom = from || range.validFrom;
+      const rateTo = to || range.validTo;
+      return rateFrom <= range.validTo && rateTo >= range.validFrom;
+    });
+    if (hasInQ) continue;
+    // Pick the most recent rate by validTo for the "último Q cargado"
+    // label. Rates without a validTo land at the bottom of the sort.
+    const sorted = agentRates.slice().sort((a, b) => {
+      const aTo = (a.validTo ?? "").trim();
+      const bTo = (b.validTo ?? "").trim();
+      return bTo.localeCompare(aTo);
+    });
+    const last = sorted[0];
+    const lastValidTo = (last?.validTo ?? "").trim() || null;
+    const lastQuarterLabel = lastValidTo
+      ? deriveQuarterFromDates(last?.validFrom ?? null, last?.validTo ?? null)
+      : "Sin tarifas previas";
+    pending.push({
+      agent: display.get(key) ?? key,
+      lastQuarterLabel,
+      lastValidTo,
+      rateCount: agentRates.length,
+    });
+  }
+  // Oldest first (most stale at the top). Agents with no validTo go to the
+  // very top — they're the most overdue.
+  pending.sort((a, b) => {
+    if (!a.lastValidTo && !b.lastValidTo) return a.agent.localeCompare(b.agent);
+    if (!a.lastValidTo) return -1;
+    if (!b.lastValidTo) return 1;
+    return a.lastValidTo.localeCompare(b.lastValidTo);
+  });
+  return pending;
 }
 
 // Quarter helpers. Q1 = 01/01–31/03, Q2 = 01/04–30/06, etc. When the user

@@ -14,9 +14,11 @@ import {
   KindScope,
   KindValue,
   PREDEFINED_KINDS,
+  PendingAgent,
   Quarter,
   Rate,
   carrierColor,
+  computePendingAgents,
   consolidatePreferentialNotes,
   detectAgencyFee,
   detectAgencyFeeMax,
@@ -29,6 +31,8 @@ import {
   detectRegionalAddons,
   detectSubClientSuffixes,
   detectThermalLinerUnsized,
+  type AgentResolution,
+  resolveAgentCanonical,
   extractPreferentialClientsFromLabel,
   extractSizeFromKindLabel,
   filterBatchNotesText,
@@ -1128,6 +1132,44 @@ function expandMultiCarrier(rates: RawRate[]): RawRate[] {
 // block, per-rate notas) for kind patterns that might have slipped past the
 // structured extraction. Returns NEW kinds + values to append; only emits
 // kinds whose id isn't already present in `existing`.
+// Filters Excel-extracted rate.notas content so the Step 2 / saved-rate
+// "Notas" column doesn't carry junk values that already live in dedicated
+// fields (Incoterm, POL). KATAOKA fixture surfaces Comments column data
+// that mixes legitimate notes ("Rate includes 24,000 lts flexi...") with
+// repeated single-token cells like "FOB" / "FCA" / "FCA Mendoza" — those
+// are read off the Incoterm / POL columns and provide no information
+// once the structured fields exist. Rules:
+//   - drop a line that exactly equals the rate's incoterm
+//   - drop a line that exactly equals the rate's pol
+//   - drop standalone Incoterm tokens, optionally followed by a city
+//   - drop very short lines (< 5 chars) — almost always junk
+//   - drop excluded-kind phrases (Fix 1 byproduct: "Doesn't included
+//     Disposal USD 190" is now tagged on the rate via affected_rate_ids)
+// Multi-line input: each line is filtered independently and rejoined.
+function cleanIndividualNotes(
+  raw: string,
+  context: { incoterm?: string; pol?: string }
+): string {
+  if (!raw) return "";
+  const sanitized = detectExcludedKindsFromText(raw).sanitizedText;
+  const incNorm = (context.incoterm ?? "").trim().toUpperCase();
+  const polNorm = (context.pol ?? "").trim().toLowerCase();
+  const lines = sanitized
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const incotermStandaloneRe =
+    /^(FOB|CIF|CFR|FCA|EXW)(?:\s+[A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]*)?$/i;
+  const filtered = lines.filter((line) => {
+    if (incNorm && line.toUpperCase() === incNorm) return false;
+    if (polNorm && line.toLowerCase() === polNorm) return false;
+    if (incotermStandaloneRe.test(line)) return false;
+    if (line.length < 5) return false;
+    return true;
+  });
+  return filtered.join("\n").trim();
+}
+
 function sweepKindsFromText(
   text: string,
   existing: KindDef[]
@@ -1803,18 +1845,20 @@ export default function NewRateFlow({
       // Fix 1: Excluded-kind phrases ("Doesn't included Disposal USD 190")
       // sit inside Comments column cells on the rate-shaped sheet (KATAOKA
       // fixture). They name a kind that's NOT bundled into SF AND carry
-      // its USD value — but the parser only saw the kind name and lost
-      // the value because no "=" separates them. Run the detector over
-      // every text source the LLM might see and strip the phrases so the
-      // LLM doesn't try to re-emit the value as a custom kind. The hits
-      // are merged into detected.kinds further below.
+      // its USD value. The Bundle 2 strategy: detect them up-front (so we
+      // know which kinds need to materialise globally), but DO NOT strip
+      // them from the Excel text fed to the LLM. Letting the LLM see the
+      // phrase in the Comments cell makes it route the comment into the
+      // rate's notas, which we later scan to tag affected_rate_ids on the
+      // matching kind and to clean the per-row notes (Fix 2 spillover).
+      // Paste / docx / kindsBlock still use the sanitized text — those
+      // sources don't have a per-row structure so the kind stays global.
       const excludedFromExcel = detectExcludedKindsFromText(excelText);
       const excludedFromPaste = detectExcludedKindsFromText(cleanedPasteText);
       const excludedFromDocx = detectExcludedKindsFromText(cleanedDocxText);
       const excludedFromKindsBlock = detectExcludedKindsFromText(
         cleanedExcelKindsBlock
       );
-      const cleanedExcelText = excludedFromExcel.sanitizedText;
       const cleanedPasteTextFinal = excludedFromPaste.sanitizedText;
       const cleanedDocxTextFinal = excludedFromDocx.sanitizedText;
       const cleanedExcelKindsBlockFinal =
@@ -1836,11 +1880,19 @@ export default function NewRateFlow({
         if (!excludedKindHitsMap.has(key)) excludedKindHitsMap.set(key, h);
       }
       const allExcludedKindHits = Array.from(excludedKindHitsMap.values());
+      // Track which excluded-kind hits originated from the Excel rate
+      // pipeline. Only those get per-row affected_rate_ids tagging — paste
+      // and docx hits stay global (no per-row structure to correlate).
+      const excelExcludedKindIds = new Set(
+        excludedFromExcel.hits.map((h) => h.kindId)
+      );
 
-      if (cleanedExcelText) {
+      if (excelText) {
         // LCL + catalog sheets were already filtered out at read time —
-        // excelText only contains rate-classified sheet content.
-        const chunks = chunkExcelCsv(cleanedExcelText);
+        // excelText only contains rate-classified sheet content. The raw
+        // text reaches the LLM intact (Fix 1 needs phrases preserved on
+        // their originating rows).
+        const chunks = chunkExcelCsv(excelText);
         const items = chunks.map((c, i) => ({
           index: i + 1,
           content: `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${c}`,
@@ -2056,7 +2108,7 @@ export default function NewRateFlow({
       // textarea defaults to empty so the user only sees content
       // they care about.
       const fullText = [
-        cleanedExcelText,
+        excelText,
         cleanedExcelKindsBlockFinal,
         cleanedPasteTextFinal,
         cleanedDocxTextFinal,
@@ -2170,8 +2222,9 @@ export default function NewRateFlow({
       // that function for the criteria. SF=0 and SF<0 are PRESERVED as
       // legitimate values; the asian-POD exception lets differential rates
       // through without flagging.
-      const rows: Record<string, unknown>[] = expandedWithPod.map((r) => {
-        const baseNotes = toStr(r.notas ?? r.notes);
+      const previewIdStamp = Date.now();
+      const rows: Record<string, unknown>[] = expandedWithPod.map((r, rowIdx) => {
+        const rawNotesField = toStr(r.notas ?? r.notes);
         const tipoOut = coerceContainerType(r.type ?? r.tipo);
         const carrier = toStr(r.carrier);
         const sl = toStr(r.sl) || carrier;
@@ -2183,7 +2236,10 @@ export default function NewRateFlow({
         const route = toStr(r.route) || (pol && pod ? `${pol} - ${pod}` : pol || pod);
         // Incoterm: prefer the literal value Claude emitted, then fall
         // back to the geographic / notas heuristic. Always lands on one
-        // of the six valid Incoterm values; never undefined.
+        // of the six valid Incoterm values; never undefined. Computed
+        // BEFORE baseNotes so cleanIndividualNotes can drop incoterm
+        // tokens that the LLM accidentally pushed into the comments
+        // column (KATAOKA fixture: "FOB" / "FCA Mendoza" lines).
         const rawIncoterm = toStr(r.incoterm).toUpperCase().trim();
         const validIncoterm = (INCOTERM_OPTIONS as readonly string[]).includes(
           rawIncoterm
@@ -2194,8 +2250,12 @@ export default function NewRateFlow({
           validIncoterm ??
           inferIncotermFromContext({
             pol,
-            notas: baseNotes,
+            notas: rawNotesField,
           });
+        const baseNotes = cleanIndividualNotes(rawNotesField, { incoterm, pol });
+        const previewId = `preview-${previewIdStamp}-${rowIdx}-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
         const sfNum = toNumber(r.sf);
         const sfParseable = isParsableNumber(r.sf);
         // BL Fee: a missing field defaults to 0 ONLY for Asian POD dry
@@ -2358,6 +2418,13 @@ export default function NewRateFlow({
           blockingType = "pod_missing";
         }
         return {
+          // Stable preview-row id assigned at extraction time. Used by
+          // Fix 1 (affected_rate_ids) to track which rates a given
+          // excluded-kind hit applies to — and reused as the saved
+          // Rate.id at buildRateFromRow time so the link survives the
+          // commit. Multi-carrier expansion in commitAndCloseEdit
+          // generates fresh ids for clones.
+          _id: previewId,
           carrier,
           pol,
           pod,
@@ -2378,6 +2445,47 @@ export default function NewRateFlow({
           _uncheckByDefault: !!blockingMessage,
         };
       });
+
+      // Fix 1 second pass: walk every preview row's notes scanning for
+      // excluded-kind phrases. Rates whose notes carry "Doesn't included
+      // Disposal USD 190" tag the matching kind's affected_rate_ids
+      // (only kinds that originated from the Excel sweep — paste / docx
+      // hits stay global). Strip the matched phrase from the row's
+      // notes so the user-visible Notas column doesn't repeat it.
+      if (excelExcludedKindIds.size > 0) {
+        const affectedByKindId = new Map<string, Set<string>>();
+        for (const row of rows) {
+          const rowNotes = String(row.notes ?? "");
+          if (!rowNotes) continue;
+          const detect = detectExcludedKindsFromText(rowNotes);
+          if (detect.hits.length === 0) continue;
+          // Re-clean the now-sanitized notes against the row's incoterm /
+          // pol so any incoterm token that landed alongside the phrase
+          // also gets dropped.
+          row.notes = cleanIndividualNotes(detect.sanitizedText, {
+            incoterm: String(row.incoterm ?? ""),
+            pol: String(row.pol ?? ""),
+          });
+          for (const hit of detect.hits) {
+            if (!excelExcludedKindIds.has(hit.kindId)) continue;
+            let set = affectedByKindId.get(hit.kindId);
+            if (!set) {
+              set = new Set<string>();
+              affectedByKindId.set(hit.kindId, set);
+            }
+            set.add(String(row._id));
+          }
+        }
+        if (affectedByKindId.size > 0) {
+          setBatchKinds((prev) =>
+            prev.map((k) => {
+              const ids = affectedByKindId.get(k.id);
+              if (!ids || ids.size === 0) return k;
+              return { ...k, affected_rate_ids: Array.from(ids) };
+            })
+          );
+        }
+      }
 
       // Drop phantom rate rows (kind-leaks) from the preview entirely.
       // _blockingType === "phantom_kind" is set by the row converter when
@@ -2469,6 +2577,13 @@ export default function NewRateFlow({
   ): Rate => {
     const stamp = Date.now();
     const rand = Math.random().toString(36).slice(2, 8);
+    // Reuse the stable preview id when present so kinds with
+    // affected_rate_ids continue to reference the right rate after
+    // commit. Falls back to a fresh id for legacy paths (edit-mode
+    // single rate, or rows that were cloned via commitAndCloseEdit
+    // without an id assignment).
+    const previewId = toStr(row._id);
+    const finalId = previewId || `rate-${stamp}-${idx}-${rand}`;
     const tipoRaw = toStr(row.tipo);
     const tipoOut = CONTAINER_TYPES.includes(tipoRaw as ContainerType)
       ? { tipo: tipoRaw as ContainerType, note: undefined as string | undefined }
@@ -2499,7 +2614,7 @@ export default function NewRateFlow({
           notas: notes,
         });
     return {
-      id: `rate-${stamp}-${idx}-${rand}`,
+      id: finalId,
       agent: common.agent.trim(),
       carrier: toStr(row.carrier),
       pol: toStr(row.pol),
@@ -2527,8 +2642,42 @@ export default function NewRateFlow({
     };
   };
 
+  // Agent alias / Levenshtein suggestion modal state (Fix 4). When the
+  // user types an abbreviation that resolves to an existing canonical
+  // agent ("WR" → WENRAN, "Wenrn" → WENRAN), the resolver flags it and
+  // we surface a confirmation modal before navigating to Step 2 — so the
+  // operator can either fold into the existing agent's catalog or
+  // explicitly create a new one with the typed name.
+  const [agentSuggestion, setAgentSuggestion] = useState<{
+    typed: string;
+    resolution: AgentResolution;
+    canonicalRateCount: number;
+  } | null>(null);
+  const knownAgentNames = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of existingRates) {
+      const name = r.agent.trim();
+      if (name) set.add(name);
+    }
+    return Array.from(set);
+  }, [existingRates]);
+
   const continueToPreview = () => {
     if (continueErrors.length > 0) return;
+    const typed = effectiveAgent.trim();
+    if (typed) {
+      const resolution = resolveAgentCanonical(typed, knownAgentNames);
+      // Skip the modal when the resolver returns nothing (genuinely new
+      // agent) OR when it resolved exactly to what the user typed (no
+      // ambiguity to flag).
+      if (resolution && resolution.canonical.toLowerCase() !== typed.toLowerCase()) {
+        const canonicalRateCount = existingRates.filter(
+          (r) => r.agent.trim().toLowerCase() === resolution.canonical.toLowerCase()
+        ).length;
+        setAgentSuggestion({ typed, resolution, canonicalRateCount });
+        return;
+      }
+    }
     setStep("preview");
   };
 
@@ -2710,6 +2859,10 @@ export default function NewRateFlow({
     // Multi-carrier: split into N rows. Selection of the original
     // row maps to all clones (they share the same identifying fields
     // beyond carrier). Indices of all rows past idx shift by (N-1).
+    // Each clone past the first gets a fresh _id so kinds carrying
+    // affected_rate_ids can be re-targeted by the user (the original
+    // _id stays on the first clone — that one inherits any existing
+    // affected_rate_ids ownership).
     setPreviewRows((prev) => {
       const next: Record<string, unknown>[] = [];
       for (let i = 0; i < prev.length; i++) {
@@ -2717,10 +2870,18 @@ export default function NewRateFlow({
           next.push(prev[i]!);
           continue;
         }
-        for (const c of carriers) {
+        for (let k = 0; k < carriers.length; k++) {
+          const c = carriers[k]!;
+          const cloneId =
+            k === 0
+              ? prev[i]!._id
+              : `preview-${Date.now()}-${i}-${k}-${Math.random()
+                  .toString(36)
+                  .slice(2, 8)}`;
           const cloned = recomputeRowFlags(
             {
               ...prev[i]!,
+              _id: cloneId,
               carrier: c,
               sl: c,
             },
@@ -2844,6 +3005,12 @@ export default function NewRateFlow({
           suggestions={agentSuggestions}
           match={agentMatch}
         />
+        <PendingAgentsBadge
+          rates={existingRates}
+          quarterYear={quarterYear}
+          picked={quarterPicked}
+          onPickAgent={(name) => setAgent(name)}
+        />
 
         {/* Inferred-agent banner. Shown only when extraction inferred a name
             AND the user has nothing typed — never overrides a non-empty input. */}
@@ -2952,6 +3119,7 @@ export default function NewRateFlow({
         <Step1KindsEditor
           kinds={batchKinds}
           values={batchKindValues}
+          totalRows={previewRows.length}
           onAdd={addKind}
           onRemove={removeKind}
           onUpdateDef={updateKindDef}
@@ -3074,6 +3242,64 @@ export default function NewRateFlow({
             ))}
           </ul>
         )}
+
+        {agentSuggestion && (() => {
+          const { typed, resolution, canonicalRateCount } = agentSuggestion;
+          const reason =
+            resolution.source === "alias"
+              ? `"${typed}" suele ser una abreviatura de "${resolution.canonical}"`
+              : resolution.source === "exact"
+                ? `"${typed}" coincide con "${resolution.canonical}" (sólo difiere en mayúsculas)`
+                : `"${typed}" se parece a "${resolution.canonical}"${
+                    resolution.distance !== undefined
+                      ? ` (distancia ${resolution.distance})`
+                      : ""
+                  }`;
+          const useCanonical = () => {
+            setAgent(resolution.canonical);
+            setAgentSuggestion(null);
+            setStep("preview");
+          };
+          const keepTyped = () => {
+            setAgentSuggestion(null);
+            setStep("preview");
+          };
+          const cancel = () => {
+            setAgentSuggestion(null);
+          };
+          return (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+              onClick={cancel}
+            >
+              <div
+                className="bg-white rounded-lg shadow-lg max-w-md w-full mx-4 p-5 flex flex-col gap-3"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h4 className="font-semibold text-base">
+                  ¿Quisiste decir {resolution.canonical}?
+                </h4>
+                <p className="text-sm text-gray-700">
+                  {reason}. Ya hay <strong>{canonicalRateCount}</strong>{" "}
+                  tarifa{canonicalRateCount === 1 ? "" : "s"} guardada
+                  {canonicalRateCount === 1 ? "" : "s"} con ese agente — si
+                  son los mismos, conviene consolidar.
+                </p>
+                <div className="flex justify-end gap-2 flex-wrap">
+                  <Button variant="outline" onClick={cancel}>
+                    Cancelar
+                  </Button>
+                  <Button variant="outline" onClick={keepTyped}>
+                    No, crear &quot;{typed}&quot;
+                  </Button>
+                  <Button onClick={useCanonical}>
+                    Sí, usar {resolution.canonical}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {validationModal && (() => {
           const fieldsLabel =
@@ -3210,6 +3436,129 @@ function Step1AgentField({
   );
 }
 
+// Surfaces the list of agents whose rates DON'T overlap the picked
+// quarters, so the operator can quickly load whatever's stale. Hidden
+// entirely when nothing is pending. Click on the badge expands a sorted
+// dropdown (oldest validTo first); click on an entry autocompletes the
+// agent input. Recomputes reactively whenever rates / picked / year
+// change. Alias-canonicalisation collapses "WR" + "WENRAN" so the list
+// doesn't double-count.
+function PendingAgentsBadge({
+  rates,
+  quarterYear,
+  picked,
+  onPickAgent,
+}: {
+  rates: Rate[];
+  quarterYear: number;
+  picked: Set<Quarter>;
+  onPickAgent: (name: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const pending = useMemo<PendingAgent[]>(
+    () => computePendingAgents(rates, quarterYear, picked),
+    [rates, quarterYear, picked]
+  );
+  // Reset the expanded panel when the badge shrinks to zero entries
+  // (e.g. user just loaded a tariff that filled the gap).
+  useEffect(() => {
+    if (pending.length === 0) setExpanded(false);
+  }, [pending.length]);
+  if (picked.size === 0) return null;
+  if (pending.length === 0) return null;
+  const quarterTag = Array.from(picked).join("/") + ` ${quarterYear}`;
+  return (
+    <div className="flex flex-col gap-1">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="self-start text-xs px-2 py-1 rounded-full border bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100 cursor-pointer flex items-center gap-1"
+        title={
+          expanded
+            ? "Colapsar lista"
+            : "Click para ver qué agentes te faltan cargar"
+        }
+      >
+        <span aria-hidden="true">📋</span>
+        <span>
+          {pending.length} agente{pending.length === 1 ? "" : "s"} pendiente
+          {pending.length === 1 ? "" : "s"} para {quarterTag}
+        </span>
+        <span className="text-gray-400 ml-1">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && (
+        <div className="border border-gray-200 rounded-md bg-white shadow-sm flex flex-col">
+          <div className="text-xs text-gray-500 px-3 py-1.5 border-b border-gray-200 bg-gray-50">
+            Pendientes {quarterTag} ({pending.length}) · ordenados por
+            antigüedad
+          </div>
+          <ul className="flex flex-col divide-y divide-gray-100 max-h-64 overflow-y-auto">
+            {pending.map((p) => {
+              const stale = isStaleVsPicked(p.lastValidTo, quarterYear, picked);
+              return (
+                <li key={p.agent}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPickAgent(p.agent);
+                      setExpanded(false);
+                    }}
+                    className="w-full text-left px-3 py-1.5 hover:bg-blue-50 cursor-pointer text-xs flex items-center gap-2"
+                  >
+                    <span className="text-gray-500">▸</span>
+                    <span className="font-medium text-gray-800 flex-1">
+                      {p.agent}
+                    </span>
+                    <span className="text-gray-500">
+                      {p.lastValidTo
+                        ? `último ${p.lastQuarterLabel}`
+                        : "sin tarifas previas"}
+                    </span>
+                    {stale && (
+                      <span className="text-amber-700" title={stale}>
+                        ⚠️ {stale}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Returns a short staleness label ("vencido hace 2Q") when the agent's
+// last validTo predates the picked quarters by at least one quarter.
+// Empty string otherwise. Used inline by PendingAgentsBadge to highlight
+// long-overdue entries.
+function isStaleVsPicked(
+  lastValidTo: string | null,
+  pickedYear: number,
+  picked: Set<Quarter>
+): string {
+  if (!lastValidTo) return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(lastValidTo);
+  if (!m) return "";
+  const lastYear = parseInt(m[1]!, 10);
+  const lastMonth = parseInt(m[2]!, 10);
+  const lastQ =
+    lastMonth <= 3 ? 1 : lastMonth <= 6 ? 2 : lastMonth <= 9 ? 3 : 4;
+  // Earliest picked quarter as a sortable index (year * 10 + q).
+  const pickedIdx = Math.min(
+    ...Array.from(picked).map((q) => {
+      const n = q === "Q1" ? 1 : q === "Q2" ? 2 : q === "Q3" ? 3 : 4;
+      return pickedYear * 10 + n;
+    })
+  );
+  const lastIdx = lastYear * 10 + lastQ;
+  const delta = pickedIdx - lastIdx;
+  if (delta <= 1) return "";
+  return `vencido hace ${delta - 1}Q`;
+}
+
 function Step1ValidityField({
   mode,
   onChangeMode,
@@ -3338,6 +3687,7 @@ function Step1ValidityField({
 function Step1KindsEditor({
   kinds,
   values,
+  totalRows,
   onAdd,
   onRemove,
   onUpdateDef,
@@ -3345,6 +3695,7 @@ function Step1KindsEditor({
 }: {
   kinds: KindDef[];
   values: KindValue[];
+  totalRows: number;
   onAdd: (def: KindDef) => void;
   onRemove: (id: string) => void;
   onUpdateDef: (id: string, patch: Partial<KindDef>) => void;
@@ -3383,6 +3734,7 @@ function Step1KindsEditor({
             key={k.id}
             def={k}
             value={valueByKindId.get(k.id) ?? { kind_id: k.id }}
+            totalRows={totalRows}
             onUpdateDef={(patch) => onUpdateDef(k.id, patch)}
             onUpdateValue={(patch) => onUpdateValue(k.id, patch)}
             onRemove={() => onRemove(k.id)}
@@ -3412,16 +3764,20 @@ const SCOPE_LABELS: Record<KindScope, string> = {
 function KindCard({
   def,
   value,
+  totalRows,
   onUpdateDef,
   onUpdateValue,
   onRemove,
 }: {
   def: KindDef;
   value: KindValue;
+  totalRows: number;
   onUpdateDef: (patch: Partial<KindDef>) => void;
   onUpdateValue: (patch: Partial<KindValue>) => void;
   onRemove: () => void;
 }) {
+  const affectedCount = def.affected_rate_ids?.length ?? 0;
+  const isPerRow = def.affected_rate_ids !== undefined;
   return (
     <div className="border border-gray-200 rounded-md p-3 bg-white flex flex-col gap-2">
       <div className="flex items-center gap-2 flex-wrap">
@@ -3452,6 +3808,25 @@ function KindCard({
           />
           por tamaño
         </label>
+        {isPerRow ? (
+          <button
+            type="button"
+            onClick={() => onUpdateDef({ affected_rate_ids: undefined })}
+            className="px-2 py-0.5 rounded-full text-xs font-medium border bg-purple-50 text-purple-800 border-purple-200 hover:bg-purple-100 cursor-pointer"
+            title="Aplica a filas específicas detectadas en Comments. Click para extender a todas las rates del batch."
+          >
+            🔗 {affectedCount} de {totalRows} rates
+          </button>
+        ) : (
+          totalRows > 0 && (
+            <span
+              className="px-2 py-0.5 rounded-full text-xs font-medium border bg-gray-50 text-gray-700 border-gray-200"
+              title="Aplica a todas las rates del batch."
+            >
+              Todas las rates ({totalRows})
+            </span>
+          )
+        )}
         <button
           type="button"
           onClick={onRemove}
@@ -3758,13 +4133,22 @@ function PreviewStep({
 
   // For one (rate, kindColumn) cell: returns the value to display, or "—"
   // when scope mismatches the rate's tipo (e.g. a dry-only kind on a Reefer
-  // rate, or a 20'-only column on a 40' rate).
+  // rate, or a 20'-only column on a 40' rate). When the kind has an
+  // affected_rate_ids list (Fix 1: KATAOKA Disposal extracted from
+  // Comments column), only rates whose _id is in the list show the value;
+  // every other rate gets "—".
   const renderKindCell = (
     r: Record<string, unknown>,
     col: { kindId: string; size: null | 20 | 40 }
   ): string => {
     const def = kinds.find((k) => k.id === col.kindId);
     if (!def) return "—";
+    if (
+      def.affected_rate_ids &&
+      !def.affected_rate_ids.includes(String(r._id ?? ""))
+    ) {
+      return "—";
+    }
     const tipoStr = String(r.tipo ?? "");
     const isReefer = /reefer/i.test(tipoStr);
     if (def.scope === "dry" && isReefer) return "—";

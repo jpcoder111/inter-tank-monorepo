@@ -563,44 +563,61 @@ export function readKindValueFor(
     : kv.value40 ?? 0;
 }
 
-// Coerces a free-form tipo string to one of the v3 ContainerType literals.
-// When the original cannot be cleanly mapped (e.g. "20'RF" — a 20-foot reefer
-// — which is intentionally NOT in the v3 union per the fixture spec), returns
-// the closest fallback plus a note string the caller can append to rate.notes.
+// Coerces a free-form tipo string to one of the four v3 ContainerType
+// literals. Inter-Tank's catalog has exactly 4 valid types — "20'Dry",
+// "20'Flexi", "40'Dry", "40'Reefer" — and nothing else. The function
+// detects size + category from the source string using a small, explicit
+// keyword set (no commodity inference; "Wine", "Juice", "Frozen" etc.
+// never determine the type). When the source implies a non-existent
+// combination ("20'Reefer" or "40'Flexi"), the function returns the
+// closest valid type plus a helpful note that the caller surfaces in
+// notas + flags via tipoCoerced for needs-review.
+//
+// Detection keywords:
+//   Reefer: /\b(reefer|rf|refrigerada|refrigerated)\b/i
+//   Flexi:  /\b(flexi|flexitank|flexibag)\b/i  (also matches "flexi-tank")
+// Size:
+//   40 → /^40\b/  20 → /^20\b/  (digit immediately at the start)
 export function migrateContainerType(raw: string): {
   tipo: ContainerType;
   note?: string;
 } {
   const original = (raw ?? "").toString();
-  const t = original
+  const tNorm = original
     .trim()
     .toUpperCase()
     .replace(/['']/g, "'")
     .replace(/\s+/g, "")
     .replace(/-/g, "");
-  if (!t) return { tipo: "20'Dry" };
-  const isReefer = /RF$|REEFER/.test(t);
-  const isFlexi = /FLEXI/.test(t);
-  const isForty = /^40/.test(t);
-  const isTwenty = /^20/.test(t);
+  if (!tNorm) return { tipo: "20'Dry" };
+  const isReefer = /(?:^|[^A-Z])(REEFER|RF|REFRIGERAD[AO]|REFRIGERATED)/.test(
+    tNorm
+  );
+  const isFlexi = /FLEXI(?:TANK|BAG)?|FLEXITANK|FLEXIBAG/.test(tNorm);
+  const isForty = /^40/.test(tNorm);
+  const isTwenty = /^20/.test(tNorm);
+
   if (isForty && isReefer) return { tipo: "40'Reefer" };
-  if (isForty && isFlexi)
-    return {
-      tipo: "40'Dry",
-      note: `Tipo no estándar detectado: ${original}`,
-    };
-  if (isForty) return { tipo: "40'Dry" };
-  if (isTwenty && isReefer)
+  if (isTwenty && isReefer) {
     return {
       tipo: "20'Dry",
-      note: `Tipo no estándar detectado: ${original}`,
+      note: `Tipo no estándar: 20'Reefer no existe en Inter-Tank — ¿es 40'Reefer? Original: "${original}".`,
     };
+  }
   if (isTwenty && isFlexi) return { tipo: "20'Flexi" };
+  if (isForty && isFlexi) {
+    return {
+      tipo: "40'Dry",
+      note: `Tipo no estándar: 40'Flexi no existe en Inter-Tank — ¿es 20'Flexi? Original: "${original}".`,
+    };
+  }
+  if (isForty) return { tipo: "40'Dry" };
   if (isTwenty) return { tipo: "20'Dry" };
   if (isFlexi) return { tipo: "20'Flexi" };
+  if (isReefer) return { tipo: "40'Reefer" };
   return {
     tipo: "20'Dry",
-    note: `Tipo no estándar detectado: ${original}`,
+    note: `Tipo no detectado, asumido 20'Dry. Original: "${original}".`,
   };
 }
 

@@ -104,7 +104,12 @@ HARD RULES:
    - Agency Fee / Agency Fee Max / Agentfee
    - Disposal / Disposal flexibag / Cargo disposal
    When the SAME source line appears as both a kind AND something that looks like a rate row (e.g. "Flexitank Chile = USD 600"), emit it ONLY as a kind. Do NOT duplicate as a rate. Note: 40'Reefer is a refrigerated container TYPE (rate row valid); the items above are surcharges or charges, not transport.
-3. DESCRIPTOR LABELS like "Wine/Juice loads", "Dry loads", "Reefer loads", "Cargo type X" are categorization headers that group related rates, NOT charges. NEVER emit them as kinds.
+3. CONTAINER TYPE detection — there are exactly 4 valid Inter-Tank types: "20'Dry", "20'Flexi", "40'Dry", "40'Reefer". The frontend will REJECT anything else.
+   - DEFAULT: Dry. Pick "20'Dry" or "40'Dry" based on the size mentioned in the rate.
+   - REEFER (Reefer / RF / Refrigerada / Refrigerated container): pick "40'Reefer". 20-foot reefers do NOT exist in this catalog — if the source says "20'Reefer" or "Reefer 20", emit "20'Dry" anyway and the frontend will flag it for the user to fix.
+   - FLEXI (Flexi / Flexitank / Flexibag): pick "20'Flexi". 40-foot flexis do NOT exist — if the source says "40'Flexi" or "Flexi 40", emit "40'Dry" and the frontend will flag.
+   - Thermal Liner / Thermo Liner / Liner / Insulado are NOT a container type — they're a kind (insulado_chile / insulado_arg). Emit them in kinds[], not as a rate row's tipo.
+   - COMMODITIES (Wine, Juice, Nueces, Frozen, Fresh, Vegetables, Bottled, Hazardous, etc.) NEVER determine type. They are descriptors, not container types and not kinds. Ignore them when picking tipo. Group headers like "Wine/Juice loads:", "Dry loads:", "Reefer loads:" introduce rate groups — they're NOT charges and NOT rate rows themselves; emit only the actual rates that follow such a header.
 4. Multi-carrier on one row ("OOCL or CMA", "OOCL/EVER", "Carriers: OOCL, EVER"): set sl="OOCL or CMA". DO NOT clone — frontend clones.
 5. Bundle "includes X, Y, Z" / "incluye X, Y, Z": keep sf as ONE number (do not split). Add to notas: "Incluye: <list>". Do NOT invent kinds for the inclusions.
 6. Per-row validity is IGNORED by design. Inter-Tank rates always inherit validity from the batch (Step 1's Q1/Q2/Q3/Q4 picker or date range). Do NOT emit validFrom / validTo per rate even when the source mentions "Validity 30/6" / "valid until X" / a different per-row date. If a row legitimately has different validity, the user's workflow is to create a separate batch. Leave validFrom / validTo OUT of each rate row — only use validity_inferred at the batch level for the overall file's validity hint.
@@ -792,6 +797,18 @@ function detectKindsFromExtracted(rates: RawRate[]): {
       if (
         /\bon\s+top\s+of\b/i.test(label) ||
         /^add\s+\S+\s+(us\$?|usd)\s+[\d.,]+/i.test(label)
+      ) {
+        continue;
+      }
+      // Reject commodity-group descriptor labels that are NOT charges.
+      // Backstop in case Claude misclassifies a header line like
+      // "Wine/Juice loads" / "Frozen loads" / "Dry loads" / "Reefer
+      // loads" as a kind. The prompt already instructs Claude to skip
+      // these — this catches the leak.
+      if (
+        /^(?:wine(?:\s*\/\s*juice)?|juice|nueces|frozen|fresh|vegetables|bottled|hazardous|dry|reefer|flexi)\s+loads?\b/i.test(
+          label
+        )
       ) {
         continue;
       }

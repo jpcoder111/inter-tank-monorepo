@@ -92,6 +92,15 @@ TWO rate rows — one per size — sharing pol/pod/sl/carrier/kinds. If size is
 genuinely ambiguous, default to "20'Dry" and append to \`notas\`:
 "Tamaño no especificado, asumido 20'."
 
+RATE-ROW GATE (apply this first, before any other rule): A line in the source is a rate row ONLY if it contains the word "Rate", "Rates", "Tarifa", or "Tarifas" (case-insensitive, anywhere in or near the line). Lines without one of those words are NEVER rate rows — they go to the relevant rate's kinds[] (per rule 2) or are ignored entirely. Examples:
+   - "Rate 20 OOCL = USD 580 + USD 40xbl + EBS"   → rate row.
+   - "Rate 40 RF Hapag = USD 4500"                 → rate row.
+   - "Tarifa 20 FOB Manzanillo Flexi = USD 890"    → rate row.
+   - "Flexitank Chile = USD 600"                   → kind (flexitank_chile). NOT a rate.
+   - "Inland FCA Mendoza 20 = USD 2250"            → kind (precarriage_mendoza). NOT a rate.
+   - "Thermal Liner = USD 350"                     → kind (insulado_*). NOT a rate.
+   - "Agentfee Chile = USD 75"                     → kind (agency_fee). NOT a rate.
+
 HARD RULES:
 1. EBS / EFS / BAF / Emergency Bunker Surcharge are ALWAYS billed separately via Inter-Tank's EBS table. NEVER include them in sf and DO NOT emit any note about them — drop silently. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60. The mention is noise to ignore.
 2. The following items are CHARGES (kinds), NEVER rate rows. Emit them only in the rate's kinds[] field; do NOT also emit them as entries in rates[]:
@@ -156,6 +165,8 @@ Each rate row encodes ONE container size + ONE category in \`type\`:
   - "40'Reefer"  → 40-foot reefer (refrigerated)
   - "20'Flexi"   → 20-foot dry stuffed with flexitank
 NEVER emit just "Dry" or "Reefer" without size. Two-size rows split into two RateRows.
+
+RATE-ROW GATE: this chunk is a tabular Excel slice where each non-header data row represents a rate by its column structure (POL + POD + Type + SF columns). The trigger-words gate ("Rate" / "Tarifa" required, used for free-text emails) is satisfied implicitly here — emit one rate per data row. The kinds-only categories from rule 2 still apply: any row whose values match a kind (Flexitank, Inland FCA Mendoza, Thermal Liner, Agency Fee, Disposal) does NOT become a rate row, even when it sits in the rate-table columns.
 
 HARD RULES:
 1. EBS / EFS / BAF / Emergency Bunker Surcharge are ALWAYS billed separately via Inter-Tank's EBS table. NEVER include them in sf and DO NOT emit notes about them — drop silently. "USD 1450 + USD 60 BL Fee + EBS USD 75" → sf=1450, bl_fee=60.
@@ -1704,17 +1715,17 @@ export default function NewRateFlow({
           batchYearHint
         );
         const carrierMissing = !carrier.trim();
-        // Carrier is REQUIRED. Empty carrier is now a hard block — Inter-
-        // Tank doesn't accept rates without one. The user fixes it via
-        // the inline edit row (Carrier dropdown + free-typing). When the
-        // carrier becomes non-empty, updatePreviewField clears the
-        // blocking flag so the row can be saved.
+        const podMissing = !pod.trim();
+        // Carrier and POD are REQUIRED. Empty either field is a hard
+        // block — Inter-Tank doesn't accept rates without a carrier or
+        // a destination port. The user fixes both via the inline edit
+        // row; updatePreviewField re-evaluates the entire blocking
+        // chain on every keystroke so when a field is filled the next
+        // unsatisfied condition (if any) becomes the active block.
         let blockingMessage: string | null = null;
         let blockingType: string | null = null;
         if (rangeFlag?.severity === "blocking") {
           blockingMessage = rangeFlag.message;
-          // Track the source of the block so updatePreviewField can
-          // re-evaluate when the user edits the offending field.
           if (
             rangeFlag.message.includes("kind") &&
             rangeFlag.message.includes("rate fantasma")
@@ -1729,10 +1740,15 @@ export default function NewRateFlow({
             blockingType = "reefer_range";
           }
         }
-        if (carrierMissing && !blockingMessage) {
+        if (!blockingMessage && carrierMissing) {
           blockingMessage =
             "Carrier requerido — completá manualmente para guardar.";
           blockingType = "carrier_missing";
+        }
+        if (!blockingMessage && podMissing) {
+          blockingMessage =
+            "Puerto de destino (POD) requerido — completá manualmente para guardar.";
+          blockingType = "pod_missing";
         }
         return {
           carrier,
@@ -1955,32 +1971,78 @@ export default function NewRateFlow({
     setPreviewRows((prev) => {
       const next = prev.slice();
       const updated: Record<string, unknown> = { ...next[idx], [field]: value };
-      // Re-evaluate the blocking flag when the user fills the
-      // offending field inline. carrier_missing → cleared as soon as
-      // the carrier input is non-empty. country_not_port → cleared
-      // when both POL and POD have non-country port names.
-      const blockingType = updated._blockingType;
-      if (blockingType === "carrier_missing") {
-        const c = String(updated.carrier ?? "").trim();
-        if (c) {
-          updated._blockingError = null;
-          updated._blockingType = null;
-          updated._uncheckByDefault = false;
-        }
-      } else if (blockingType === "country_not_port") {
-        const newPol = String(updated.pol ?? "").trim();
-        const newPod = String(updated.pod ?? "").trim();
-        if (
-          newPol &&
-          newPod &&
-          !isCountryNotPort(newPol) &&
-          !isCountryNotPort(newPod)
-        ) {
-          updated._blockingError = null;
-          updated._blockingType = null;
-          updated._uncheckByDefault = false;
+      // Live re-evaluation of the blocking chain. When the user edits
+      // a field that affects a live blocking condition (carrier, pol,
+      // pod, sf, tipo), recompute and either advance to the next
+      // unsatisfied block, switch to a different block type, or clear
+      // entirely. Persistent blocks set at extraction time
+      // (phantom_kind, reefer_range) re-fire when their underlying
+      // values still match — otherwise they clear too. Order of
+      // priority matches the row converter's initial pass.
+      const carrier = String(updated.carrier ?? "").trim();
+      const pol = String(updated.pol ?? "").trim();
+      const pod = String(updated.pod ?? "").trim();
+      const tipo = String(updated.tipo ?? "");
+      const sfNum = Number(updated.sf ?? 0);
+
+      let newError: string | null = null;
+      let newType: string | null = null;
+
+      // Reefer range: re-check on sf or tipo edit.
+      const range = validateRateRange({ tipo, sf: sfNum });
+      if (range?.severity === "blocking") {
+        newError = range.message;
+        newType = "reefer_range";
+      }
+
+      // Phantom-kind: empty carrier + sf matches a detected kind value.
+      if (!newError && !carrier) {
+        for (const def of batchKinds) {
+          const kv = batchKindValues.find((v) => v.kind_id === def.id);
+          if (!kv) continue;
+          if (
+            kv.value20 === sfNum ||
+            kv.value40 === sfNum ||
+            kv.value_unique === sfNum
+          ) {
+            const matchedValue =
+              kv.value20 === sfNum
+                ? `${kv.value20} (20')`
+                : kv.value40 === sfNum
+                  ? `${kv.value40} (40')`
+                  : `${kv.value_unique}`;
+            newError = `SF=${sfNum} matchea el kind ${def.label} = ${matchedValue} y la rate tiene carrier vacío. Probable kind extraído como rate fantasma — verificá tipo, ruta y monto antes de guardar.`;
+            newType = "phantom_kind";
+            break;
+          }
         }
       }
+
+      // Country-not-port (POL or POD as a country / region label).
+      if (!newError && (isCountryNotPort(pol) || isCountryNotPort(pod))) {
+        const offending = isCountryNotPort(pol)
+          ? `POL="${pol}"`
+          : `POD="${pod}"`;
+        newError = `${offending} es un país / región, no un puerto. Probable POL/POD inferido erróneamente — completá con el puerto real o eliminá la rate.`;
+        newType = "country_not_port";
+      }
+
+      // Carrier required.
+      if (!newError && !carrier) {
+        newError = "Carrier requerido — completá manualmente para guardar.";
+        newType = "carrier_missing";
+      }
+
+      // POD required.
+      if (!newError && !pod) {
+        newError =
+          "Puerto de destino (POD) requerido — completá manualmente para guardar.";
+        newType = "pod_missing";
+      }
+
+      updated._blockingError = newError;
+      updated._blockingType = newType;
+      updated._uncheckByDefault = !!newError;
       next[idx] = updated;
       return next;
     });
@@ -3166,7 +3228,7 @@ function PreviewStep({
                             idx={idx}
                           />
                           <RowField
-                            label="POD"
+                            label="POD *"
                             row={r}
                             field="pod"
                             onChange={onUpdateField}

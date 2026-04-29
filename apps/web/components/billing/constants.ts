@@ -21,6 +21,7 @@ export const CARRIER_SUGGESTIONS = [
   "HMM",
   "Yang Ming",
   "PIL",
+  "Wan Hai",
 ] as const;
 
 // Canonical container-type literals used by the v3 schema. Each rate row

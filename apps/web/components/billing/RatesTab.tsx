@@ -300,8 +300,8 @@ export default function RatesTab() {
       <div className="bg-blue-50 border border-blue-200 text-blue-900 rounded-md px-4 py-3 text-sm flex items-start gap-2">
         <span aria-hidden="true">ℹ️</span>
         <span>
-          Los SF mostrados <strong>NO incluyen EBS</strong>. El EBS se factura
-          aparte vía Tabla EBS.
+          Las Tarifas mostradas <strong>NO incluyen EBS</strong>. El EBS se
+          factura aparte vía Tabla EBS.
         </span>
       </div>
       <div className="flex flex-wrap items-center gap-3">

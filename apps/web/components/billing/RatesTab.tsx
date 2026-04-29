@@ -10,6 +10,10 @@ import NewRateFlow from "./NewRateFlow";
 import {
   AGENT_SUGGESTIONS,
   CARRIER_SUGGESTIONS,
+  ComercialName,
+  ENTITIES_SEED,
+  ENTITIES_STORAGE_KEY,
+  Entity,
   RATES_STORAGE_KEY,
   Rate,
   SEED_RATES,
@@ -23,6 +27,7 @@ import {
   normalizeRate,
   uniqueSuggestions,
 } from "./constants";
+import { ComercialBadge } from "./EntitiesTab";
 
 // True if a rate carries any kind values worth surfacing in the listing.
 // v3 rates store this in `kind_values`; legacy rows still use the fixed
@@ -171,6 +176,20 @@ export default function RatesTab() {
   // Chile/Mendoza-split fields on every read so downstream code can rely on
   // the new keys without repeating the fallback logic everywhere.
   const items = useMemo(() => rawItems.map(normalizeRate), [rawItems]);
+
+  // Bundle 4 — entity catalog read-only; powers the per-card ComercialBadge.
+  const { items: entities } = useLocalStore<Entity>(
+    ENTITIES_STORAGE_KEY,
+    ENTITIES_SEED
+  );
+  const comercialByAgent = useMemo(() => {
+    const m = new Map<string, ComercialName>();
+    for (const e of entities) {
+      if (e.type !== "Agente") continue;
+      m.set(e.name.trim().toLowerCase(), e.comercial);
+    }
+    return m;
+  }, [entities]);
 
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState("");
@@ -549,6 +568,10 @@ export default function RatesTab() {
                       {isOpen ? "▼" : "▶"}
                     </span>
                     <span className="font-semibold text-base">{g.agent}</span>
+                    {(() => {
+                      const c = comercialByAgent.get(g.agent.trim().toLowerCase());
+                      return c ? <ComercialBadge comercial={c} /> : null;
+                    })()}
                     <span className="text-sm text-gray-700">
                       ({g.rates.length} {g.rates.length === 1 ? "tarifa" : "tarifas"})
                     </span>

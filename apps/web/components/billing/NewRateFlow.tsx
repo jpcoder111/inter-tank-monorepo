@@ -4,6 +4,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/Button";
+import { useLocalStore } from "./useLocalStore";
+import { ComercialBadge } from "./EntitiesTab";
 import {
   AGENT_SUGGESTIONS,
   CARRIER_SUGGESTIONS,
@@ -14,11 +16,18 @@ import {
   KindScope,
   KindValue,
   PREDEFINED_KINDS,
-  PendingAgent,
+  ComercialName,
+  COMERCIALES,
+  COMERCIAL_COLORS,
+  ENTITIES_SEED,
+  ENTITIES_STORAGE_KEY,
+  Entity,
+  PendingAgentEntity,
   Quarter,
   Rate,
   carrierColor,
-  computePendingAgentsByRange,
+  computePendingAgentsFromCatalog,
+  findEntityByAgentName,
   resolvePodCanonical,
   consolidatePreferentialNotes,
   detectAgencyFee,
@@ -2813,27 +2822,69 @@ export default function NewRateFlow({
     return Array.from(set);
   }, [existingRates]);
 
+  // Bundle 4 — Entity catalog. Loaded once at NewRateFlow level so the
+  // pending-agents badge, the cross-check modal, and the suggestion
+  // banners can all share a single source of truth. add() is used by
+  // the cross-check modal's "Crear agente nuevo" branch.
+  const {
+    items: entities,
+    add: addEntity,
+  } = useLocalStore<Entity>(ENTITIES_STORAGE_KEY, ENTITIES_SEED);
+  const activeAgentEntities = useMemo(
+    () =>
+      entities.filter((e) => e.type === "Agente" && e.status === "active"),
+    [entities]
+  );
+  // Comercial lookup keyed by lowercase agent name. Used by
+  // PendingAgentsBadge to render the chip and by the suggestion modal to
+  // surface the canonical agent's commercial owner.
+  const comercialByAgent = useMemo(() => {
+    const m = new Map<string, ComercialName>();
+    for (const e of entities) {
+      if (e.type !== "Agente") continue;
+      m.set(e.name.trim().toLowerCase(), e.comercial);
+    }
+    return m;
+  }, [entities]);
+
+  // Bundle 4 — strict cross-check state. When the typed agent isn't
+  // present in the entity catalog AND the resolver returns no
+  // alias/Levenshtein hit, we surface this modal so the operator either
+  // picks an existing entity or creates a new one inline (with the
+  // commercial assignment captured). This is the only path that can
+  // append to the entity catalog from the rate flow.
+  const [crossCheckModal, setCrossCheckModal] = useState<{
+    typed: string;
+  } | null>(null);
+
   const continueToPreview = () => {
     if (continueErrors.length > 0) return;
     const typed = effectiveAgent.trim();
     if (typed) {
+      // Strict catalog match — alias-aware, case-insensitive. If the
+      // typed value resolves to a known catalog entity, we either keep
+      // it as-is or rewrite to the catalog's canonical spelling and
+      // proceed without prompts.
+      const catalogHit = findEntityByAgentName(activeAgentEntities, typed);
+      if (catalogHit) {
+        if (catalogHit.name !== typed) setAgent(catalogHit.name);
+        setStep("preview");
+        return;
+      }
       const resolution = resolveAgentCanonical(typed, knownAgentNames);
       if (resolution) {
         const sameLetters =
           resolution.canonical.toLowerCase() === typed.toLowerCase();
         if (sameLetters && resolution.canonical !== typed) {
-          // Pure casing variant ("bullet" while catalog has "Bullet").
-          // Silently rewrite to the existing spelling — no modal — so we
-          // don't accumulate Bullet/BULLET/bullet siblings in storage.
-          // The v3.3 migration handles the historic data; this prevents
-          // re-introduction.
+          // Pure casing variant ("bullet" while rate catalog has
+          // "Bullet"). Silently rewrite to the existing spelling.
           setAgent(resolution.canonical);
           setStep("preview");
           return;
         }
         if (!sameLetters) {
-          // Alias (WR→WENRAN) or Levenshtein typo — show the
-          // confirmation modal so the user can either fold or split.
+          // Alias / Levenshtein typo — confirmation modal lets the
+          // operator either fold into the canonical or split.
           const canonicalRateCount = existingRates.filter(
             (r) =>
               r.agent.trim().toLowerCase() ===
@@ -2843,6 +2894,11 @@ export default function NewRateFlow({
           return;
         }
       }
+      // Fall-through: typed agent has neither a catalog hit nor a
+      // resolver suggestion. This is a brand-new name — bring up the
+      // strict cross-check modal so the operator commits.
+      setCrossCheckModal({ typed });
+      return;
     }
     setStep("preview");
   };
@@ -3258,6 +3314,7 @@ export default function NewRateFlow({
           match={agentMatch}
         />
         <PendingAgentsBadge
+          entities={entities}
           rates={existingRates}
           validity={resolvedValidity}
           label={
@@ -3536,8 +3593,14 @@ export default function NewRateFlow({
                 className="bg-white rounded-lg shadow-lg max-w-md w-full mx-4 p-5 flex flex-col gap-3"
                 onClick={(e) => e.stopPropagation()}
               >
-                <h4 className="font-semibold text-base">
-                  ¿Quisiste decir {resolution.canonical}?
+                <h4 className="font-semibold text-base flex items-center gap-2 flex-wrap">
+                  <span>¿Quisiste decir {resolution.canonical}?</span>
+                  {(() => {
+                    const c = comercialByAgent.get(
+                      resolution.canonical.toLowerCase()
+                    );
+                    return c ? <ComercialBadge comercial={c} /> : null;
+                  })()}
                 </h4>
                 <p className="text-sm text-gray-700">
                   {reason}. Ya hay <strong>{canonicalRateCount}</strong>{" "}
@@ -3560,6 +3623,45 @@ export default function NewRateFlow({
             </div>
           );
         })()}
+
+        {crossCheckModal && (
+          <CrossCheckModal
+            typed={crossCheckModal.typed}
+            activeAgents={activeAgentEntities}
+            onClose={() => setCrossCheckModal(null)}
+            onPickExisting={(canonical) => {
+              setAgent(canonical);
+              setCrossCheckModal(null);
+              setStep("preview");
+            }}
+            onCreate={(name, comercial, email, phone) => {
+              const trimmed = name.trim();
+              if (!trimmed) return;
+              const now = new Date().toISOString();
+              const slug = trimmed
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-+|-+$/g, "");
+              const newEntity: Entity = {
+                id: `entity-${Date.now()}-${slug || "new"}-${Math.random()
+                  .toString(36)
+                  .slice(2, 6)}`,
+                name: trimmed,
+                type: "Agente",
+                comercial,
+                status: "active",
+                contact_email: email.trim() || undefined,
+                contact_phone: phone.trim() || undefined,
+                created_at: now,
+                updated_at: now,
+              };
+              addEntity(newEntity);
+              if (trimmed !== effectiveAgent.trim()) setAgent(trimmed);
+              setCrossCheckModal(null);
+              setStep("preview");
+            }}
+          />
+        )}
 
         {validationModal && (() => {
           const fieldsLabel =
@@ -3730,6 +3832,176 @@ export default function NewRateFlow({
 // Step 1 sub-components
 // ============================================================================
 
+// Strict cross-check modal (Bundle 4): the operator typed an agent name
+// that has no match in the entity catalog and no resolver suggestion.
+// Two paths: pick an existing entity (alias-aware autocomplete), or
+// create a new one inline with the commercial assignment so it lands in
+// the catalog before the rate flow proceeds. Cancelling rolls back to
+// the input step without committing anything.
+function CrossCheckModal({
+  typed,
+  activeAgents,
+  onClose,
+  onPickExisting,
+  onCreate,
+}: {
+  typed: string;
+  activeAgents: Entity[];
+  onClose: () => void;
+  onPickExisting: (canonical: string) => void;
+  onCreate: (
+    name: string,
+    comercial: ComercialName,
+    email: string,
+    phone: string
+  ) => void;
+}) {
+  const [mode, setMode] = useState<"pick" | "create">("create");
+  const [pickValue, setPickValue] = useState("");
+  const [pickFilter, setPickFilter] = useState("");
+  const [comercial, setComercial] = useState<ComercialName>("No determinado");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const filtered = useMemo(() => {
+    const q = pickFilter.toLowerCase().trim();
+    return activeAgents
+      .filter((e) => !q || e.name.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [activeAgents, pickFilter]);
+  const submit = () => {
+    if (mode === "pick") {
+      const target = activeAgents.find((e) => e.id === pickValue);
+      if (!target) return;
+      onPickExisting(target.name);
+    } else {
+      onCreate(typed, comercial, email, phone);
+    }
+  };
+  const canSubmit =
+    mode === "pick" ? !!pickValue : !!comercial;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-lg max-w-lg w-full mx-4 p-5 flex flex-col gap-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h4 className="font-semibold text-base">
+          Agente &quot;{typed}&quot; no está en el catálogo
+        </h4>
+        <p className="text-sm text-gray-700">
+          Antes de continuar, indicá si es un agente existente del catálogo
+          o querés crear uno nuevo. El catálogo se mantiene en{" "}
+          <strong>Agentes &amp; Clientes</strong>.
+        </p>
+        <div className="flex flex-col gap-2 border border-gray-200 rounded-md p-3">
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input
+              type="radio"
+              checked={mode === "pick"}
+              onChange={() => setMode("pick")}
+              className="mt-1"
+            />
+            <span className="flex-1 flex flex-col gap-1">
+              <span className="font-medium">Es un agente existente</span>
+              {mode === "pick" && (
+                <>
+                  <input
+                    type="text"
+                    placeholder="Filtrar..."
+                    value={pickFilter}
+                    onChange={(e) => setPickFilter(e.target.value)}
+                    className="border border-gray-200 rounded p-1.5 h-8 text-xs"
+                  />
+                  <select
+                    size={Math.min(6, Math.max(3, filtered.length))}
+                    value={pickValue}
+                    onChange={(e) => setPickValue(e.target.value)}
+                    className="border border-gray-200 rounded p-1 text-xs bg-white"
+                  >
+                    {filtered.map((e) => (
+                      <option key={e.id} value={e.id}>
+                        {e.name} · {e.comercial}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              )}
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input
+              type="radio"
+              checked={mode === "create"}
+              onChange={() => setMode("create")}
+              className="mt-1"
+            />
+            <span className="flex-1 flex flex-col gap-2">
+              <span className="font-medium">
+                Crear agente nuevo &quot;{typed}&quot;
+              </span>
+              {mode === "create" && (
+                <div className="flex flex-col gap-2 text-xs">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-gray-600 font-medium">
+                      Comercial *
+                    </span>
+                    <select
+                      value={comercial}
+                      onChange={(e) =>
+                        setComercial(e.target.value as ComercialName)
+                      }
+                      style={{
+                        backgroundColor: COMERCIAL_COLORS[comercial].bg,
+                        color: COMERCIAL_COLORS[comercial].text,
+                      }}
+                      className="px-2 py-1.5 rounded border-0 font-medium"
+                    >
+                      {COMERCIALES.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-gray-600 font-medium">Email</span>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="border border-gray-200 rounded p-1.5 h-8"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-gray-600 font-medium">Phone</span>
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      className="border border-gray-200 rounded p-1.5 h-8"
+                    />
+                  </label>
+                </div>
+              )}
+            </span>
+          </label>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button onClick={submit} disabled={!canSubmit}>
+            Confirmar y proceder
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Step1AgentField({
   agent,
   onChange,
@@ -3798,23 +4070,30 @@ function Step1AgentField({
 // click on an entry autocompletes the agent input. Alias-canonicalisation
 // collapses "WR" + "WENRAN" so the list doesn't double-count.
 function PendingAgentsBadge({
+  entities,
   rates,
   validity,
   label,
   onPickAgent,
 }: {
+  entities: Entity[];
   rates: Rate[];
   validity: { validFrom: string; validTo: string } | null;
   label: string;
   onPickAgent: (name: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const pending = useMemo<PendingAgent[]>(
-    () => (validity ? computePendingAgentsByRange(rates, validity) : []),
-    [rates, validity]
+  // Bundle 4: pending pulled from the curated entity catalog (not from
+  // historic rate.agent strings) so empty / brand-new agents like Lyseo
+  // and UVK surface even before the first rate exists. Each entry comes
+  // back with its assigned commercial so we can render the colour chip.
+  const pending = useMemo<PendingAgentEntity[]>(
+    () =>
+      validity
+        ? computePendingAgentsFromCatalog(entities, rates, validity)
+        : [],
+    [entities, rates, validity]
   );
-  // Telemetry: lets a smoke-tester confirm the badge's input/output without
-  // opening React devtools. Logs once per (validity, pending.length) pair.
   useEffect(() => {
     if (typeof console === "undefined") return;
     if (!validity) {
@@ -3826,13 +4105,15 @@ function PendingAgentsBadge({
     console.log("[pending-agents]", {
       label,
       validityRange: validity,
+      totalEntities: entities.length,
+      activeAgents: entities.filter(
+        (e) => e.type === "Agente" && e.status === "active"
+      ).length,
       totalRates: rates.length,
       pendingCount: pending.length,
-      sample: pending.slice(0, 5).map((p) => p.agent),
+      sample: pending.slice(0, 5).map((p) => `${p.agent} · ${p.comercial}`),
     });
-  }, [validity, label, rates.length, pending]);
-  // Reset the expanded panel when the badge shrinks to zero entries
-  // (e.g. user just loaded a tariff that filled the gap).
+  }, [validity, label, entities, rates.length, pending]);
   useEffect(() => {
     if (pending.length === 0) setExpanded(false);
   }, [pending.length]);
@@ -3862,7 +4143,7 @@ function PendingAgentsBadge({
           <div className="text-xs text-gray-500 px-3 py-1.5 border-b border-gray-200 bg-gray-50">
             Pendientes {label} ({pending.length}) · ordenados por antigüedad
           </div>
-          <ul className="flex flex-col divide-y divide-gray-100 max-h-64 overflow-y-auto">
+          <ul className="flex flex-col divide-y divide-gray-100 max-h-72 overflow-y-auto">
             {pending.map((p) => {
               const stale = isStaleVsRange(p.lastValidTo, validity.validFrom);
               return (
@@ -3876,9 +4157,11 @@ function PendingAgentsBadge({
                     className="w-full text-left px-3 py-1.5 hover:bg-blue-50 cursor-pointer text-xs flex items-center gap-2"
                   >
                     <span className="text-gray-500">▸</span>
-                    <span className="font-medium text-gray-800 flex-1">
+                    <span className="font-medium text-gray-800">
                       {p.agent}
                     </span>
+                    <ComercialBadge comercial={p.comercial} />
+                    <span className="flex-1" />
                     <span className="text-gray-500">
                       {p.lastValidTo
                         ? `último ${p.lastQuarterLabel}`

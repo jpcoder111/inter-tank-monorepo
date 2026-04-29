@@ -7,8 +7,15 @@ import EbsTab from "./EbsTab";
 import LocalChargesTab from "./LocalChargesTab";
 import ArgClientsTab from "./ArgClientsTab";
 import InvoicingTab from "./InvoicingTab";
+import EntitiesTab from "./EntitiesTab";
 
-type TabKey = "rates" | "ebs" | "local" | "argClients" | "invoicing";
+type TabKey =
+  | "rates"
+  | "ebs"
+  | "local"
+  | "entities"
+  | "argClients"
+  | "invoicing";
 
 export default function BillingPage() {
   const { session, isLoading } = useSession();
@@ -20,6 +27,7 @@ export default function BillingPage() {
         { key: "rates" as const, label: "Tarifas Agentes", adminOnly: true },
         { key: "ebs" as const, label: "Tabla EBS", adminOnly: true },
         { key: "local" as const, label: "Gastos Locales", adminOnly: true },
+        { key: "entities" as const, label: "Agentes & Clientes", adminOnly: true },
         { key: "argClients" as const, label: "Clientes ARG", adminOnly: false },
         { key: "invoicing" as const, label: "Facturación", adminOnly: false },
       ].filter((t) => (t.adminOnly ? isAdmin : true)),
@@ -68,6 +76,7 @@ export default function BillingPage() {
         {active === "rates" && isAdmin && <RatesTab />}
         {active === "ebs" && isAdmin && <EbsTab />}
         {active === "local" && isAdmin && <LocalChargesTab />}
+        {active === "entities" && isAdmin && <EntitiesTab />}
         {active === "argClients" && <ArgClientsTab readOnly={!isAdmin} />}
         {active === "invoicing" && <InvoicingTab />}
       </div>

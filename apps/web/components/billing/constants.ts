@@ -2734,7 +2734,246 @@ export const AGENT_ALIASES: Record<string, string> = {
   KTK: "KATAOKA",
   VM: "Van Moer",
   VR: "Valle Redondo",
+  // Bundle 4: align historic short forms with the curated entity catalog.
+  // "Bullet" / "BULLET" survive as raw rate.agent strings from older
+  // smoke runs; the catalog entry is "Bullet Express", and the alias
+  // resolver upper-cases the input so both casings map.
+  BULLET: "Bullet Express",
+  // Same pattern for "Scan" / "SCAN" → "SCAN Shipping".
+  SCAN: "SCAN Shipping",
 };
+
+// ============================================================================
+// Bundle 4 — Entity catalog
+// ============================================================================
+//
+// A small reference catalog of agents and clients with the assigned
+// commercial executive ("comercial") for each. Powers the Tab "Agentes &
+// Clientes" UI, the catalog-driven pending-Q badge, and the strict cross-
+// check modal that runs when a typed agent isn't recognised at save time.
+// Stored in localStorage under it_entities_v1; the seed below is the
+// curated reference snapshot from operations and is written to the store
+// only on first mount (later edits / additions are preserved).
+
+export const COMERCIALES = [
+  "Bárbara Godoy",
+  "Cristian Fernández",
+  "Tomás Calderón",
+  "Philip Fell",
+  "No determinado",
+] as const;
+export type ComercialName = (typeof COMERCIALES)[number];
+
+// Distinct from CARRIER_COLORS to avoid badge/colour collisions in
+// RatesTab where both palettes appear simultaneously. The hex pairs were
+// hand-picked against Yang Ming (#e2d4b8), Evergreen (#e0f2e0), OOCL
+// (#e8eaed), MSC (#f5f0e8), Maersk (#93c5fd) — see the bundle 4 prompt.
+export const COMERCIAL_COLORS: Record<
+  ComercialName,
+  { bg: string; text: string }
+> = {
+  "Bárbara Godoy": { bg: "#dbeafe", text: "#1e40af" },
+  "Cristian Fernández": { bg: "#d1fae5", text: "#065f46" },
+  "Tomás Calderón": { bg: "#fde68a", text: "#92400e" },
+  "Philip Fell": { bg: "#cbd5e1", text: "#1e293b" },
+  "No determinado": { bg: "#f3f4f6", text: "#6b7280" },
+};
+
+export type EntityType = "Agente" | "Cliente";
+
+export const ENTITY_TYPE_COLORS: Record<
+  EntityType,
+  { bg: string; text: string }
+> = {
+  Agente: { bg: "#e0e7ff", text: "#3730a3" },
+  Cliente: { bg: "#fae8ff", text: "#86198f" },
+};
+
+export type EntityStatus = "active" | "inactive";
+
+export type Entity = {
+  id: string;
+  name: string;
+  type: EntityType;
+  comercial: ComercialName;
+  status: EntityStatus;
+  contact_email?: string;
+  contact_phone?: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export const ENTITIES_STORAGE_KEY = "it_entities_v1";
+
+// Helper used at module load to give each seed entry a stable id derived
+// from the name slug, so a delete-then-re-seed cycle doesn't churn the ids
+// (which the cross-check modal references when stamping new rates against
+// existing entities).
+function makeSeedEntity(
+  name: string,
+  type: EntityType,
+  comercial: ComercialName
+): Entity {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  // Use a fixed ISO so the seed stays referentially stable. Real updates
+  // stamp updated_at via the inline-edit handler in EntitiesTab.
+  const fixedTimestamp = "2026-04-29T00:00:00.000Z";
+  return {
+    id: `entity-seed-${slug}`,
+    name,
+    type,
+    comercial,
+    status: "active",
+    created_at: fixedTimestamp,
+    updated_at: fixedTimestamp,
+  };
+}
+
+// 43 reference entries (32 agents + 11 clients). Edit by appending or
+// adjusting in place — the seed only writes when localStorage has no
+// it_entities_v1 key, so existing user data never gets overwritten.
+export const ENTITIES_SEED: Entity[] = [
+  // Bárbara Godoy — Agentes (21)
+  ...[
+    "Akleta",
+    "Asstra",
+    "Balguerie",
+    "Bull Logistics",
+    "CAD Asia",
+    "Cargo Moving",
+    "Dios",
+    "Everwest",
+    "Flying Fish",
+    "Grupo M&B Colombia",
+    "Kataoka",
+    "Liquid Asia",
+    "Lyseo",
+    "Quick Freight",
+    "Shanghai Running",
+    "Sunwine",
+    "THB",
+    "UVK",
+    "Vinicom",
+    "Wenran",
+    "Xiamen Chenkun",
+  ].map((n) => makeSeedEntity(n, "Agente", "Bárbara Godoy")),
+  // Bárbara Godoy — Clientes (3)
+  ...["De Martino / Santa Teresa", "Mospasa", "Patacon Asia"].map((n) =>
+    makeSeedEntity(n, "Cliente", "Bárbara Godoy")
+  ),
+  // Cristian Fernández — Agentes (4)
+  ...["Aprile", "CAD USA - Europa", "Liquid USA - Europa", "Peter Igel"].map(
+    (n) => makeSeedEntity(n, "Agente", "Cristian Fernández")
+  ),
+  // Cristian Fernández — Clientes (4)
+  ...["Carozzi", "Patacon USA", "Prunesco", "San Clemente"].map((n) =>
+    makeSeedEntity(n, "Cliente", "Cristian Fernández")
+  ),
+  // Tomás Calderón — Agentes (5)
+  ...["BHS", "Bullet Express", "CCL", "IWS", "SCAN Shipping"].map((n) =>
+    makeSeedEntity(n, "Agente", "Tomás Calderón")
+  ),
+  // Philip Fell — Agentes (1)
+  makeSeedEntity("Van Moer", "Agente", "Philip Fell"),
+  // Philip Fell — Clientes (4)
+  ...["Agromar", "Arterra", "Innovino", "Valle Redondo"].map((n) =>
+    makeSeedEntity(n, "Cliente", "Philip Fell")
+  ),
+];
+
+// Lookup an Entity by name (alias-aware, case-insensitive). Falls back to
+// alias mapping (BULLET → Bullet Express etc.) when a literal match fails.
+export function findEntityByAgentName(
+  entities: ReadonlyArray<Entity>,
+  typed: string
+): Entity | null {
+  const trimmed = (typed ?? "").trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  for (const e of entities) {
+    if (e.name.trim().toLowerCase() === lower) return e;
+  }
+  const aliasCanonical = AGENT_ALIASES[trimmed.toUpperCase()];
+  if (aliasCanonical) {
+    const aliasLower = aliasCanonical.toLowerCase();
+    for (const e of entities) {
+      if (e.name.trim().toLowerCase() === aliasLower) return e;
+    }
+  }
+  return null;
+}
+
+// Catalog-driven pending-agent shape: every active agent in the entity
+// catalog gets evaluated against the rate set, and the ones with no
+// overlapping rate in the chosen range surface here. The comercial is
+// carried so the badge UI can render the per-comercial colour chip
+// without a second lookup.
+export type PendingAgentEntity = {
+  agent: string;
+  comercial: ComercialName;
+  lastQuarterLabel: string;
+  lastValidTo: string | null;
+  rateCount: number;
+};
+
+export function computePendingAgentsFromCatalog(
+  entities: ReadonlyArray<Entity>,
+  rates: ReadonlyArray<Rate>,
+  range: { validFrom: string; validTo: string }
+): PendingAgentEntity[] {
+  if (!range || !range.validFrom || !range.validTo) return [];
+  const activeAgents = entities.filter(
+    (e) => e.type === "Agente" && e.status === "active"
+  );
+  const results: PendingAgentEntity[] = [];
+  for (const ag of activeAgents) {
+    const lower = ag.name.trim().toLowerCase();
+    // Match by canonical name OR by any AGENT_ALIASES key whose value
+    // equals this entity's name (so historic "WR" rates count as WENRAN
+    // catalog hits).
+    const aliasKeys = Object.entries(AGENT_ALIASES)
+      .filter(([, v]) => v.toLowerCase() === lower)
+      .map(([k]) => k.toLowerCase());
+    const agentRates = rates.filter((r) => {
+      const rl = r.agent.trim().toLowerCase();
+      return rl === lower || aliasKeys.includes(rl);
+    });
+    const hasInRange = agentRates.some((r) => {
+      const from = (r.validFrom ?? "").trim() || range.validFrom;
+      const to = (r.validTo ?? "").trim() || range.validTo;
+      return from <= range.validTo && to >= range.validFrom;
+    });
+    if (hasInRange) continue;
+    const sorted = agentRates.slice().sort((a, b) => {
+      const aTo = (a.validTo ?? "").trim();
+      const bTo = (b.validTo ?? "").trim();
+      return bTo.localeCompare(aTo);
+    });
+    const last = sorted[0];
+    const lastValidTo = (last?.validTo ?? "").trim() || null;
+    const lastQuarterLabel = lastValidTo
+      ? deriveQuarterFromDates(last?.validFrom ?? null, last?.validTo ?? null)
+      : "Sin tarifas previas";
+    results.push({
+      agent: ag.name,
+      comercial: ag.comercial,
+      lastQuarterLabel,
+      lastValidTo,
+      rateCount: agentRates.length,
+    });
+  }
+  results.sort((a, b) => {
+    if (!a.lastValidTo && !b.lastValidTo) return a.agent.localeCompare(b.agent);
+    if (!a.lastValidTo) return -1;
+    if (!b.lastValidTo) return 1;
+    return a.lastValidTo.localeCompare(b.lastValidTo);
+  });
+  return results;
+}
 
 // Standard Levenshtein edit distance with a small early-exit when the
 // length delta already exceeds the cap. Used by resolveAgentCanonical to

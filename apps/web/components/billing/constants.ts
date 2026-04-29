@@ -148,7 +148,7 @@ export const CARRIER_COLORS: Record<string, string> = {
   Evergreen: "#e0f2e0",   // verde menta claro
   ONE: "#fce4ec",         // rosa claro
   PIL: "#ede1f5",         // lila / violeta claro (era rojizo, cambia)
-  "Yang Ming": "#d6dfca", // verde musgo apagado (era verde claro, cambia)
+  "Yang Ming": "#e2d4b8", // beige tostado / camel — distinto al verde menta de Evergreen
   Maersk: "#93c5fd",      // celeste FUERTE — única excepción a "pasteles"
   COSCO: "#fde2cf",       // durazno claro
   ZIM: "#ddd5e8",         // lavanda gris
@@ -873,7 +873,7 @@ const BATCH_NOTES_WHITELIST: RegExp[] = [
   /\bcliente\s+[\wáéíóúñÁÉÍÓÚÑ\-\s]+:\s/i,
   /\borigen\s+alternativo\b/i,
   /\bafueras?\s+de\b/i,
-  /\b(add|additional)\s+[A-Za-zñáéíóúÑÁÉÍÓÚ][\wáéíóúñÁÉÍÓÚÑ\s]+\s+US\$?\s+\d/i,
+  /\b(add|additional)\s+[A-Za-zñáéíóúÑÁÉÍÓÚ][\wáéíóúñÁÉÍÓÚÑ\s]+\s*(?:=\s*)?US\$?\s+\d/i,
   /\bsumar?\s+US\$?\s*\d/i,
 ];
 
@@ -2043,15 +2043,17 @@ export function detectDisposal(text: string): number | null {
 // Detects free-text add-ons of the form
 //   "Add San Carlos US$ 200 on top of Mendoza"
 //   "Additional Rivadavia US$ 100 on top of Mendoza"
+//   "Add San Carlos = US$ 200 on top of Mendoza"  (IWS Excel Precarriage sheet)
 // and returns one canonical line per distinct (city, base) pair, ready
 // to drop into notas_globales:
-//   "Origen alternativo San Carlos: +USD 200 sobre Mendoza."
-// Accepts both "Add" (IWS-style) and "Additional" (Arterra-style) leads.
+//   "Add San Carlos = US$ 200 on top of Mendoza"
+// Accepts both "Add" (IWS-style) and "Additional" (Arterra-style) leads, with
+// or without a "=" separator between city and the USD amount.
 export function detectRegionalAddons(text: string): string[] {
   if (!text) return [];
   const lines = new Map<string, string>();
   const re =
-    /\b(?:add|additional)\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?)\s+US\$?\s+([\d.,]+)\s+on\s+top\s+of\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][\w\sñ]{1,30}?)(?=[.,;\n]|$)/gi;
+    /\b(?:add|additional)\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?)\s*(?:=\s*)?US\$?\s+([\d.,]+)\s+on\s+top\s+of\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][\w\sñ]{1,30}?)(?=[.,;\n]|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const city = (m[1] ?? "").trim().replace(/\s+/g, " ");
@@ -2061,9 +2063,72 @@ export function detectRegionalAddons(text: string): string[] {
     const amount = parseAmount(amountStr);
     if (!amount || amount <= 0) continue;
     const key = `${city.toLowerCase()}|${base.toLowerCase()}`;
-    lines.set(key, `Origen alternativo ${city}: +USD ${amount} sobre ${base}.`);
+    lines.set(key, `Add ${city} = US$ ${amount} on top of ${base}`);
   }
   return Array.from(lines.values());
+}
+
+// Result of an excluded-kind capture from free-text comments. Phrases like
+// "Doesn't included Disposal USD 190" / "NOT included Disposal USD 50" /
+// "Excluyendo Disposal USD 100" name a kind that's NOT bundled into SF
+// and ALSO carry its USD value. The KATAOKA fixture has these in a
+// Comments column on each rate row; the parser used to detect the kind
+// label but lose the value (no = separator), leaving the kind editor with
+// "Disposal · —" instead of "Disposal · 190". The capture also feeds a
+// strip pass so the LLM doesn't see "USD 190" floating mid-cell.
+export type ExcludedKindHit = {
+  rawPhrase: string;        // exact substring matched, for stripping from text
+  kindLabel: string;        // raw label, e.g. "Disposal"
+  kindId: string;           // predefined id (matchKindByAlias) or custom slug
+  value: number;
+};
+
+export function detectExcludedKindsFromText(text: string): {
+  hits: ExcludedKindHit[];
+  sanitizedText: string;
+} {
+  if (!text) return { hits: [], sanitizedText: text };
+  // Match phrases like:
+  //   "Doesn't included Disposal USD 190"
+  //   "doesn't include disposal USD 50"
+  //   "NOT included Disposal USD 190"
+  //   "excluding disposal USD 75"
+  //   "Excluyendo Disposal USD 100"
+  //   "no incluye Disposal USD 50"
+  //   "sin Disposal USD 50"
+  // The kind label is greedy but bounded: a single capitalised or lowercase
+  // word (optionally with a few following lowercase tokens) before the USD
+  // amount. The "Rate includes ..." / "supervision of ..." inclusive
+  // sentences explicitly DO NOT match — the leading exclusion verb is
+  // required.
+  const re =
+    /(?:doesn'?t\s+include[d]?|not\s+included|excluding|excluyendo|no\s+incluye|sin\s+(?:incluir\s+)?)\s+([A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?)\s+(?:USD|US\$|\$)\s*([\d.,]+)/gi;
+  const hits: ExcludedKindHit[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const rawPhrase = m[0];
+    const kindLabel = (m[1] ?? "")
+      .trim()
+      .replace(/[.,;:]+$/, "")
+      .replace(/\s+/g, " ");
+    const valueStr = m[2] ?? "";
+    if (!kindLabel) continue;
+    const value = parseAmount(valueStr);
+    if (!value || value <= 0) continue;
+    const aliasId = matchKindByAlias(kindLabel);
+    const kindId = aliasId ?? `custom_${slugifyKindLabel(kindLabel)}`;
+    const dedupeKey = `${kindId}|${value}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    hits.push({ rawPhrase, kindLabel, kindId, value });
+  }
+  // Strip every matched phrase from the sanitized output. Use a fresh
+  // regex (the loop above consumed `re.lastIndex`) and replace globally.
+  const stripRe =
+    /(?:doesn'?t\s+include[d]?|not\s+included|excluding|excluyendo|no\s+incluye|sin\s+(?:incluir\s+)?)\s+[A-Za-zñáéíóúÑÁÉÍÓÚ][A-Za-zñáéíóúÑÁÉÍÓÚ\s]{1,30}?\s+(?:USD|US\$|\$)\s*[\d.,]+/gi;
+  const sanitizedText = text.replace(stripRe, "");
+  return { hits, sanitizedText };
 }
 
 // ===== Rate-range validation (sanity hard rules) =====

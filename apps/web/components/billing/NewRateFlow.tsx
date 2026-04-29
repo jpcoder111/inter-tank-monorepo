@@ -24,6 +24,7 @@ import {
   detectDisposal,
   detectDiscountInsulated,
   detectExcelBlockKinds,
+  detectExcludedKindsFromText,
   detectPrecarriageInline,
   detectRegionalAddons,
   detectSubClientSuffixes,
@@ -1026,6 +1027,80 @@ function detectKindsFromExtracted(rates: RawRate[]): {
   };
 }
 
+// Expands rate rows whose POD field carries multiple ports separated by
+// "/" (e.g. "Antwerp / Rotterdam / Hamburg / London") into one row per
+// POD. POL / carrier / type / sf / kinds stay identical. Independent of
+// the multi-carrier and multi-equipment expansions — runs BEFORE them so
+// a row with both multi-POD + multi-carrier produces M*N final rows. The
+// IWS Seafreight sheet is the canonical fixture for this pattern.
+function expandMultiPod(rates: RawRate[]): RawRate[] {
+  const out: RawRate[] = [];
+  for (const r of rates) {
+    const pod = toStr(r.pod).trim();
+    if (!pod || !pod.includes("/")) {
+      out.push(r);
+      continue;
+    }
+    const pods = pod
+      .split("/")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (pods.length <= 1) {
+      out.push(r);
+      continue;
+    }
+    for (const p of pods) {
+      out.push({ ...r, pod: p });
+    }
+  }
+  return out;
+}
+
+// Expands rate rows whose `type` / `tipo` field combines two container
+// types via "/" (e.g. "20'Flexi/DC", "20'DC/Flexi", "40'DC/Reefer") into
+// two rates with distinct types. "DC" is treated as a Dry alias and "RF"
+// as Reefer. Inter-Tank's catalog has only 4 valid types — invalid combos
+// (e.g. "20'Flexi/Reefer" → "20'Reefer") are emitted verbatim and the
+// downstream migrateContainerType pipeline coerces them to a valid
+// neighbour with a warning note. The IWS Seafreight sheet routinely uses
+// "20'Flexi/DC" to mean the rate applies to both 20'Flexi and 20'Dry.
+function expandCombinedEquipment(rates: RawRate[]): RawRate[] {
+  const splitRe =
+    /^(\d+)['′]?\s*(Flexi|Dry|DC|Reefer|RF)\s*\/\s*(?:(\d+)['′]?\s*)?(Flexi|Dry|DC|Reefer|RF)$/i;
+  const mapCat = (c: string): string => {
+    const upper = c.toUpperCase();
+    if (upper === "DC") return "Dry";
+    if (upper === "RF") return "Reefer";
+    return upper.charAt(0) + upper.slice(1).toLowerCase();
+  };
+  const out: RawRate[] = [];
+  for (const r of rates) {
+    const tipoRaw = toStr(r.type ?? r.tipo).trim();
+    if (!tipoRaw) {
+      out.push(r);
+      continue;
+    }
+    const m = tipoRaw.match(splitRe);
+    if (!m) {
+      out.push(r);
+      continue;
+    }
+    const size1 = m[1] ?? "";
+    const cat1 = m[2] ?? "";
+    const size2 = m[3] ?? size1;
+    const cat2 = m[4] ?? "";
+    const t1 = `${size1}'${mapCat(cat1)}`;
+    const t2 = `${size2}'${mapCat(cat2)}`;
+    if (t1 === t2) {
+      out.push({ ...r, type: t1, tipo: t1 });
+      continue;
+    }
+    out.push({ ...r, type: t1, tipo: t1 });
+    out.push({ ...r, type: t2, tipo: t2 });
+  }
+  return out;
+}
+
 // Expands rate rows whose `sl` field carries multiple carriers (e.g.
 // "OOCL or CMA", "OOCL/EVER") into one row per carrier. Pol/pod/type/sf/etc.
 // stay identical; only the carrier and sl strings differ. Returns the input
@@ -1725,10 +1800,47 @@ export default function NewRateFlow({
         ...excelBlockResult.subClientNotes,
       ];
 
-      if (excelText) {
+      // Fix 1: Excluded-kind phrases ("Doesn't included Disposal USD 190")
+      // sit inside Comments column cells on the rate-shaped sheet (KATAOKA
+      // fixture). They name a kind that's NOT bundled into SF AND carry
+      // its USD value — but the parser only saw the kind name and lost
+      // the value because no "=" separates them. Run the detector over
+      // every text source the LLM might see and strip the phrases so the
+      // LLM doesn't try to re-emit the value as a custom kind. The hits
+      // are merged into detected.kinds further below.
+      const excludedFromExcel = detectExcludedKindsFromText(excelText);
+      const excludedFromPaste = detectExcludedKindsFromText(cleanedPasteText);
+      const excludedFromDocx = detectExcludedKindsFromText(cleanedDocxText);
+      const excludedFromKindsBlock = detectExcludedKindsFromText(
+        cleanedExcelKindsBlock
+      );
+      const cleanedExcelText = excludedFromExcel.sanitizedText;
+      const cleanedPasteTextFinal = excludedFromPaste.sanitizedText;
+      const cleanedDocxTextFinal = excludedFromDocx.sanitizedText;
+      const cleanedExcelKindsBlockFinal =
+        excludedFromKindsBlock.sanitizedText;
+      // Dedupe excluded-kind hits across sources by (kindId|value) so the
+      // same phrase showing up in both excelText and excelKindsBlock
+      // doesn't double-count.
+      const excludedKindHitsMap = new Map<
+        string,
+        (typeof excludedFromExcel.hits)[number]
+      >();
+      for (const h of [
+        ...excludedFromExcel.hits,
+        ...excludedFromPaste.hits,
+        ...excludedFromDocx.hits,
+        ...excludedFromKindsBlock.hits,
+      ]) {
+        const key = `${h.kindId}|${h.value}`;
+        if (!excludedKindHitsMap.has(key)) excludedKindHitsMap.set(key, h);
+      }
+      const allExcludedKindHits = Array.from(excludedKindHitsMap.values());
+
+      if (cleanedExcelText) {
         // LCL + catalog sheets were already filtered out at read time —
         // excelText only contains rate-classified sheet content.
-        const chunks = chunkExcelCsv(excelText);
+        const chunks = chunkExcelCsv(cleanedExcelText);
         const items = chunks.map((c, i) => ({
           index: i + 1,
           content: `Datos del Excel (bloque ${i + 1} de ${chunks.length}):\n\n${c}`,
@@ -1762,14 +1874,14 @@ export default function NewRateFlow({
         ];
         const result = await callExtractApi(content, RATE_SYSTEM);
         extracted = collectBatchFromChunks(result.rows);
-      } else if (cleanedDocxText) {
+      } else if (cleanedDocxTextFinal) {
         const result = await callExtractApi(
-          `Contenido del documento Word:\n\n${cleanedDocxText}`,
+          `Contenido del documento Word:\n\n${cleanedDocxTextFinal}`,
           RATE_SYSTEM
         );
         extracted = collectBatchFromChunks(result.rows);
-      } else if (cleanedPasteText.trim()) {
-        const result = await callExtractApi(cleanedPasteText, RATE_SYSTEM);
+      } else if (cleanedPasteTextFinal.trim()) {
+        const result = await callExtractApi(cleanedPasteTextFinal, RATE_SYSTEM);
         extracted = collectBatchFromChunks(result.rows);
       }
 
@@ -1788,9 +1900,9 @@ export default function NewRateFlow({
       // patterns like "Flexitank Chile = USD 600" / "Inland FCA Mendoza
       // 20 = USD 2250" that RATE_SYSTEM often missed.
       const kindsSourceText =
-        cleanedExcelKindsBlock.trim() ||
-        (cleanedPasteText.trim() ? cleanedPasteText.trim() : "") ||
-        (cleanedDocxText.trim() ? cleanedDocxText.trim() : "");
+        cleanedExcelKindsBlockFinal.trim() ||
+        (cleanedPasteTextFinal.trim() ? cleanedPasteTextFinal.trim() : "") ||
+        (cleanedDocxTextFinal.trim() ? cleanedDocxTextFinal.trim() : "");
       let extraNotas = "";
       if (kindsSourceText) {
         const blockResult = await extractKindsFromBlock(kindsSourceText);
@@ -1820,9 +1932,9 @@ export default function NewRateFlow({
       const sweepText = [
         extracted.notas_globales ?? "",
         extraNotas,
-        cleanedExcelKindsBlock,
-        cleanedPasteText,
-        cleanedDocxText,
+        cleanedExcelKindsBlockFinal,
+        cleanedPasteTextFinal,
+        cleanedDocxTextFinal,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
       ]
         .filter(Boolean)
@@ -1830,6 +1942,43 @@ export default function NewRateFlow({
       const sweepResult = sweepKindsFromText(sweepText, detected.kinds);
       detected.kinds.push(...sweepResult.kinds);
       detected.kindValues.push(...sweepResult.kindValues);
+
+      // Merge excluded-kind hits captured by the Fix 1 sweep (KATAOKA
+      // Comments column phrases like "Doesn't included Disposal USD
+      // 190"). When the kind already exists in detected.kinds (e.g. the
+      // LLM saw "Disposal" as a label without a value), update the
+      // existing entry's value_unique. Otherwise emit a new kind def
+      // (predefined when matchKindByAlias resolved, custom otherwise).
+      for (const hit of allExcludedKindHits) {
+        const existing = detected.kinds.find((k) => k.id === hit.kindId);
+        if (!existing) {
+          const pred = PREDEFINED_KINDS.find((p) => p.id === hit.kindId);
+          const def: KindDef = pred ?? {
+            id: hit.kindId,
+            label: hit.kindLabel,
+            scope: "all",
+            by_size: false,
+            predefined: false,
+          };
+          detected.kinds.push(def);
+          detected.kindValues.push({
+            kind_id: hit.kindId,
+            value_unique: hit.value,
+          });
+        } else {
+          let kv = detected.kindValues.find((v) => v.kind_id === hit.kindId);
+          if (!kv) {
+            kv = { kind_id: hit.kindId };
+            detected.kindValues.push(kv);
+          }
+          if (existing.by_size) {
+            if (kv.value20 === undefined) kv.value20 = hit.value;
+            if (kv.value40 === undefined) kv.value40 = hit.value;
+          } else if (kv.value_unique === undefined) {
+            kv.value_unique = hit.value;
+          }
+        }
+      }
 
       // Merge precarriage hits captured by the client-side regex pre-pass
       // (Fix 5). When multiple hits target the same kind id, accumulate
@@ -1907,10 +2056,10 @@ export default function NewRateFlow({
       // textarea defaults to empty so the user only sees content
       // they care about.
       const fullText = [
-        excelText,
-        cleanedExcelKindsBlock,
-        cleanedPasteText,
-        cleanedDocxText,
+        cleanedExcelText,
+        cleanedExcelKindsBlockFinal,
+        cleanedPasteTextFinal,
+        cleanedDocxTextFinal,
         ...extracted.rates.map((r) => toStr(r.notas ?? r.notes)),
       ]
         .filter(Boolean)
@@ -1983,8 +2132,16 @@ export default function NewRateFlow({
         setShowAutoInsertBanner(false);
       }
 
+      // Pre-expansion order matters: equipment combos first (so a
+      // multi-POD row carrying "20'Flexi/DC" produces 4 rows after
+      // POD split, not 2), then multi-POD, then multi-carrier. Each
+      // pass operates on rows produced by the prior pass — a row with
+      // type="20'Flexi/DC", pod="Antwerp/Rotterdam", sl="OOCL or CMA"
+      // ends up as 2 (eq) × 2 (pod) × 2 (carrier) = 8 distinct rates.
+      const equipmentExpanded = expandCombinedEquipment(extracted.rates);
+      const podExpanded = expandMultiPod(equipmentExpanded);
       // Multi-carrier rows clone into one row per carrier.
-      const expanded = expandMultiCarrier(extracted.rates);
+      const expanded = expandMultiCarrier(podExpanded);
       // POD inheritance for FCA / EXW Argentine rates: when the batch
       // has a single unique POD across the maritime (non-FCA) rows, an
       // FCA row without an explicit POD inherits it (Valle Redondo

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import { Button } from "@/components/ui/Button";
 import { useLocalStore } from "./useLocalStore";
@@ -319,6 +319,24 @@ export default function RatesTab() {
     setMode("list");
     setEditingRate(null);
   };
+
+  // Auto-close the Edit modal when the rate it points at vanishes from
+  // storage. Triggered by bulk delete (handleBulkDelete → removeMany), the
+  // single-row Eliminar button on a different rate that happens to share
+  // state, or any other future mutation that removes rates while a modal
+  // is open. Without this, the user would be left staring at a modal
+  // showing data for a rate that no longer exists, and clicking Guardar
+  // would resurrect a ghost. Toast tells them what happened so the close
+  // doesn't feel like a UI glitch.
+  useEffect(() => {
+    if (mode !== "edit" || !editingRate) return;
+    const stillExists = rawItems.some((r) => r.id === editingRate.id);
+    if (!stillExists) {
+      setMode("list");
+      setEditingRate(null);
+      toast("La tarifa que estabas editando fue eliminada", { icon: "ℹ️" });
+    }
+  }, [mode, editingRate, rawItems]);
 
   if (!hydrated) {
     return <div className="text-gray-500 py-8 text-center">Cargando tarifas...</div>;

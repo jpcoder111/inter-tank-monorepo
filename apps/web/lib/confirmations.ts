@@ -92,7 +92,15 @@ export async function submitConfirmation(formData: FormData) {
     }
 
     if (!response.ok) {
-      throw new Error(`Error: ${response.status} ${response.statusText}`);
+      let body = "";
+      try {
+        body = await response.text();
+      } catch {
+        body = "<unable to read response body>";
+      }
+      throw new Error(
+        `Backend ${response.status} ${response.statusText}: ${body}`
+      );
     }
 
     const blob = await response.blob();

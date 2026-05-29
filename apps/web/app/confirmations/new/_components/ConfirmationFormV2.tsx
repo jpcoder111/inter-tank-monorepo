@@ -81,7 +81,15 @@ export default function ConfirmationFormV2() {
     filename: string,
     contentType: string
   ) => {
-    const binaryString = atob(base64Data);
+    if (!base64Data) {
+      throw new Error("No se recibió el archivo del servidor");
+    }
+    const sanitized = base64Data
+      .replace(/^data:[^;]+;base64,/, "")
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .replace(/\s+/g, "");
+    const binaryString = atob(sanitized);
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
       bytes[i] = binaryString.charCodeAt(i);
